@@ -1,15 +1,14 @@
 use http_body_util::{BodyExt, combinators::BoxBody};
 use http_body_util::{Empty, Full};
-use hyper::body::{Body, Bytes};
 use hyper::body::Frame;
+use hyper::body::{Body, Bytes};
 use hyper::server::conn::http1;
-use pin_project::pin_project;
-use tokio::time::Sleep;
-use tower::{ServiceBuilder, Service};
 use hyper::{Method, StatusCode};
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
+use local_ip_address;
+use pin_project::pin_project;
 use std::alloc::LayoutError;
 use std::convert::Infallible;
 use std::error::Error;
@@ -19,7 +18,8 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::net::TcpListener;
-use local_ip_address;
+use tokio::time::Sleep;
+use tower::{Service, ServiceBuilder};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -88,7 +88,7 @@ fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
 }
 
 #[derive(Debug, Clone)]
-pub struct Logger <S>{
+pub struct Logger<S> {
     inner: S,
 }
 
@@ -98,7 +98,8 @@ impl<S> Logger<S> {
     }
 }
 
-impl<S, R> Service<R> for Logger<S> // R should be concrete here so we can read its fields, in this case Request<Incoming>
+impl<S, R> Service<R> for Logger<S>
+// R should be concrete here so we can read its fields, in this case Request<Incoming>
 where
     S: Service<R> + Clone,
 {
@@ -111,7 +112,10 @@ where
         self.inner.call(req)
     }
 
-    fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
     }
 }
@@ -155,8 +159,8 @@ impl<S> RateLimit<S> {
 #[derive(Debug)]
 enum RateLimitDecision {
     Reject,
-    Delay  (Arc<Mutex<usize>>),
-    Allow  (Arc<Mutex<usize>>),
+    Delay(Arc<Mutex<usize>>),
+    Allow(Arc<Mutex<usize>>),
 }
 
 impl<S, R> Service<R> for RateLimit<S>
@@ -176,41 +180,46 @@ where
                 *resp.status_mut() = StatusCode::TOO_MANY_REQUESTS;
                 RateLimitFuture::Rejected(std::future::ready(Ok(resp)))
             }
-            RateLimitDecision::Delay(count) => {
-                RateLimitFuture::Delayed { 
-                    sleep: tokio::time::sleep(self.delay_duration), 
-                    inner: Some(self.inner.call(req)),
-                    count: count.clone()
-                }
-            }
-            RateLimitDecision::Allow(count) => {
-                RateLimitFuture::Processing { 
-                    inner: self.inner.call(req),
-                    count: count.clone()
-                }
-            }   
+            RateLimitDecision::Delay(count) => RateLimitFuture::Delayed {
+                sleep: tokio::time::sleep(self.delay_duration),
+                inner: Some(self.inner.call(req)),
+                count: count.clone(),
+            },
+            RateLimitDecision::Allow(count) => RateLimitFuture::Processing {
+                inner: self.inner.call(req),
+                count: count.clone(),
+            },
         }
     }
 
-    fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
     }
 }
 
 #[pin_project(project = RateLimitFutureProj)]
 pub enum RateLimitFuture<F, Resp, E> {
-    Rejected (#[pin] std::future::Ready<Result<Resp, E>>),
+    Rejected(#[pin] std::future::Ready<Result<Resp, E>>),
     Delayed {
         #[pin]
         sleep: Sleep,
         // We dont pin this because we only pass it through to the next state
-        inner: Option<F>, 
-        count: Arc<Mutex<usize>>
+        inner: Option<F>,
+        count: Arc<Mutex<usize>>,
     },
-    Processing{
-        #[pin] 
+    Processing {
+        #[pin]
         inner: F,
-        count: Arc<Mutex<usize>>
+        count: Arc<Mutex<usize>>,
+    },
+    Waiting {
+        #[pin]
+        sleep: Sleep,
+        result: Option<Result<Resp, E>>,
+        count: Arc<Mutex<usize>>,
     },
 }
 
@@ -227,7 +236,11 @@ where
                     return reject_future.poll(cx);
                 }
 
-                RateLimitFutureProj::Delayed { sleep, inner, count } => {
+                RateLimitFutureProj::Delayed {
+                    sleep,
+                    inner,
+                    count,
+                } => {
                     // Poll the delay first
                     match sleep.poll(cx) {
                         Poll::Ready(()) => {
@@ -235,24 +248,45 @@ where
                             let inner_fut = inner.take().expect("polled after completion");
                             let clone_count = count.clone();
                             self.set(RateLimitFuture::Processing {
-                                inner: inner_fut, 
-                                count: clone_count
+                                inner: inner_fut,
+                                count: clone_count,
                             });
-                            
+
                             continue;
                         }
                         Poll::Pending => return Poll::Pending,
                     }
                 }
 
-                RateLimitFutureProj::Processing{ inner, count } => {
+                RateLimitFutureProj::Processing { inner, count } => {
                     match inner.poll(cx) {
                         Poll::Ready(res) => {
-                            let mut count = count.lock().unwrap();
-                            *count -= 1;
-                            return Poll::Ready(res);
+                            // Instead of returning immediately, wait a short duration
+                            let sleep = tokio::time::sleep(Duration::from_millis(500)); // adjust as needed
+                            let clone_count = count.clone();
+                            self.set(RateLimitFuture::Waiting {
+                                sleep,
+                                result: Some(res),
+                                count: clone_count,
+                            });
+                            continue;
                         }
-                        Poll::Pending => return Poll::Pending
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+
+                RateLimitFutureProj::Waiting {
+                    sleep,
+                    result,
+                    count,
+                } => {
+                    match sleep.poll(cx) {
+                        Poll::Ready(()) => {
+                            let mut guard = count.lock().unwrap();
+                            *guard -= 1; // decrement after delay
+                            return Poll::Ready(result.take().unwrap());
+                        }
+                        Poll::Pending => return Poll::Pending,
                     }
                 }
             }
@@ -287,10 +321,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
             let svc = tower::service_fn(echo);
             let svc = ServiceBuilder::new()
-            .layer_fn(Logger::new)
-            .layer_fn(|inner| RateLimit::new(inner, 1))
-            .service(svc);
-            
+                .layer_fn(Logger::new)
+                .layer_fn(|inner| RateLimit::new(inner, 1))
+                .service(svc);
+
             let svc = TowerToHyperService::new(svc);
 
             if let Err(err) = http1::Builder::new().serve_connection(io, svc).await {
