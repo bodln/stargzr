@@ -107,50 +107,67 @@ where
     type Future = S::Future;
     type Response = S::Response;
 
-    fn call(&mut self, req: R) -> Self::Future {
-        println!("Request received and logged.");
-        self.inner.call(req)
-    }
-
     fn poll_ready(
         &mut self,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
     }
+
+    fn call(&mut self, req: R) -> Self::Future {
+        println!("Request received and logged.");
+        self.inner.call(req)
+    }
 }
 
 #[derive(Clone)]
 pub struct RateLimit<S> {
     inner: S,
-    request_per_second: usize,
+    request_per_delay: usize,
     delay_duration: Duration,
     current_count: Arc<Mutex<usize>>,
+    address: SocketAddr,
 }
 
 impl<S> RateLimit<S> {
-    pub fn new(inner: S, request_per_second: usize) -> Self {
+    pub fn new(inner: S, request_per_delay: usize, address: SocketAddr) -> Self {
         Self {
             inner,
-            request_per_second,
+            request_per_delay,
             delay_duration: Duration::from_secs(1),
             current_count: Arc::new(Mutex::new(0)),
+            address: address,
+        }
+    }
+
+    pub fn with_shared_counter(
+        inner: S,
+        request_per_delay: usize,
+        address: SocketAddr,
+        shared_counter: Arc<Mutex<usize>>,
+    ) -> Self {
+        Self {
+            inner,
+            request_per_delay,
+            delay_duration: Duration::from_secs(1),
+            address: address,
+            current_count: shared_counter,
         }
     }
 
     fn check_rate_limit(&self) -> RateLimitDecision {
         let mut count = self.current_count.lock().unwrap();
 
-        if *count >= self.request_per_second * 3 {
-            println!("[RateLimit] REJECTING request. Current count: {}", *count);
+        if *count >= self.request_per_delay * 3 {
+            println!("[RateLimit] REJECTING request. Current count: {}, from: {}", *count, self.address);
             RateLimitDecision::Reject
-        } else if *count >= self.request_per_second + 1 {
+        } else if *count >= self.request_per_delay + 1 {
             *count += 1;
-            println!("[RateLimit] DELAYING request. Current count: {}", *count);
+            println!("[RateLimit] DELAYING request. Current count: {}, from: {}", *count, self.address);
             RateLimitDecision::Delay(self.current_count.clone())
         } else {
             *count += 1;
-            println!("[RateLimit] ALLOWING request. Current count: {}", *count);
+            println!("[RateLimit] ALLOWING request. Current count: {}, from: {}", *count, self.address);
             RateLimitDecision::Allow(self.current_count.clone())
         }
     }
@@ -165,12 +182,19 @@ enum RateLimitDecision {
 
 impl<S, R> Service<R> for RateLimit<S>
 where
-    S: Service<R, Response = Response<BoxBody<Bytes, hyper::Error>>> + Clone + Send + 'static,
-    R: Send + 'static,
+S: Service<R, Response = Response<BoxBody<Bytes, hyper::Error>>> + Clone + Send + 'static,
+R: Send + 'static,
 {
     type Error = S::Error;
     type Response = S::Response;
     type Future = RateLimitFuture<S::Future, S::Response, S::Error>;
+    
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
 
     fn call(&mut self, req: R) -> Self::Future {
         match self.check_rate_limit() {
@@ -190,13 +214,6 @@ where
                 count: count.clone(),
             },
         }
-    }
-
-    fn poll_ready(
-        &mut self,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx)
     }
 }
 
@@ -262,7 +279,7 @@ where
                     match inner.poll(cx) {
                         Poll::Ready(res) => {
                             // Instead of returning immediately, wait a short duration
-                            let sleep = tokio::time::sleep(Duration::from_millis(500)); // adjust as needed
+                            let sleep = tokio::time::sleep(Duration::from_millis(200)); // adjust as needed
                             let clone_count = count.clone();
                             self.set(RateLimitFuture::Waiting {
                                 sleep,
@@ -294,10 +311,74 @@ where
     }
 }
 
+#[derive(Clone)]
+pub struct AsyncRequest<F> {
+    inner: F,
+}
+
+// maybe try
+// run this layer first
+// have it create a task that polls inner 
+// each task returns its result to a channel (mpsc or oneshot)
+// then we somehow display and coordinate reusls as they come 
+// maybe in creating the middleware struct we create a task with the consumer that returns stuff idk
+
+impl<F> AsyncRequest<F> {
+    pub fn new(inner: F) -> Self{
+        Self { inner: inner }
+    }
+}
+
+impl<F, R> Service<R> for AsyncRequest<F>
+where
+    F: Service<R, Response = Response<BoxBody<Bytes, hyper::Error>>> + Clone + Send + 'static,
+    F::Future: Send + 'static,
+    F::Error: Send + 'static,
+    R: Send + 'static,
+{
+    type Response = F::Response;
+
+    type Error = F::Error;
+
+    type Future = AsyncRequestFuture<F::Future>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: R) -> Self::Future {
+        let future = self.inner.call(req);
+        AsyncRequestFuture { inner: future }
+    }
+}
+
+#[pin_project(project = AsyncRequestFutureProj)]
+pub struct AsyncRequestFuture<F> {
+    #[pin]
+    inner: F,
+}
+
+impl<F, Resp, E> Future for AsyncRequestFuture<F> 
+where 
+    F: Future<Output = Result<Resp, E>> + Send + 'static,
+    Resp: Send + 'static,
+    E: Send + 'static,
+{
+    type Output = Result<Resp, E>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.project();
+        
+        this.inner.poll(cx)
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let port = 7878;
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
+
+    let global_count = Arc::new(Mutex::new(0));
 
     // We create a TcpListener and bind it
     let listener = TcpListener::bind(addr).await?;
@@ -315,14 +396,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // `hyper::rt` IO traits.
         let io = TokioIo::new(stream);
 
-        // Spawn a tokio task to serve multiple connections concurrently
+        let global_count_clone = global_count.clone();
+
         tokio::task::spawn(async move {
             print!("Accepted connection from: {}\n", address);
 
             let svc = tower::service_fn(echo);
             let svc = ServiceBuilder::new()
+                .layer_fn(AsyncRequest::new)
                 .layer_fn(Logger::new)
-                .layer_fn(|inner| RateLimit::new(inner, 1))
+                .layer_fn(move |inner| RateLimit::with_shared_counter(inner, 1, address.clone(), global_count_clone.clone())) // global rate limit
+                //.layer_fn(|inner| RateLimit::new(inner, 1, address.clone()))
                 .service(svc);
 
             let svc = TowerToHyperService::new(svc);
@@ -330,15 +414,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             if let Err(err) = http1::Builder::new().serve_connection(io, svc).await {
                 eprintln!("server error: {}", err);
             }
-
-            // Finally, we bind the incoming connection to our `hello` service
-            // if let Err(err) = http1::Builder::new()
-            //     // `service_fn` converts our function in a `Service`
-            //     .serve_connection(io, service_fn(echo))
-            //     .await
-            // {
-            //     eprintln!("Error serving connection: {:?}", err);
-            // }
         });
     }
 }
