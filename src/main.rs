@@ -16,7 +16,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Sleep;
 use tower::{Service, ServiceBuilder};
 
@@ -25,13 +25,6 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 async fn echo(
     req: Request<hyper::body::Incoming>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
-    let sleep_duration = Duration::from_millis(2500); 
-    let async_sleep = async move {
-        tokio::time::sleep(sleep_duration).await;
-    };
-
-    async_sleep.await;
-
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/") => Ok(Response::new(full("Try POSTing data to /echo"))),
         (&Method::POST, "/echo") => Ok(Response::new(req.into_body().boxed())),
@@ -146,9 +139,7 @@ where
         let future = self.inner.call(req);
 
         // Spawn the entire service call chain in a new task
-        let handle = tokio::task::spawn(async move { 
-            future.await 
-        });
+        let handle = tokio::task::spawn(async move { future.await });
 
         SpawnRequestFuture { handle }
     }
@@ -187,11 +178,14 @@ pub struct RateLimit<S> {
 }
 
 impl<S> RateLimit<S> {
-    pub fn new(inner: S, request_per_delay: usize, address: SocketAddr) -> Self {
+    /// This constructor allows each connection to have its own rate limiting counter.
+    /// Since http1 requires each connection request to produce a response before it takes another request,
+    /// the unique counter never goes up past 1 for any connection.
+    pub fn new(inner: S, request_per_delay: usize, delay: Duration, address: SocketAddr) -> Self {
         Self {
             inner,
             request_per_delay,
-            delay_duration: Duration::from_millis(5000),
+            delay_duration: delay,
             current_count: Arc::new(Mutex::new(0)),
             address,
         }
@@ -200,13 +194,14 @@ impl<S> RateLimit<S> {
     pub fn with_shared_counter(
         inner: S,
         request_per_delay: usize,
+        delay: Duration,
         address: SocketAddr,
         shared_counter: Arc<Mutex<usize>>,
     ) -> Self {
         Self {
             inner,
             request_per_delay,
-            delay_duration: Duration::from_secs(1),
+            delay_duration: delay,
             address,
             current_count: shared_counter,
         }
@@ -271,9 +266,11 @@ where
                 RateLimitFuture::Rejected(std::future::ready(Ok(resp)))
             }
             RateLimitDecision::Delay(count) => {
-                // Spawn a task to decrement after the delay window
                 let count_clone = count.clone();
                 let delay = self.delay_duration;
+
+                // This essentially does nothing but give more time to better simulate the work of the middleware
+
                 // tokio::task::spawn(async move {
                 //     tokio::time::sleep(delay).await;
                 //     let mut guard = count_clone.lock().unwrap();
@@ -288,9 +285,11 @@ where
                 }
             }
             RateLimitDecision::Allow(count) => {
-                // Spawn a task to decrement after the rate limit window (1 second)
                 let count_clone = count.clone();
                 let delay = self.delay_duration;
+
+                // This essentially does nothing but give more time to better simulate the work of the middleware
+
                 // tokio::task::spawn(async move {
                 //     tokio::time::sleep(delay).await;
                 //     let mut guard = count_clone.lock().unwrap();
@@ -369,6 +368,12 @@ where
     }
 }
 
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("Failed to install CTRL+C signal handler");
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let port = 7878;
@@ -376,54 +381,131 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let global_count = Arc::new(Mutex::new(0));
 
-    let listener = TcpListener::bind(addr).await?;
+    let listener = TcpListener::bind(addr).await.unwrap();
+
+    let mut help_ip = String::from("oops");
 
     match local_ip_address::local_ip() {
-        Ok(ip) => println!("Local IP address: {}:{}", ip, port),
+        Ok(ip) => {
+            help_ip = ip.to_string();
+            println!("Local IP address: {}:{}", ip, port);
+        }
         Err(e) => eprintln!("Error: {}", e),
     }
 
+    let graceful = Arc::new(hyper_util::server::graceful::GracefulShutdown::new());
+    let mut signal = std::pin::pin!(shutdown_signal());
+
+    // Client
+    tokio::task::spawn(async move {
+        let uri_str = format!("http://{}:{}", help_ip, port);
+
+        let uri: hyper::Uri = uri_str.parse().expect("Invalid URI");
+
+        let host = uri.host().expect("Uri has no host");
+        let port = uri.port_u16().unwrap_or(8080);
+
+        let address = format!("{}:{}", host, port);
+
+        println!("Client prepared for host={}:{}", host, port);
+
+        let stream = TcpStream::connect(address).await;
+    });
+
     loop {
-        let (stream, address) = listener.accept().await?;
-        let io = TokioIo::new(stream);
+        tokio::select! {
+            Ok((stream, address)) = listener.accept() => {
+                let io = TokioIo::new(stream);
+                let global_count_clone = global_count.clone();
 
-        let global_count_clone = global_count.clone();
+                let graceful_clone = graceful.clone();
 
-        tokio::task::spawn(async move {
-            println!("Accepted connection from: {}", address);
+                tokio::task::spawn(async move {
+                    println!("Accepted connection from: {}", address);
 
-            let requests_per_delay = 1;
+                    let delay = Duration::from_millis(1000);
+                    let requests_per_delay = 2;
 
-            let svc = tower::service_fn(echo);
-            let svc = ServiceBuilder::new()
-                .layer_fn(SpawnRequest::new)
-                .layer_fn(Logger::new)
-                .layer_fn(move |inner| {
-                    RateLimit::with_shared_counter(inner, requests_per_delay, address, global_count_clone.clone())
-                })
-                .service(svc);
+                    let svc = tower::service_fn(echo);
+                    let svc = ServiceBuilder::new()
+                        .layer_fn(SpawnRequest::new)
+                        .layer_fn(Logger::new)
+                        .layer_fn(move |inner| {
+                            RateLimit::with_shared_counter(inner, requests_per_delay, delay, address, global_count_clone.clone())
+                        })
+                        .service(svc);
 
-            // OPTION 2: Global rate limiting (uncomment to use)
-            // All connections share the same counter
-            /*
-            let svc = tower::service_fn(echo);
-            let svc = ServiceBuilder::new()
-                .layer_fn(SpawnRequest::new)
-                .layer_fn(Logger::new)
-                .layer_fn(move |inner| RateLimit::with_shared_counter(
-                    inner,
-                    5,  // Allow 5 requests per second globally
-                    address,
-                    global_count_clone.clone()
-                ))
-                .service(svc);
-            */
+                    // OPTION 2: Global rate limiting (uncomment to use)
+                    // All connections share the same counter
+                    /*
+                    let svc = tower::service_fn(echo);
+                    let svc = ServiceBuilder::new()
+                        .layer_fn(SpawnRequest::new)
+                        .layer_fn(Logger::new)
+                        .layer_fn(move |inner| RateLimit::with_shared_counter(
+                            inner,
+                            5,  // Allow 5 requests per second globally
+                            address,
+                            global_count_clone.clone()
+                        ))
+                        .service(svc);
+                    */
 
-            let svc = TowerToHyperService::new(svc);
+                    let svc = TowerToHyperService::new(svc);
 
-            if let Err(err) = http1::Builder::new().serve_connection(io, svc).await {
-                eprintln!("server error: {}", err);
-            }
-        });
+                    let conn = http1::Builder::new().serve_connection(io, svc);
+
+                    let shutdown = graceful_clone.watch(conn);
+
+                    if let Err(err) = shutdown.await {
+                        eprintln!("Server error serving connection: {}", err);
+                    }
+                });
+            },
+
+            _ = &mut signal => {
+                drop(listener);
+                eprintln!("Graceful shutdown signal received");
+                break;
+            },
+        }
     }
+
+    Ok(())
 }
+
+// Option A — Use HTTP/2 (multiplexing streams)
+
+// HTTP/2 allows many independent request/response streams over the same TCP connection; the server can process them concurrently and send frames interleaved.
+// If you want concurrent requests over one connection, use HTTP/2. Hyper supports HTTP/2; you can:
+// enable TLS and let clients negotiate h2, or
+// implement h2c (HTTP/2 over cleartext) if you control client and server (a bit more work).
+// This is the standard, correct solution for per-connection parallelism.
+
+// Option B — Use multiple TCP connections (load-tool style)
+
+// Clients open N connections (e.g. hey -c N), each connection processed concurrently by your server. This is what most load-testers do by default to generate concurrency on HTTP/1.1.
+// Simple and effective for testing and many real-world setups (browsers open multiple connections).
+
+// Option C — Implement a request-queue + response-serializer (hard)
+
+// You could accept requests on the connection, spawn background tasks to handle them, and then serialize responses back onto the connection in the correct order.
+// This is effectively reimplementing a multiplexing/streaming protocol and is complex and error-prone (you must obey HTTP semantics, handle ordering, backpressure, chunking, connection flow-control, etc.). Not recommended unless you need that exact behavior and know what you’re doing.
+
+// Option D — Switch protocol (WebSocket / custom multiplexing)
+
+// Use WebSocket or a custom protocol that allows multiple concurrent logical requests on one TCP connection. Also requires client changes.
+
+// Option E — Pipelining
+
+// HTTP/1.1 pipelining lets a client send multiple requests over the same connection without waiting for each response.
+// The server reads requests in order and can start processing each in a separate task, though responses still must be sent in order.
+// To implement it, you’d buffer incoming requests from the connection, spawn a task for each to run your middleware stack,
+// and then write responses back to the stream in the original request order.
+// This allows your SpawnRequest middleware to actually run requests concurrently instead of sequentially.
+
+// Option F - HTTP streaming or chunked transfer encoding
+
+// Instead of waiting for the full response before sending it, the server can first send the headers and then gradually stream the body in chunks.
+// This lets the client start receiving data immediately, and your server can start processing large bodies piece by piece rather than buffering everything in memory.
+// In practice, you’d use a Body type that implements Stream<Item = Bytes> and push chunks as they’re ready.
