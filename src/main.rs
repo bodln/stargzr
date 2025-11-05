@@ -180,7 +180,8 @@ pub struct RateLimit<S> {
 impl<S> RateLimit<S> {
     /// This constructor allows each connection to have its own rate limiting counter.
     /// Since http1 requires each connection request to produce a response before it takes another request,
-    /// the unique counter never goes up past 1 for any connection.
+    /// the unique counter never goes up past 1 for any connection. 
+    /// Basically a no op for http1
     pub fn new(inner: S, request_per_delay: usize, delay: Duration, address: SocketAddr) -> Self {
         Self {
             inner,
@@ -435,22 +436,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         })
                         .service(svc);
 
-                    // OPTION 2: Global rate limiting (uncomment to use)
-                    // All connections share the same counter
-                    /*
-                    let svc = tower::service_fn(echo);
-                    let svc = ServiceBuilder::new()
-                        .layer_fn(SpawnRequest::new)
-                        .layer_fn(Logger::new)
-                        .layer_fn(move |inner| RateLimit::with_shared_counter(
-                            inner,
-                            5,  // Allow 5 requests per second globally
-                            address,
-                            global_count_clone.clone()
-                        ))
-                        .service(svc);
-                    */
-
                     let svc = TowerToHyperService::new(svc);
 
                     let conn = http1::Builder::new().serve_connection(io, svc);
@@ -482,19 +467,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 // implement h2c (HTTP/2 over cleartext) if you control client and server (a bit more work).
 // This is the standard, correct solution for per-connection parallelism.
 
+
 // Option B — Use multiple TCP connections (load-tool style)
 
 // Clients open N connections (e.g. hey -c N), each connection processed concurrently by your server. This is what most load-testers do by default to generate concurrency on HTTP/1.1.
 // Simple and effective for testing and many real-world setups (browsers open multiple connections).
+
 
 // Option C — Implement a request-queue + response-serializer (hard)
 
 // You could accept requests on the connection, spawn background tasks to handle them, and then serialize responses back onto the connection in the correct order.
 // This is effectively reimplementing a multiplexing/streaming protocol and is complex and error-prone (you must obey HTTP semantics, handle ordering, backpressure, chunking, connection flow-control, etc.). Not recommended unless you need that exact behavior and know what you’re doing.
 
+
 // Option D — Switch protocol (WebSocket / custom multiplexing)
 
 // Use WebSocket or a custom protocol that allows multiple concurrent logical requests on one TCP connection. Also requires client changes.
+
 
 // Option E — Pipelining
 
@@ -503,6 +492,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 // To implement it, you’d buffer incoming requests from the connection, spawn a task for each to run your middleware stack,
 // and then write responses back to the stream in the original request order.
 // This allows your SpawnRequest middleware to actually run requests concurrently instead of sequentially.
+
 
 // Option F - HTTP streaming or chunked transfer encoding
 
