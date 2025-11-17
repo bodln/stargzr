@@ -429,6 +429,7 @@ impl<T> DerefMut for Guard<'_, T> {
     }
 }
 
+// Only way of unlocking the SpinLock is by dropping the Guard
 impl<T> Drop for Guard<'_, T> {
     fn drop(&mut self) {
         self.lock.locked.store(false, Release);
