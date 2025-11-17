@@ -9,10 +9,16 @@ use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
 use local_ip_address;
 use pin_project::pin_project;
+use std::cell::UnsafeCell;
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering::Acquire;
+use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::Ordering::Release;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -180,7 +186,7 @@ pub struct RateLimit<S> {
 impl<S> RateLimit<S> {
     /// This constructor allows each connection to have its own rate limiting counter.
     /// Since http1 requires each connection request to produce a response before it takes another request,
-    /// the unique counter never goes up past 1 for any connection. 
+    /// the unique counter never goes up past 1 for any connection.
     /// Basically a no op for http1
     pub fn new(inner: S, request_per_delay: usize, delay: Duration, address: SocketAddr) -> Self {
         Self {
@@ -373,6 +379,60 @@ async fn shutdown_signal() {
     tokio::signal::ctrl_c()
         .await
         .expect("Failed to install CTRL+C signal handler");
+}
+
+pub struct SpinLock<T> {
+    locked: AtomicBool,
+    value: UnsafeCell<T>,
+}
+
+unsafe impl<T> Sync for SpinLock<T> where T: Send {}
+
+impl<T> SpinLock<T> {
+    pub const fn new(value: T) -> Self {
+        Self {
+            locked: AtomicBool::new(false),
+            value: UnsafeCell::new(value),
+        }
+    }
+    pub fn lock(&self) -> Guard<T> {
+        while self.locked.swap(true, Acquire) {
+            std::hint::spin_loop();
+        }
+        Guard { lock: self }
+    }
+    /// Safety: The &mut T from lock() must be gone!
+    /// (And no cheating by keeping reference to fields of that T around!)
+    pub unsafe fn unlock(&self) {
+        self.locked.store(false, Release);
+    }
+}
+
+// Forthe SpinLock
+pub struct Guard<'a, T> {
+    lock: &'a SpinLock<T>,
+}
+
+impl<T> Deref for Guard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        // Safety: The very existence of this Guard
+        // guarantees we've exclusively locked the lock.
+        unsafe { &*self.lock.value.get() }
+    }
+}
+impl<T> DerefMut for Guard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        // Safety: The very existence of this Guard
+        // guarantees we've exclusively locked the lock.
+        unsafe { &mut *self.lock.value.get() }
+    }
+}
+
+impl<T> Drop for Guard<'_, T> {
+    fn drop(&mut self) {
+        self.lock.locked.store(false, Release);
+    }
 }
 
 #[tokio::main]
