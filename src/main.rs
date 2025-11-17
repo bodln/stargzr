@@ -128,10 +128,11 @@ impl<S> SpawnRequest<S> {
 
 impl<S, R> Service<R> for SpawnRequest<S>
 where
-    S: Service<R, Response = Response<BoxBody<Bytes, hyper::Error>>> + Clone + Send + 'static,
+    S: Service<R> + Clone + Send + 'static,
+    S::Response: Send + 'static,
     S::Future: Send + 'static,
     S::Error: Send + 'static,
-    R: Send + 'static,
+    //R: Send + 'static,
 {
     type Response = S::Response;
     type Error = S::Error;
@@ -144,7 +145,7 @@ where
     fn call(&mut self, req: R) -> Self::Future {
         let future = self.inner.call(req);
 
-        // Spawn the entire service call chain in a new task
+        // Spawn the entire service call chain in a new task, which doesnt improve anything right now with http1
         let handle = tokio::task::spawn(async move { future.await });
 
         SpawnRequestFuture { handle }
@@ -198,6 +199,7 @@ impl<S> RateLimit<S> {
         }
     }
 
+    /// This one works as it should tho
     pub fn with_shared_counter(
         inner: S,
         request_per_delay: usize,
@@ -250,6 +252,10 @@ enum RateLimitDecision {
 
 impl<S, R> Service<R> for RateLimit<S>
 where
+    // Response = Response<BoxBody<Bytes, hyper::Error>> because it ensures that whats returned from inner is in the same format as the response i am making by hand
+    // By constraining S::Response = Response<BoxBody<Bytes, hyper::Error>>, we:
+    // Unify the type for both the inner service and the manually created response.
+    // The compiler can verify that all enum variants return the same Response type.
     S: Service<R, Response = Response<BoxBody<Bytes, hyper::Error>>> + Clone + Send + 'static,
     R: Send + 'static,
 {
@@ -286,7 +292,7 @@ where
                 // });
 
                 RateLimitFuture::Delayed {
-                    sleep: tokio::time::sleep(self.delay_duration),
+                    sleep: tokio::time::sleep(self.delay_duration), // sleep countdown begins from here apperently 
                     inner: Some(self.inner.call(req)),
                     count: count_clone,
                 }
