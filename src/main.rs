@@ -257,7 +257,7 @@ where
     // Unify the type for both the inner service and the manually created response.
     // The compiler can verify that all enum variants return the same Response type.
     S: Service<R, Response = Response<BoxBody<Bytes, hyper::Error>>> + Clone + Send + 'static,
-    R: Send + 'static,
+    // R: Send + 'static, // no need for it to be send because we arent moving it anywhere
 {
     type Error = S::Error;
     type Response = S::Response;
