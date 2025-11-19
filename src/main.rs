@@ -12,6 +12,7 @@ use pin_project::pin_project;
 use std::cell::UnsafeCell;
 use std::convert::Infallible;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
@@ -26,6 +27,7 @@ use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Sleep;
 use tower::{Service, ServiceBuilder};
+use std::thread::{self, Thread};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -402,7 +404,7 @@ impl<T> SpinLock<T> {
             value: UnsafeCell::new(value),
         }
     }
-    pub fn lock(&self) -> Guard<T> {
+    pub fn lock(&'_ self) -> Guard<'_, T> {
         while self.locked.swap(true, Acquire) {
             std::hint::spin_loop();
         }
@@ -442,6 +444,25 @@ impl<T> Drop for Guard<'_, T> {
         self.lock.locked.store(false, Release);
     }
 }
+
+/// Can be done with an Arc, which even tho more convenient, allocates memory for the hidden channel
+/// The way we did do it leaves it up to the user to allocate everything that needs to be allocated
+/// Which is then shared via borrowing
+///
+/// The reduction in convenience compared to the Arc-based version is quite minimal:
+/// we only needed one more line to manually create a Channel object. Note, however,
+/// how the channel has to be created before the scope, to prove to the compiler that its
+/// existence will outlast both the sender and receiver.
+///
+/// Alternate implementation with hidden Arc allocation:
+///
+/// pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
+///     let a = Arc::new(Channel {
+///         message: UnsafeCell::new(MaybeUninit::uninit()),
+///         ready: AtomicBool::new(false),
+///     });
+///     (Sender { channel: a.clone() }, Receiver { channel: a })
+/// }
 pub struct Channel<T> {
     message: UnsafeCell<MaybeUninit<T>>,
     ready: AtomicBool,
@@ -449,11 +470,24 @@ pub struct Channel<T> {
 unsafe impl<T> Sync for Channel<T> where T: Send {}
 pub struct Sender<'a, T> {
     channel: &'a Channel<T>,
+    receiving_thread: Thread,
 }
 pub struct Receiver<'a, T> {
     channel: &'a Channel<T>,
+    /// If the Receiver object is sent between threads.
+    /// The Sender would be unaware of that and would still refer to the
+    /// thread that originally held the Receiver.
+    ///
+    /// A PhantomData<*const ()> does the job, since a raw
+    /// pointer, such as *const (), does not implement Send  
+    _no_send: PhantomData<*const ()>,
 }
 
+/// To see the compiler’s borrow checker in action, try adding a second call to channel.split() 
+/// in various places. You’ll see that calling it a second time within the
+/// thread scope results in an error, while calling it after the scope is acceptable. Even
+/// calling split() before the scope is fine, as long as you stop using the returned Sender
+/// and Receiver before the scope starts
 impl<T> Channel<T> {
     pub const fn new() -> Self {
         Self {
@@ -464,7 +498,16 @@ impl<T> Channel<T> {
     // Lifetimes can be elided, but aren't, to more easily illustrate that what we gave is what we got
     pub fn split<'a>(&'a mut self) -> (Sender<'a, T>, Receiver<'a, T>) {
         *self = Self::new();
-        (Sender { channel: self }, Receiver { channel: self }) // coerced to &*self
+        (
+            Sender {
+                channel: self, // coerced into &*self
+                receiving_thread: thread::current(),
+            },
+            Receiver {
+                channel: self, // coerced into &*self
+                _no_send: PhantomData,
+            },
+        )
     }
 }
 
@@ -472,19 +515,25 @@ impl<T> Sender<'_, T> {
     pub fn send(self, message: T) {
         unsafe { (*self.channel.message.get()).write(message) };
         self.channel.ready.store(true, Release);
+        self.receiving_thread.unpark();
     }
 }
+
 impl<T> Receiver<'_, T> {
-    pub fn is_ready(&self) -> bool {
-        self.channel.ready.load(Relaxed)
-    }
+    /// Only the thread that calls split() may call receive()
     pub fn receive(self) -> T {
-        if !self.channel.ready.swap(false, Acquire) {
-            panic!("no message available!");
+        // Remember that thread::park() might return spuriously. (Or
+        // because something other than our send method called unpark().)
+        // This means that we cannot assume that the ready flag has been set
+        // when park() returns. So, we need to use a loop to check the flag
+        // again after getting unparked.
+        while !self.channel.ready.swap(false, Acquire) {
+            thread::park();
         }
         unsafe { (*self.channel.message.get()).assume_init_read() }
     }
 }
+
 impl<T> Drop for Channel<T> {
     fn drop(&mut self) {
         if *self.ready.get_mut() {
@@ -492,6 +541,27 @@ impl<T> Drop for Channel<T> {
         }
     }
 }
+
+/// A simple example showing how to use `Channel`, `Sender`, and `Receiver`.
+///
+/// # Examples
+///
+/// ```
+/// use std::thread;
+/// use your_crate::Channel;
+///
+/// let mut channel = Channel::new();
+///
+/// thread::scope(|s| {
+///     let (sender, receiver) = channel.split();
+///
+///     s.spawn(move || {
+///         sender.send("hello world!");
+///     });
+///
+///     assert_eq!(receiver.receive(), "hello world!");
+/// });
+/// ```
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
