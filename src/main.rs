@@ -13,7 +13,7 @@ use std::cell::UnsafeCell;
 use std::convert::Infallible;
 use std::future::Future;
 use std::marker::PhantomData;
-use std::mem::MaybeUninit;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
@@ -565,19 +565,17 @@ impl<T> Drop for Channel<T> {
 /// ```
 
 struct ArcData<T> {
-    /// Counts only allocations to T (strong count)
+    /// Number of `Arc`s.
     data_ref_count: AtomicUsize,
-    /// Counts all the allocations to ArcData (strong + weak count)
-    /// so when strong count is 0 the Arc isn't dropped but it's data is now None
-    /// Also this makes it easier to check if all references strong and weak are gone
-    /// In one atomic operation, rather than checking tow separate countrs
+    /// Number of `Weak`s, plus one if there are any `Arc`s.
     alloc_ref_count: AtomicUsize,
-    data: UnsafeCell<Option<T>>,
+    /// The data. Dropped if there are only weak pointers left.
+    data: UnsafeCell<ManuallyDrop<T>>,
 }
 
 pub struct ArcToo<T> {
-    //ptr: NonNull<ArcData<T>>,
-    weak: Weak<T>,
+    ptr: NonNull<ArcData<T>>,
+    //weak: Weak<T>,
 }
 
 unsafe impl<T: Send + Sync> Send for ArcToo<T> {}
@@ -586,75 +584,106 @@ unsafe impl<T: Send + Sync> Sync for ArcToo<T> {}
 impl<T> ArcToo<T> {
     pub fn new(data: T) -> ArcToo<T> {
         ArcToo {
-            weak: Weak {
-                ptr: NonNull::from(Box::leak(Box::new(ArcData {
-                    alloc_ref_count: AtomicUsize::new(1),
-                    data_ref_count: AtomicUsize::new(1),
-                    data: UnsafeCell::new(Some(data)),
-                }))),
-            },
+            ptr: NonNull::from(Box::leak(Box::new(ArcData {
+                alloc_ref_count: AtomicUsize::new(1),
+                data_ref_count: AtomicUsize::new(1),
+                data: UnsafeCell::new(ManuallyDrop::new(data)),
+            }))),
         }
     }
 
-    // fn data(&self) -> &ArcData<T> {
-    //     unsafe { self.ptr.as_ref() }
-    // }
+    fn data(&self) -> &ArcData<T> {
+        unsafe { self.ptr.as_ref() }
+    }
 
     pub fn get_mut(arc: &mut Self) -> Option<&mut T> {
-        if arc.weak.data().alloc_ref_count.load(Relaxed) == 1 {
-            fence(Acquire);
-            // Safety: Nothing else can access the data, since
-            // there's only one Arc, to which we have exclusive access,
-            // and no Weak pointers.
-            let arcdata = unsafe { arc.weak.ptr.as_mut() };
-            let option = arcdata.data.get_mut();
-            // We know the data is still available since we
-            // have an Arc to it, so this won't panic.
-            let data = option.as_mut().unwrap();
-            Some(data)
-        } else {
-            None
+        // If we had used Relaxed for the compare_exchange instead, it would have been
+        // possible for the subsequent load from data_ref_count to not see the new value of
+        // a freshly upgraded Weak pointer, even though the compare_exchange had already
+        // confirmed that every Weak pointer had been dropped.
+
+        // Acquire matches Weak::drop's Release decrement, to make sure any
+        // upgraded pointers are visible in the next data_ref_count.load.
+        if arc
+            .data()
+            .alloc_ref_count
+            .compare_exchange(1, usize::MAX, Acquire, Relaxed)
+            .is_err()
+        {
+            return None;
         }
+        let is_unique = arc.data().data_ref_count.load(Relaxed) == 1;
+        // Release matches Acquire increment in `downgrade`, to make sure any
+        // changes to the data_ref_count that come after `downgrade` don't
+        // change the is_unique result above.
+        arc.data().alloc_ref_count.store(1, Release);
+        if !is_unique {
+            return None;
+        }
+        // Acquire to match Arc::drop's Release decrement, to make sure nothing
+        // else is accessing the data.
+        fence(Acquire);
+        unsafe { Some(&mut *arc.data().data.get()) }
     }
 
     pub fn downgrade(arc: &Self) -> Weak<T> {
-        arc.weak.clone()
+        let mut n = arc.data().alloc_ref_count.load(Relaxed);
+        loop {
+            if n == usize::MAX {
+                std::hint::spin_loop();
+                n = arc.data().alloc_ref_count.load(Relaxed);
+                continue;
+            }
+            assert!(n < usize::MAX - 1);
+            // Acquire synchronises with get_mut's release-store.
+            if let Err(e) =
+                arc.data()
+                    .alloc_ref_count
+                    .compare_exchange_weak(n, n + 1, Acquire, Relaxed)
+            {
+                n = e;
+                continue;
+            }
+            return Weak { ptr: arc.ptr };
+        }
     }
 }
 
 impl<T> Deref for ArcToo<T> {
     type Target = T;
-
     fn deref(&self) -> &T {
-        let ptr = self.weak.data().data.get();
         // Safety: Since there's an Arc to the data,
         // the data exists and may be shared.
-        unsafe { (*ptr).as_ref().unwrap() }
+        unsafe { &*self.data().data.get() }
     }
 }
 
 impl<T> Clone for ArcToo<T> {
     fn clone(&self) -> Self {
-        // We’ll simply use self.weak.clone() to reuse the code above for the first (weak)
-        // counter, so we only have to manually increment the second counter (strong)
-        let weak = self.weak.clone();
-        if weak.data().data_ref_count.fetch_add(1, Relaxed) > usize::MAX / 2 {
+        if self.data().data_ref_count.fetch_add(1, Relaxed) > usize::MAX / 2 {
             std::process::abort();
         }
-        ArcToo { weak }
+        ArcToo { ptr: self.ptr }
     }
 }
 
 impl<T> Drop for ArcToo<T> {
     fn drop(&mut self) {
-        if self.weak.data().data_ref_count.fetch_sub(1, Release) == 1 {
+        if self.data().data_ref_count.fetch_sub(1, Release) == 1 {
             fence(Acquire);
-            let ptr = self.weak.data().data.get();
             // Safety: The data reference counter is zero,
-            // so nothing will access it.
+            // so nothing will access the data anymore.
             unsafe {
-                (*ptr) = None;
+                ManuallyDrop::drop(&mut *self.data().data.get());
             }
+            // Dropping an Arc<T> now needs to decrement only one counter, except for
+            // the last drop that sees that counter go from one to zero. In that case, the weak pointer
+            // counter also needs to be decremented, such that it can reach zero once there are
+            // no weak pointers left. We do this by simply creating a Weak<T> out of thin air and
+            // immediately dropping it
+            // Now that there's no `Arc<T>`s left,
+            // drop the implicit weak pointer that represented all `Arc<T>`s.
+            drop(Weak { ptr: self.ptr });
         }
     }
 }
@@ -686,7 +715,7 @@ impl<T> Weak<T> {
                 n = e;
                 continue;
             }
-            return Some(ArcToo { weak: self.clone() });
+            return Some(ArcToo { ptr: self.ptr });
         }
     }
 }
