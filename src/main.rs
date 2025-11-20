@@ -17,17 +17,18 @@ use std::mem::MaybeUninit;
 use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
-use std::sync::atomic::AtomicBool;
+use std::ptr::NonNull;
 use std::sync::atomic::Ordering::Acquire;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::Ordering::Release;
+use std::sync::atomic::{AtomicBool, AtomicUsize, fence};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::thread::{self, Thread};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Sleep;
 use tower::{Service, ServiceBuilder};
-use std::thread::{self, Thread};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -483,7 +484,7 @@ pub struct Receiver<'a, T> {
     _no_send: PhantomData<*const ()>,
 }
 
-/// To see the compiler’s borrow checker in action, try adding a second call to channel.split() 
+/// To see the compiler’s borrow checker in action, try adding a second call to channel.split()
 /// in various places. You’ll see that calling it a second time within the
 /// thread scope results in an error, while calling it after the scope is acceptable. Even
 /// calling split() before the scope is fine, as long as you stop using the returned Sender
@@ -562,6 +563,153 @@ impl<T> Drop for Channel<T> {
 ///     assert_eq!(receiver.receive(), "hello world!");
 /// });
 /// ```
+
+struct ArcData<T> {
+    /// Counts only allocations to T (strong count)
+    data_ref_count: AtomicUsize,
+    /// Counts all the allocations to ArcData (strong + weak count)
+    /// so when strong count is 0 the Arc isn't dropped but it's data is now None
+    /// Also this makes it easier to check if all references strong and weak are gone
+    /// In one atomic operation, rather than checking tow separate countrs
+    alloc_ref_count: AtomicUsize,
+    data: UnsafeCell<Option<T>>,
+}
+
+pub struct ArcToo<T> {
+    //ptr: NonNull<ArcData<T>>,
+    weak: Weak<T>,
+}
+
+unsafe impl<T: Send + Sync> Send for ArcToo<T> {}
+unsafe impl<T: Send + Sync> Sync for ArcToo<T> {}
+
+impl<T> ArcToo<T> {
+    pub fn new(data: T) -> ArcToo<T> {
+        ArcToo {
+            weak: Weak {
+                ptr: NonNull::from(Box::leak(Box::new(ArcData {
+                    alloc_ref_count: AtomicUsize::new(1),
+                    data_ref_count: AtomicUsize::new(1),
+                    data: UnsafeCell::new(Some(data)),
+                }))),
+            },
+        }
+    }
+
+    // fn data(&self) -> &ArcData<T> {
+    //     unsafe { self.ptr.as_ref() }
+    // }
+
+    pub fn get_mut(arc: &mut Self) -> Option<&mut T> {
+        if arc.weak.data().alloc_ref_count.load(Relaxed) == 1 {
+            fence(Acquire);
+            // Safety: Nothing else can access the data, since
+            // there's only one Arc, to which we have exclusive access,
+            // and no Weak pointers.
+            let arcdata = unsafe { arc.weak.ptr.as_mut() };
+            let option = arcdata.data.get_mut();
+            // We know the data is still available since we
+            // have an Arc to it, so this won't panic.
+            let data = option.as_mut().unwrap();
+            Some(data)
+        } else {
+            None
+        }
+    }
+
+    pub fn downgrade(arc: &Self) -> Weak<T> {
+        arc.weak.clone()
+    }
+}
+
+impl<T> Deref for ArcToo<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        let ptr = self.weak.data().data.get();
+        // Safety: Since there's an Arc to the data,
+        // the data exists and may be shared.
+        unsafe { (*ptr).as_ref().unwrap() }
+    }
+}
+
+impl<T> Clone for ArcToo<T> {
+    fn clone(&self) -> Self {
+        // We’ll simply use self.weak.clone() to reuse the code above for the first (weak)
+        // counter, so we only have to manually increment the second counter (strong)
+        let weak = self.weak.clone();
+        if weak.data().data_ref_count.fetch_add(1, Relaxed) > usize::MAX / 2 {
+            std::process::abort();
+        }
+        ArcToo { weak }
+    }
+}
+
+impl<T> Drop for ArcToo<T> {
+    fn drop(&mut self) {
+        if self.weak.data().data_ref_count.fetch_sub(1, Release) == 1 {
+            fence(Acquire);
+            let ptr = self.weak.data().data.get();
+            // Safety: The data reference counter is zero,
+            // so nothing will access it.
+            unsafe {
+                (*ptr) = None;
+            }
+        }
+    }
+}
+
+pub struct Weak<T> {
+    ptr: NonNull<ArcData<T>>,
+}
+
+unsafe impl<T: Sync + Send> Send for Weak<T> {}
+unsafe impl<T: Sync + Send> Sync for Weak<T> {}
+
+impl<T> Weak<T> {
+    fn data(&self) -> &ArcData<T> {
+        unsafe { self.ptr.as_ref() }
+    }
+
+    pub fn upgrade(&self) -> Option<ArcToo<T>> {
+        let mut n = self.data().data_ref_count.load(Relaxed);
+        loop {
+            if n == 0 {
+                return None;
+            }
+            assert!(n < usize::MAX);
+            if let Err(e) =
+                self.data()
+                    .data_ref_count
+                    .compare_exchange_weak(n, n + 1, Relaxed, Relaxed)
+            {
+                n = e;
+                continue;
+            }
+            return Some(ArcToo { weak: self.clone() });
+        }
+    }
+}
+
+impl<T> Clone for Weak<T> {
+    fn clone(&self) -> Self {
+        if self.data().alloc_ref_count.fetch_add(1, Relaxed) > usize::MAX / 2 {
+            std::process::abort();
+        }
+        Weak { ptr: self.ptr }
+    }
+}
+
+impl<T> Drop for Weak<T> {
+    fn drop(&mut self) {
+        if self.data().alloc_ref_count.fetch_sub(1, Release) == 1 {
+            fence(Acquire);
+            unsafe {
+                drop(Box::from_raw(self.ptr.as_ptr()));
+            }
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
