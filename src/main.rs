@@ -568,8 +568,8 @@ struct ArcData<T> {
     /// Number of `Arc`s.
     data_ref_count: AtomicUsize,
     /// Number of `Weak`s, plus one if there are any `Arc`s.
-    /// To keep checking for strong and weak connection during, creation and destruction,
-    /// we implement this counter as counting more than just weak connections.
+    /// To keep from checking for strong and weak connections during creation and destruction,
+    /// we implement this counter as counting more than just weak connections so it is all one atomic operation.
     alloc_ref_count: AtomicUsize,
     /// The data. Dropped if there are only weak pointers left.
     data: UnsafeCell<ManuallyDrop<T>>,
@@ -577,7 +577,6 @@ struct ArcData<T> {
 
 pub struct ArcToo<T> {
     ptr: NonNull<ArcData<T>>,
-    //weak: Weak<T>,
 }
 
 unsafe impl<T: Send + Sync> Send for ArcToo<T> {}
