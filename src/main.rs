@@ -549,7 +549,7 @@ impl<T> Drop for Channel<T> {
 ///
 /// ```
 /// use std::thread;
-/// use your_crate::Channel;
+/// use NetworkTests::Channel;
 ///
 /// let mut channel = Channel::new();
 ///
@@ -684,7 +684,7 @@ impl<T> Drop for ArcToo<T> {
             // immediately dropping it
             // Now that there's no `Arc<T>`s left,
             // drop the implicit weak pointer that represented all `Arc<T>`s.
-            drop(WeakToo { ptr: self.ptr });
+            drop(WeakToo { ptr: self.ptr }); // Used to drop the extra +1 in alloc_ref_count that represents the existance of any Arc
         }
     }
 }
@@ -701,6 +701,7 @@ impl<T> WeakToo<T> {
         unsafe { self.ptr.as_ref() }
     }
 
+    // This is wrapped in an Option beacause of the possibility that the last Arc dropped (along with its value of course) 
     pub fn upgrade(&self) -> Option<ArcToo<T>> {
         let mut n = self.data().data_ref_count.load(Relaxed);
         loop {
