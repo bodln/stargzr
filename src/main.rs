@@ -608,22 +608,22 @@ impl<T> ArcToo<T> {
         if arc
             .data()
             .alloc_ref_count
-            .compare_exchange(1, usize::MAX, Acquire, Relaxed)
+            .compare_exchange(1, usize::MAX, Acquire, Relaxed) // Make sure there are no Weaks in any thread
             .is_err()
         {
             return None;
         }
-        let is_unique = arc.data().data_ref_count.load(Relaxed) == 1;
+        let is_unique = arc.data().data_ref_count.load(Relaxed) == 1; // Checks if we are the only Arc
         // Release matches Acquire increment in `downgrade`, to make sure any
         // changes to the data_ref_count that come after `downgrade` don't
         // change the is_unique result above.
-        arc.data().alloc_ref_count.store(1, Release);
+        arc.data().alloc_ref_count.store(1, Release); // Make sure we unblock the creation of new Weaks
         if !is_unique {
             return None;
         }
         // Acquire to match Arc::drop's Release decrement, to make sure nothing
         // else is accessing the data.
-        fence(Acquire);
+        fence(Acquire); // Here we make sure every release for every variable, and things before it, is visible
         unsafe { Some(&mut *arc.data().data.get()) }
     }
 
