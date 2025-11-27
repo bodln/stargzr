@@ -613,7 +613,7 @@ impl<T> ArcToo<T> {
         {
             return None;
         }
-        let is_unique = arc.data().data_ref_count.load(Relaxed) == 1; // Checks if we are the only Arc
+        let is_unique = arc.data().data_ref_count.load(Relaxed) == 1; // Checks if we are the only Arc in all threads
         // Release matches Acquire increment in `downgrade`, to make sure any
         // changes to the data_ref_count that come after `downgrade` don't
         // change the is_unique result above.
