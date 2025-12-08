@@ -613,6 +613,14 @@ impl<T> ArcToo<T> {
         {
             return None;
         }
+        // This is fine being Relaxed because the CAS on alloc_ref_count with Acquire
+        // synchronizes with Release operations from Weak::drop. This means any thread that
+        // upgraded a Weak to an Arc (incrementing data_ref_count) and then dropped its Weak
+        // has published that increment, making it visible to us now. The usize::MAX barrier
+        // prevents new Weak upgrades during our check. So if there are other Arcs anywhere,
+        // they either: (1) were created before our CAS and are visible due to the Acquire
+        // synchronization, or (2) can't be created right now because alloc_ref_count is locked.
+        // Either way, a Relaxed load will see data_ref_count > 1 if we're not unique.
         let is_unique = arc.data().data_ref_count.load(Relaxed) == 1; // Checks if we are the only Arc in all threads
         // Release matches Acquire increment in `downgrade`, to make sure any
         // changes to the data_ref_count that come after `downgrade` don't
