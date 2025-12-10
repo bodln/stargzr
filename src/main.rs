@@ -645,6 +645,8 @@ impl<T> ArcToo<T> {
             }
             assert!(n < usize::MAX - 1);
             // Acquire synchronises with get_mut's release-store.
+            // Makes sure that any downgrade that happens is guranteed to happen after relese
+            // Relax ordering would not enforce these gurantees
             if let Err(e) =
                 arc.data()
                     .alloc_ref_count
