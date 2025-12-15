@@ -1,3 +1,4 @@
+use atomic_wait::{wait, wake_one};
 use http_body_util::{BodyExt, combinators::BoxBody};
 use http_body_util::{Empty, Full};
 use hyper::body::Frame;
@@ -21,7 +22,7 @@ use std::ptr::NonNull;
 use std::sync::atomic::Ordering::Acquire;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::Ordering::Release;
-use std::sync::atomic::{AtomicBool, AtomicUsize, fence};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, fence};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::thread::{self, Thread};
@@ -418,7 +419,7 @@ impl<T> SpinLock<T> {
     }
 }
 
-// Forthe SpinLock
+// For the SpinLock
 pub struct Guard<'a, T> {
     lock: &'a SpinLock<T>,
 }
@@ -711,7 +712,7 @@ impl<T> WeakToo<T> {
         unsafe { self.ptr.as_ref() }
     }
 
-    // This is wrapped in an Option beacause of the possibility that the last Arc dropped (along with its value of course) 
+    // This is wrapped in an Option beacause of the possibility that the last Arc dropped (along with its value of course)
     pub fn upgrade(&self) -> Option<ArcToo<T>> {
         let mut n = self.data().data_ref_count.load(Relaxed);
         loop {
@@ -749,6 +750,62 @@ impl<T> Drop for WeakToo<T> {
                 drop(Box::from_raw(self.ptr.as_ptr()));
             }
         }
+    }
+}
+
+pub struct MutexToo<T> {
+    /// We’ll use an AtomicU32 set to zero or one, so we can use it with the atomic wait and wake functions.
+    /// 0: unlocked
+    /// 1: locked
+    /// 2: locked, other threads waiting. This is meant for minimizing syscalls we need to make when unlocking.
+    state: AtomicU32,
+    value: UnsafeCell<T>,
+}
+
+unsafe impl<T> Sync for MutexToo<T> where T: Send {}
+
+impl<T> MutexToo<T> {
+    pub const fn new(value: T) -> Self {
+        Self {
+            state: AtomicU32::new(0), // unlocked state
+            value: UnsafeCell::new(value),
+        }
+    }
+
+    pub fn lock(&self) -> MutexGuard<T> {
+        // Set the state to 1: locked.
+        while self.state.swap(1, Acquire) == 1 {
+            // If it was already locked..
+            // .. wait, unless the state is no longer 1.
+            wait(&self.state, 1);
+        }
+        MutexGuard { mutex: self }
+    }
+}
+
+pub struct MutexGuard<'a, T> {
+    mutex: &'a MutexToo<T>,
+}
+
+impl<T> Deref for MutexGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        unsafe { &*self.mutex.value.get() }
+    }
+}
+
+impl<T> DerefMut for MutexGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        unsafe { &mut *self.mutex.value.get() }
+    }
+}
+
+impl<T> Drop for MutexGuard<'_, T> {
+    fn drop(&mut self) {
+        // Set the state back to 0: unlocked.
+        self.mutex.state.store(0, Release);
+        // Wake up one of the waiting threads, if any.
+        wake_one(&self.mutex.state);
     }
 }
 
