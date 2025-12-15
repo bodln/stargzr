@@ -532,6 +532,7 @@ impl<T> Receiver<'_, T> {
         while !self.channel.ready.swap(false, Acquire) {
             thread::park();
         }
+        
         unsafe { (*self.channel.message.get()).assume_init_read() }
     }
 }
@@ -614,6 +615,7 @@ impl<T> ArcToo<T> {
         {
             return None;
         }
+
         // This is fine being Relaxed because the CAS on alloc_ref_count with Acquire
         // synchronizes with Release operations from Weak::drop. This means any thread that
         // upgraded a Weak to an Arc (incrementing data_ref_count) and then dropped its Weak
@@ -623,28 +625,36 @@ impl<T> ArcToo<T> {
         // synchronization, or (2) can't be created right now because alloc_ref_count is locked.
         // Either way, a Relaxed load will see data_ref_count > 1 if we're not unique.
         let is_unique = arc.data().data_ref_count.load(Relaxed) == 1; // Checks if we are the only Arc in all threads
+
         // Release matches Acquire increment in `downgrade`, to make sure any
         // changes to the data_ref_count that come after `downgrade` don't
         // change the is_unique result above.
         arc.data().alloc_ref_count.store(1, Release); // Make sure we unblock the creation of new Weaks
+
         if !is_unique {
             return None;
         }
+
         // Acquire to match Arc::drop's Release decrement, to make sure nothing
         // else is accessing the data.
         fence(Acquire); // Here we make sure every release for every variable, and things before it, is visible
+
         unsafe { Some(&mut *arc.data().data.get()) }
     }
 
     pub fn downgrade(arc: &Self) -> WeakToo<T> {
         let mut n = arc.data().alloc_ref_count.load(Relaxed);
+
         loop {
             if n == usize::MAX {
                 std::hint::spin_loop();
                 n = arc.data().alloc_ref_count.load(Relaxed);
+
                 continue;
             }
+
             assert!(n < usize::MAX - 1);
+
             // Acquire synchronises with get_mut's release-store.
             // Makes sure that any downgrade that happens is guranteed to happen after release.
             // Relax ordering would not enforce these gurantees.
@@ -656,6 +666,7 @@ impl<T> ArcToo<T> {
                 n = e;
                 continue;
             }
+
             return WeakToo { ptr: arc.ptr };
         }
     }
@@ -675,6 +686,7 @@ impl<T> Clone for ArcToo<T> {
         if self.data().data_ref_count.fetch_add(1, Relaxed) > usize::MAX / 2 {
             std::process::abort();
         }
+
         ArcToo { ptr: self.ptr }
     }
 }
@@ -715,11 +727,14 @@ impl<T> WeakToo<T> {
     // This is wrapped in an Option beacause of the possibility that the last Arc dropped (along with its value of course)
     pub fn upgrade(&self) -> Option<ArcToo<T>> {
         let mut n = self.data().data_ref_count.load(Relaxed);
+
         loop {
             if n == 0 {
                 return None;
             }
+
             assert!(n < usize::MAX);
+
             if let Err(e) =
                 self.data()
                     .data_ref_count
@@ -728,6 +743,7 @@ impl<T> WeakToo<T> {
                 n = e;
                 continue;
             }
+
             return Some(ArcToo { ptr: self.ptr });
         }
     }
@@ -738,6 +754,7 @@ impl<T> Clone for WeakToo<T> {
         if self.data().alloc_ref_count.fetch_add(1, Relaxed) > usize::MAX / 2 {
             std::process::abort();
         }
+
         WeakToo { ptr: self.ptr }
     }
 }
@@ -746,6 +763,7 @@ impl<T> Drop for WeakToo<T> {
     fn drop(&mut self) {
         if self.data().alloc_ref_count.fetch_sub(1, Release) == 1 {
             fence(Acquire);
+
             unsafe {
                 drop(Box::from_raw(self.ptr.as_ptr()));
             }
@@ -774,11 +792,31 @@ impl<T> MutexToo<T> {
 
     pub fn lock(&self) -> MutexGuard<T> {
         if self.state.compare_exchange(0, 1, Acquire, Relaxed).is_err() {
-            while self.state.swap(2, Acquire) != 0 {
-                wait(&self.state, 2);
-            }
+            lock_contended(&self.state);
         }
+
         MutexGuard { mutex: self }
+    }
+}
+
+/// A compare-and-exchange operation generally attempts to get exclusive access to the relevant
+/// cache line, which can be more expensive than a simple load operation when executed repeatedly.
+/// 
+/// With that in mind, we come to the following lock_contended implementation:
+fn lock_contended(state: &AtomicU32) {
+    let mut spin_count = 0;
+
+    while state.load(Relaxed) == 1 && spin_count < 100 {
+        spin_count += 1;
+        std::hint::spin_loop();
+    }
+
+    if state.compare_exchange(0, 1, Acquire, Relaxed).is_ok() {
+        return;
+    }
+
+    while state.swap(2, Acquire) != 0 {
+        wait(state, 2);
     }
 }
 
