@@ -773,11 +773,10 @@ impl<T> MutexToo<T> {
     }
 
     pub fn lock(&self) -> MutexGuard<T> {
-        // Set the state to 1: locked.
-        while self.state.swap(1, Acquire) == 1 {
-            // If it was already locked..
-            // .. wait, unless the state is no longer 1.
-            wait(&self.state, 1);
+        if self.state.compare_exchange(0, 1, Acquire, Relaxed).is_err() {
+            while self.state.swap(2, Acquire) != 0 {
+                wait(&self.state, 2);
+            }
         }
         MutexGuard { mutex: self }
     }
@@ -801,11 +800,14 @@ impl<T> DerefMut for MutexGuard<'_, T> {
 }
 
 impl<T> Drop for MutexGuard<'_, T> {
+    /// Note that after setting the state back to zero, it no longer indicates whether there are
+    /// any waiting threads. The thread that’s woken up is responsible for setting the state
+    /// back to 2, to make sure any other waiting threads are not forgotten. This is why the
+    /// compare-and-exchange operation is not part of the while loop in our lock function.
     fn drop(&mut self) {
-        // Set the state back to 0: unlocked.
-        self.mutex.state.store(0, Release);
-        // Wake up one of the waiting threads, if any.
-        wake_one(&self.mutex.state);
+        if self.mutex.state.swap(0, Release) == 2 {
+            wake_one(&self.mutex.state);
+        }
     }
 }
 
