@@ -532,7 +532,7 @@ impl<T> Receiver<'_, T> {
         while !self.channel.ready.swap(false, Acquire) {
             thread::park();
         }
-        
+
         unsafe { (*self.channel.message.get()).assume_init_read() }
     }
 }
@@ -604,6 +604,7 @@ impl<T> ArcToo<T> {
         // possible for the subsequent load from data_ref_count to not see the new value of
         // a freshly upgraded Weak pointer, even though the compare_exchange had already
         // confirmed that every Weak pointer had been dropped.
+        // Meaning the Acqurie ordering makes sure that the dropping of all those Weaks has been made visible ot all.
 
         // Acquire matches Weak::drop's Release decrement, to make sure any
         // upgraded pointers are visible in the next data_ref_count.load.
@@ -656,7 +657,8 @@ impl<T> ArcToo<T> {
             assert!(n < usize::MAX - 1);
 
             // Acquire synchronises with get_mut's release-store.
-            // Makes sure that any downgrade that happens is guranteed to happen after release.
+            // Makes sure that any downgrade that happens is guranteed to happen after Release, 
+            // meaning it makes sure that we confirmed that we either definitely can or cannot make a &mut (as far as Weaks are concerned).
             // Relax ordering would not enforce these gurantees.
             if let Err(e) =
                 arc.data()
@@ -842,6 +844,9 @@ impl<T> Drop for MutexGuard<'_, T> {
     /// any waiting threads. The thread that’s woken up is responsible for setting the state
     /// back to 2, to make sure any other waiting threads are not forgotten. This is why the
     /// compare-and-exchange operation is not part of the while loop in our lock function.
+    /// 
+    /// Here is also the cleaner example of why we have the aditional state.
+    /// It is because with it we can completely skip the syscall possibility if there is only one Mutex. 
     fn drop(&mut self) {
         if self.mutex.state.swap(0, Release) == 2 {
             wake_one(&self.mutex.state);
