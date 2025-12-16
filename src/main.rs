@@ -1,4 +1,4 @@
-use atomic_wait::{wait, wake_one};
+use atomic_wait::{wait, wake_all, wake_one};
 use http_body_util::{BodyExt, combinators::BoxBody};
 use http_body_util::{Empty, Full};
 use hyper::body::Frame;
@@ -657,7 +657,7 @@ impl<T> ArcToo<T> {
             assert!(n < usize::MAX - 1);
 
             // Acquire synchronises with get_mut's release-store.
-            // Makes sure that any downgrade that happens is guranteed to happen after Release, 
+            // Makes sure that any downgrade that happens is guranteed to happen after Release,
             // meaning it makes sure that we confirmed that we either definitely can or cannot make a &mut (as far as Weaks are concerned).
             // Relax ordering would not enforce these gurantees.
             if let Err(e) =
@@ -803,7 +803,7 @@ impl<T> MutexToo<T> {
 
 /// A compare-and-exchange operation generally attempts to get exclusive access to the relevant
 /// cache line, which can be more expensive than a simple load operation when executed repeatedly.
-/// 
+///
 /// With that in mind, we come to the following lock_contended implementation:
 fn lock_contended(state: &AtomicU32) {
     let mut spin_count = 0;
@@ -844,13 +844,55 @@ impl<T> Drop for MutexGuard<'_, T> {
     /// any waiting threads. The thread that’s woken up is responsible for setting the state
     /// back to 2, to make sure any other waiting threads are not forgotten. This is why the
     /// compare-and-exchange operation is not part of the while loop in our lock function.
-    /// 
+    ///
     /// Here is also the cleaner example of why we have the aditional state.
-    /// It is because with it we can completely skip the syscall possibility if there is only one Mutex. 
+    /// It is because with it we can completely skip the syscall possibility if there is only one Mutex.
     fn drop(&mut self) {
         if self.mutex.state.swap(0, Release) == 2 {
             wake_one(&self.mutex.state);
         }
+    }
+}
+
+pub struct CondvarToo {
+    counter: AtomicU32,
+}
+
+impl CondvarToo {
+    pub const fn new() -> Self {
+        Self {
+            counter: AtomicU32::new(0),
+        }
+    }
+
+    pub fn notify_one(&self) {
+        self.counter.fetch_add(1, Relaxed);
+        wake_one(&self.counter);
+    }
+
+    pub fn notify_all(&self) {
+        self.counter.fetch_add(1, Relaxed);
+        wake_all(&self.counter);
+    }
+
+    /// The counter uses Relaxed atomics because it does NOT synchronize access to the data.
+    /// All real synchronization happens via the mutex unlock→lock happens-before chain.
+    /// The counter only tracks “did something change?” to avoid spurious sleeps/wakeups.
+    pub fn wait<'a, T>(&self, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
+        let counter_value = self.counter.load(Relaxed);
+
+        // Unlock the mutex by dropping the guard,
+        // but remember the mutex so we can lock it again later.
+        let mutex = guard.mutex;
+
+        drop(guard);
+
+        // Wait, but only if the counter hasn't changed since unlocking.
+        // There is no while loop here, it will be outside around the condition variable,
+        // because not every variable has the same condition so we cannot test for that here.
+        wait(&self.counter, counter_value);
+
+        mutex.lock()
     }
 }
 
