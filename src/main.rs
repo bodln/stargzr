@@ -856,29 +856,37 @@ impl<T> Drop for MutexGuard<'_, T> {
 
 pub struct CondvarToo {
     counter: AtomicU32,
+    num_waiters: AtomicUsize,
 }
 
 impl CondvarToo {
     pub const fn new() -> Self {
         Self {
             counter: AtomicU32::new(0),
+            num_waiters: AtomicUsize::new(0),
         }
     }
 
     pub fn notify_one(&self) {
-        self.counter.fetch_add(1, Relaxed);
-        wake_one(&self.counter);
+        if self.num_waiters.load(Relaxed) > 0 {
+            self.counter.fetch_add(1, Relaxed);
+            wake_one(&self.counter);
+        }
     }
 
     pub fn notify_all(&self) {
-        self.counter.fetch_add(1, Relaxed);
-        wake_all(&self.counter);
+        if self.num_waiters.load(Relaxed) > 0 {
+            self.counter.fetch_add(1, Relaxed);
+            wake_all(&self.counter);
+        }
     }
 
-    /// The counter uses Relaxed atomics because it does NOT synchronize access to the data.
+    /// The counter uses Relaxed atomics because it does NOT need synchronize access to the data.
     /// All real synchronization happens via the mutex unlock→lock happens-before chain.
     /// The counter only tracks “did something change?” to avoid spurious sleeps/wakeups.
     pub fn wait<'a, T>(&self, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
+        self.num_waiters.fetch_add(1, Relaxed);
+
         let counter_value = self.counter.load(Relaxed);
 
         // Unlock the mutex by dropping the guard,
@@ -887,14 +895,58 @@ impl CondvarToo {
 
         drop(guard);
 
+        // Here between the dropping and waiting can a spurious wakeup happen.
+        // This means that as soon as the Condvar::wait() method unlocks the
+        // mutex, that might immediately unblock a notifying thread that was waiting for the
+        // mutex. At that point the two threads are racing: the waiting thread to go to sleep, and
+        // the notifying thread to lock and unlock the mutex and notify the condition variable.
+        // If the notifying thread wins that race, the waiting thread will not go to sleep because
+        // of the incremented counter, but the notifying thread will still call wake_one(). This is
+        // exactly the problematic situation described above, where it might unnecessarily wake
+        // up an extra waiting thread.
+
         // Wait, but only if the counter hasn't changed since unlocking.
         // There is no while loop here, it will be outside around the condition variable,
         // because not every variable has the same condition so we cannot test for that here.
         wait(&self.counter, counter_value);
 
+        self.num_waiters.fetch_sub(1, Relaxed);
+
         mutex.lock()
     }
 }
+
+/// A simple example showing how to use `CondvarToo` and `MutexToo`.
+///
+/// # Examples
+///
+/// ```
+/// use std::thread;
+/// use NetworkTests::{CondvarToo, MutexToo};
+///
+/// let mutex = MutexToo::new(false);
+/// let condvar = CondvarToo::new();
+///
+/// thread::scope(|s| {
+///     // Main thread acquires the lock first, ensuring it will wait
+///     let mut guard = mutex.lock();
+///     
+///     s.spawn(|| {
+///         // This thread will have to wait for the lock
+///         let mut guard = mutex.lock();
+///         *guard = true;
+///         condvar.notify_one();
+///     });
+///     
+///     // Now we wait while holding the lock
+///     // The spawned thread is blocked until we release it by waiting
+///     while !*guard {
+///         guard = condvar.wait(guard);
+///     }
+///     
+///     assert_eq!(*guard, true);
+/// });
+/// ```
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
