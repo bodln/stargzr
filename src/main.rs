@@ -924,7 +924,7 @@ impl CondvarToo {
 /// use std::thread;
 /// use NetworkTests::{CondvarToo, MutexToo};
 ///
-/// let mutex = MutexToo::new(false);
+/// let mutex = MutexToo::new(0);
 /// let condvar = CondvarToo::new();
 ///
 /// thread::scope(|s| {
@@ -934,17 +934,17 @@ impl CondvarToo {
 ///     s.spawn(|| {
 ///         // This thread will have to wait for the lock
 ///         let mut guard = mutex.lock();
-///         *guard = true;
+///         *guard = 42;
 ///         condvar.notify_one();
 ///     });
 ///     
 ///     // Now we wait while holding the lock
 ///     // The spawned thread is blocked until we release it by waiting
-///     while !*guard {
+///     while *guard != 42 {
 ///         guard = condvar.wait(guard);
 ///     }
 ///     
-///     assert_eq!(*guard, true);
+///     assert_eq!(*guard, 42);
 /// });
 /// ```
 
