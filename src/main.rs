@@ -856,6 +856,7 @@ impl<T> Drop for MutexGuard<'_, T> {
 
 pub struct CondvarToo {
     counter: AtomicU32,
+    // For avoiding unnecessary syscalls with notifying functions if nobody is waiting
     num_waiters: AtomicUsize,
 }
 
