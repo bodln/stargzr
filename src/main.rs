@@ -973,43 +973,60 @@ impl<T> RwLock<T> {
 
     pub fn read(&self) -> ReadGuard<T> {
         let mut s = self.state.load(Relaxed);
-
         loop {
-            if s < u32::MAX {
-                assert!(s != u32::MAX - 1, "too many readers");
-
-                match self.state.compare_exchange_weak(s, s + 1, Acquire, Relaxed) {
+            if s % 2 == 0 {
+                // Even.
+                assert!(s != u32::MAX - 2, "too many readers");
+                match self.state.compare_exchange_weak(s, s + 2, Acquire, Relaxed) {
                     Ok(_) => return ReadGuard { rwlock: self },
                     Err(e) => s = e,
                 }
             }
-
-            if s == u32::MAX {
-                wait(&self.state, u32::MAX);
+            if s % 2 == 1 {
+                // Odd.
+                wait(&self.state, s);
                 s = self.state.load(Relaxed);
             }
         }
     }
 
     pub fn write(&self) -> WriteGuard<T> {
-        while self
-            .state
-            .compare_exchange(0, u32::MAX, Acquire, Relaxed)
-            .is_err()
-        {
+        let mut s = self.state.load(Relaxed);
+        loop {
+            // Try to lock if unlocked.
+            if s <= 1 {
+                match self.state.compare_exchange(s, u32::MAX, Acquire, Relaxed) {
+                    Ok(_) => return WriteGuard { rwlock: self },
+                    Err(e) => {
+                        s = e;
+                        continue;
+                    }
+                }
+            }
+
+            // Block new readers, by making sure the state is odd.
+            if s % 2 == 0 {
+                match self.state.compare_exchange(s, s + 1, Relaxed, Relaxed) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        s = e;
+                        continue;
+                    }
+                }
+            }
+
             // The acquire-load operation of writer_wake_counter will form a happens-before
             // relationship with a release-increment operation that’s executed right after unlocking
             // the state, before waking up a waiting writer
             let w = self.writer_wake_counter.load(Acquire);
 
-            if self.state.load(Relaxed) != 0 {
-                // Wait if the RwLock is still locked, but only if
-                // there have been no wake signals since we checked.
+            s = self.state.load(Relaxed);
+
+            if s >= 2 {
                 wait(&self.writer_wake_counter, w);
+                s = self.state.load(Relaxed);
             }
         }
-
-        WriteGuard { rwlock: self }
     }
 }
 
@@ -1027,13 +1044,19 @@ impl<T> Deref for ReadGuard<'_, T> {
 
 impl<T> Drop for ReadGuard<'_, T> {
     fn drop(&mut self) {
-        if self.rwlock.state.fetch_sub(1, Release) == 1 {
+        // Decrement the state by 2 to remove one read-lock.
+        if self.rwlock.state.fetch_sub(2, Release) == 3 {
             // The Release ordering on state.fetch_sub above synchronizes-with
             // the Acquire ordering on writer_wake_counter.load in write().
             // This ensures a waiting writer cannot observe the incremented counter
             // while still seeing the old (locked) state value. Without this ordering,
             // a writer could miss the wakeup and block forever despite the lock being free.
+
+            // If we decremented from 3 to 1, that means
+            // the RwLock is now unlocked _and_ there is
+            // a waiting writer, which we wake up
             self.rwlock.writer_wake_counter.fetch_add(1, Release);
+            
             wake_one(&self.rwlock.writer_wake_counter);
         }
     }
