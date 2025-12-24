@@ -949,6 +949,10 @@ impl CondvarToo {
 /// });
 /// ```
 
+// This is a lock optimized for the “frequent reading and infrequent writing" use case.
+// For a more general purpose reader-writer lock, however, it is definitely worth opti‐
+// mizing further, to bring the performance of write-locking and -unlocking near the
+// performance of an efficient 3-state mutex.
 pub struct RwLock<T> {
     /// The number of readers, or u32::MAX if write-locked.
     state: AtomicU32,
@@ -1056,7 +1060,7 @@ impl<T> Drop for ReadGuard<'_, T> {
             // the RwLock is now unlocked _and_ there is
             // a waiting writer, which we wake up
             self.rwlock.writer_wake_counter.fetch_add(1, Release);
-            
+
             wake_one(&self.rwlock.writer_wake_counter);
         }
     }
@@ -1091,6 +1095,87 @@ impl<T> Drop for WriteGuard<'_, T> {
         wake_all(&self.rwlock.state);
     }
 }
+
+pub struct SemaphoreToo {
+    mutex: MutexToo<usize>,
+    condvar: CondvarToo,
+}
+
+impl SemaphoreToo {
+    /// Creates a new semaphore with the given number of permits
+    pub const fn new(permits: usize) -> Self {
+        Self {
+            mutex: MutexToo::new(permits),
+            condvar: CondvarToo::new(),
+        }
+    }
+
+    /// Acquires a permit, blocking if none are available
+    pub fn acquire(&self) {
+        let mut guard = self.mutex.lock();
+        
+        // Wait while no permits are available
+        while *guard == 0 {
+            guard = self.condvar.wait(guard);
+        }
+        
+        // Take a permit
+        *guard -= 1;
+    }
+
+    /// Releases a permit, waking up one waiting thread
+    pub fn release(&self) {
+        let mut guard = self.mutex.lock();
+        *guard += 1;
+        drop(guard);
+        
+        // Wake up one waiting thread
+        self.condvar.notify_one();
+    }
+
+    /// Tries to acquire a permit without blocking
+    /// Returns true if successful, false if no permits available
+    pub fn try_acquire(&self) -> bool {
+        let mut guard = self.mutex.lock();
+        
+        if *guard > 0 {
+            *guard -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns the current number of available permits
+    pub fn available_permits(&self) -> usize {
+        let guard = self.mutex.lock();
+        *guard
+    }
+}
+
+/// A simple example showing how to use `SemaphoreToo`.
+///
+/// # Examples
+///
+/// ```
+/// use std::thread;
+/// use NetworkTests::SemaphoreToo;
+///
+/// let semaphore = SemaphoreToo::new(2); // Only 2 threads can proceed at once
+///
+/// thread::scope(|s| {
+///     for i in 0..5 {
+///         let sem = &semaphore;
+///         s.spawn(move || {
+///             sem.acquire();
+///             println!("Thread {} acquired permit", i);
+///             thread::sleep(std::time::Duration::from_millis(100));
+///             println!("Thread {} releasing permit", i);
+///             sem.release();
+///         });
+///     }
+/// });
+/// ```
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
