@@ -882,7 +882,7 @@ impl CondvarToo {
         }
     }
 
-    /// The counter uses Relaxed atomics because it does NOT need synchronize access to the data.
+    /// The counter uses Relaxed atomics because it does NOT need synchronized access to the data.
     /// All real synchronization happens via the mutex unlock→lock happens-before chain.
     /// The counter only tracks “did something change?” to avoid spurious sleeps/wakeups.
     pub fn wait<'a, T>(&self, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
@@ -1167,6 +1167,7 @@ impl SemaphoreToo {
 ///     for i in 0..5 {
 ///         let sem = &semaphore;
 ///         s.spawn(move || {
+///             println!("Thread {} is trying to acquire permit...", i);
 ///             sem.acquire();
 ///             println!("Thread {} acquired permit", i);
 ///             thread::sleep(std::time::Duration::from_millis(100));
