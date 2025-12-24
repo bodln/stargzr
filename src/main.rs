@@ -1113,12 +1113,12 @@ impl SemaphoreToo {
     /// Acquires a permit, blocking if none are available
     pub fn acquire(&self) {
         let mut guard = self.mutex.lock();
-        
+
         // Wait while no permits are available
         while *guard == 0 {
             guard = self.condvar.wait(guard);
         }
-        
+
         // Take a permit
         *guard -= 1;
     }
@@ -1128,7 +1128,7 @@ impl SemaphoreToo {
         let mut guard = self.mutex.lock();
         *guard += 1;
         drop(guard);
-        
+
         // Wake up one waiting thread
         self.condvar.notify_one();
     }
@@ -1137,7 +1137,7 @@ impl SemaphoreToo {
     /// Returns true if successful, false if no permits available
     pub fn try_acquire(&self) -> bool {
         let mut guard = self.mutex.lock();
-        
+
         if *guard > 0 {
             *guard -= 1;
             true
@@ -1176,6 +1176,70 @@ impl SemaphoreToo {
 ///     }
 /// });
 /// ```
+
+pub struct SemaphoreAtomic {
+    /// Permits available (or negative for number of waiters)
+    permits: AtomicU32,
+}
+
+impl SemaphoreAtomic {
+    pub const fn new(permits: u32) -> Self {
+        Self {
+            permits: AtomicU32::new(permits),
+        }
+    }
+
+    pub fn acquire(&self) {
+        let mut current = self.permits.load(Relaxed);
+
+        loop {
+            // Try fast path: if permits available, take one
+            if current > 0 {
+                match self
+                    .permits
+                    .compare_exchange_weak(current, current - 1, Acquire, Relaxed)
+                {
+                    Ok(_) => return,
+                    Err(actual) => {
+                        current = actual;
+                        continue;
+                    }
+                }
+            }
+
+            // No permits available, wait
+            wait(&self.permits, current);
+            current = self.permits.load(Relaxed);
+        }
+    }
+
+    pub fn release(&self) {
+        self.permits.fetch_add(1, Release);
+        wake_one(&self.permits);
+    }
+
+    pub fn try_acquire(&self) -> bool {
+        let mut current = self.permits.load(Relaxed);
+
+        loop {
+            if current == 0 {
+                return false;
+            }
+
+            match self
+                .permits
+                .compare_exchange_weak(current, current - 1, Acquire, Relaxed)
+            {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    pub fn available_permits(&self) -> u32 {
+        self.permits.load(Relaxed)
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
