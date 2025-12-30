@@ -13,6 +13,7 @@ use pin_project::pin_project;
 use std::cell::UnsafeCell;
 use std::convert::Infallible;
 use std::future::Future;
+use std::hint::black_box;
 use std::marker::PhantomData;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use std::net::SocketAddr;
@@ -37,7 +38,13 @@ async fn echo(
     req: Request<hyper::body::Incoming>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
     match (req.method(), req.uri().path()) {
-        (&Method::GET, "/") => Ok(Response::new(full("Try POSTing data to /echo"))),
+        (&Method::GET, "/") => {
+            // let mut counter: u64 = 0;
+            // for i in 0..100000000 {
+            //     counter = black_box(i);
+            // }
+            Ok(Response::new(full("Try POSTing data to /echo")))
+        }
         (&Method::POST, "/echo") => Ok(Response::new(req.into_body().boxed())),
         (&Method::POST, "/echo/uppercase") => {
             let frame_stream = req.into_body().map_frame(|frame| {
@@ -189,11 +196,13 @@ pub struct RateLimit<S> {
     address: SocketAddr,
 }
 
+// To properly test this we need to do something like hey -n 10 -c 2 http://192.168.1.2:7878/
+// -c 2 because 1 apparently isnt enough to challenge it so we dont get any reject messages.
 impl<S> RateLimit<S> {
-    /// This constructor allows each connection to have its own rate limiting counter.
-    /// Since http1 requires each connection request to produce a response before it takes another request,
-    /// the unique counter never goes up past 1 for any connection.
-    /// Basically a no op for http1
+    /// Creates a rate limiter with a unique counter per connection.
+    /// NOTE: This is essentially a no-op for HTTP/1.1 because each connection
+    /// processes requests sequentially, so the counter never goes above 1.
+    /// Use `with_shared_counter` instead for effective rate limiting across connections.
     pub fn new(inner: S, request_per_delay: usize, delay: Duration, address: SocketAddr) -> Self {
         Self {
             inner,
@@ -204,7 +213,10 @@ impl<S> RateLimit<S> {
         }
     }
 
-    /// This one works as it should tho
+    /// Creates a rate limiter that shares a counter across all connections.
+    /// This is what you want for real rate limiting - it tracks all requests
+    /// from an IP address across all their connections, preventing clients
+    /// from bypassing the rate limit by opening multiple connections.
     pub fn with_shared_counter(
         inner: S,
         request_per_delay: usize,
@@ -221,23 +233,39 @@ impl<S> RateLimit<S> {
         }
     }
 
+    /// Decides what to do with an incoming request based on current load.
+    /// This implements a three-tier token bucket algorithm:
+    /// 1. Allow: We have capacity, increment counter and proceed
+    /// 2. Delay: We're over capacity but not critically, add artificial delay
+    /// 3. Reject: We're critically over capacity, reject immediately
+    ///
+    /// The thresholds demonstrate escalating back-pressure:
+    /// - Normal operation: count stays below request_per_delay + 1
+    /// - Moderate overload: count between request_per_delay + 1 and request_per_delay * 3
+    /// - Severe overload: count >= request_per_delay * 3
     fn check_rate_limit(&self) -> RateLimitDecision {
         let mut count = self.current_count.lock().unwrap();
 
+        // Reject threshold: 3x over the limit means we're being hammered
         if *count >= self.request_per_delay * 3 {
             println!(
                 "[RateLimit] REJECTING request. Current count: {}, from: {}",
                 *count, self.address
             );
             RateLimitDecision::Reject
-        } else if *count >= self.request_per_delay + 1 {
+        }
+        // Delay threshold: We're over the limit but not critically
+        // Add artificial delay to slow the client down gradually
+        else if *count >= self.request_per_delay + 1 {
             *count += 1;
             println!(
                 "[RateLimit] DELAYING request. Current count: {}, from: {}",
                 *count, self.address
             );
             RateLimitDecision::Delay(self.current_count.clone())
-        } else {
+        }
+        // Allow: We have capacity in our token bucket
+        else {
             *count += 1;
             println!(
                 "[RateLimit] ALLOWING request. Current count: {}, from: {}",
@@ -284,40 +312,41 @@ where
                 RateLimitFuture::Rejected(std::future::ready(Ok(resp)))
             }
             RateLimitDecision::Delay(count) => {
-                let count_clone = count.clone();
+                let count_for_spawn = count.clone();
                 let delay = self.delay_duration;
 
-                // This essentially does nothing but give more time to better simulate the work of the middleware
-
-                // tokio::task::spawn(async move {
-                //     tokio::time::sleep(delay).await;
-                //     let mut guard = count_clone.lock().unwrap();
-                //     *guard -= 1;
-                //     //println!("[RateLimit] Decrementing counter after delay window");
-                // });
+                // This is the heart of the token bucket algorithm!
+                // We spawn a background task that will "return a token to the bucket"
+                // after delay_duration has elapsed. This ensures our counter represents
+                // "requests in the last N seconds" rather than "requests being processed right now"
+                tokio::task::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    let mut guard = count_for_spawn.lock().unwrap();
+                    *guard = guard.saturating_sub(1); // Return one token to the bucket
+                });
 
                 RateLimitFuture::Delayed {
-                    sleep: tokio::time::sleep(self.delay_duration), // sleep countdown begins from here apperently
+                    sleep: tokio::time::sleep(self.delay_duration),
                     inner: Some(self.inner.call(req)),
-                    count: count_clone,
+                    count: count.clone(),
                 }
             }
             RateLimitDecision::Allow(count) => {
-                let count_clone = count.clone();
+                let count_for_spawn = count.clone();
                 let delay = self.delay_duration;
 
-                // This essentially does nothing but give more time to better simulate the work of the middleware
-
-                // tokio::task::spawn(async move {
-                //     tokio::time::sleep(delay).await;
-                //     let mut guard = count_clone.lock().unwrap();
-                //     *guard -= 1;
-                //     //println!("[RateLimit] Decrementing counter after rate limit window");
-                // });
+                // Same token bucket mechanism as above.
+                // Even though we're allowing this request immediately,
+                // we still need to track that it happened for the next delay_duration period.
+                tokio::task::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    let mut guard = count_for_spawn.lock().unwrap();
+                    *guard = guard.saturating_sub(1); // Return one token after the time window
+                });
 
                 RateLimitFuture::Processing {
                     inner: self.inner.call(req),
-                    count: count_clone,
+                    count: count.clone(),
                 }
             }
         }
@@ -362,21 +391,24 @@ where
                         println!("[RateLimit] Delay complete, processing request");
                         let inner_fut = inner.take().expect("polled after completion");
                         let count_clone = count.clone();
+                        // Transition from Delayed to Processing state
                         self.set(RateLimitFuture::Processing {
                             inner: inner_fut,
                             count: count_clone,
                         });
-
                         continue;
                     }
                     Poll::Pending => return Poll::Pending,
                 },
 
-                RateLimitFutureProj::Processing { inner, count } => match inner.poll(cx) {
+                RateLimitFutureProj::Processing { inner, count: _ } => match inner.poll(cx) {
                     Poll::Ready(result) => {
-                        let mut guard = count.lock().unwrap();
-                        *guard -= 1;
-
+                        // CRITICAL: We do NOT decrement the counter here!
+                        // The spawned background task handles decrementing after delay_duration.
+                        // This ensures the counter represents "requests in the last N seconds"
+                        // rather than "currently processing requests".
+                        // If we decremented here, fast requests would immediately free up
+                        // their token, breaking the rate limiting time window.
                         return Poll::Ready(result);
                     }
                     Poll::Pending => return Poll::Pending,
@@ -1292,7 +1324,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     println!("Accepted connection from: {}", address);
 
                     let delay = Duration::from_millis(1000);
-                    let requests_per_delay = 2;
+                    let requests_per_delay = 1;
 
                     let svc = tower::service_fn(echo);
                     let svc = ServiceBuilder::new()
