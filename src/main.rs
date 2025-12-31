@@ -10,6 +10,7 @@ use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
 use local_ip_address;
 use pin_project::pin_project;
+use tokio::process::Command;
 use std::cell::UnsafeCell;
 use std::convert::Infallible;
 use std::future::Future;
@@ -34,34 +35,52 @@ use tower::{Service, ServiceBuilder};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
+// Main request handler - routes incoming HTTP requests
+// Takes: Request with incoming body stream
+// Returns: Response with a BoxBody (type-erased body that streams Bytes chunks)
 async fn echo(
     req: Request<hyper::body::Incoming>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
+    
+    // Pattern match on (method, path) for manual routing
     match (req.method(), req.uri().path()) {
+        
+        // GET / - Return simple text response
         (&Method::GET, "/") => {
-            // let mut counter: u64 = 0;
-            // for i in 0..100000000 {
-            //     counter = black_box(i);
-            // }
+            // full() creates a body with all data at once (buffered, not streamed)
             Ok(Response::new(full("Try POSTing data to /echo")))
         }
-        (&Method::POST, "/echo") => Ok(Response::new(req.into_body().boxed())),
+        
+        // POST /echo - Echo the request body back (streaming, no buffering)
+        (&Method::POST, "/echo") => {
+            // into_body() gives us the body stream, boxed() type-erases it
+            // This streams frames through as they arrive - no memory buffering
+            Ok(Response::new(req.into_body().boxed()))
+        }
+        
+        // POST /echo/uppercase - Transform body to uppercase while streaming
         (&Method::POST, "/echo/uppercase") => {
+            // map_frame() transforms each chunk as it arrives (streaming transformation)
             let frame_stream = req.into_body().map_frame(|frame| {
+                // Extract data from the frame (or empty if it's trailers/metadata)
                 let frame = if let Ok(data) = frame.into_data() {
+                    // data is one Bytes chunk, transform each byte to uppercase
                     data.iter()
                         .map(|byte| byte.to_ascii_uppercase())
                         .collect::<Bytes>()
                 } else {
                     Bytes::new()
                 };
-
+                // Wrap back into a data frame
                 Frame::data(frame)
             });
 
             Ok(Response::new(frame_stream.boxed()))
         }
+        
+        // POST /echo/reversed - Reverse the entire body (requires buffering)
         (&Method::POST, "/echo/reversed") => {
+            // Check estimated body size to prevent OOM attacks
             let upper = req.body().size_hint().upper().unwrap_or(u64::MAX);
             if upper > 1024 * 64 {
                 let mut resp = Response::new(full("Body too big"));
@@ -69,11 +88,15 @@ async fn echo(
                 return Ok(resp);
             }
 
+            // collect() waits for ALL frames and concatenates them into memory
+            // This is buffering - we need the entire body to reverse it
             let whole_body = req.collect().await?.to_bytes();
             let reversed_body = whole_body.iter().rev().cloned().collect::<Vec<u8>>();
 
             Ok(Response::new(full(reversed_body)))
         }
+        
+        // 404 for all other routes
         _ => {
             let mut not_found = Response::new(empty());
             *not_found.status_mut() = StatusCode::NOT_FOUND;
@@ -83,16 +106,19 @@ async fn echo(
     }
 }
 
+// Creates empty body (0 bytes) - used for 404s
 fn empty() -> BoxBody<Bytes, hyper::Error> {
     Empty::<Bytes>::new()
-        .map_err(|never| match never {})
-        .boxed()
+        .map_err(|never| match never {}) // Empty can never error
+        .boxed() // Type-erase into BoxBody
 }
 
+// Creates body with all data at once - used for small responses
+// Accepts &str, String, Vec<u8>, or Bytes
 fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
     Full::new(chunk.into())
-        .map_err(|never| match never {})
-        .boxed()
+        .map_err(|never| match never {}) // Full can never error
+        .boxed() // Type-erase into BoxBody
 }
 
 #[derive(Debug, Clone)]
@@ -1308,6 +1334,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let address = format!("{}:{}", host, port);
 
         println!("Client prepared for host={}:{}", host, port);
+
+        // Uncomment for test
+
+        // let output = Command::new("hey")
+        //     .args(["-z", "2s", "-c", "3", "http://192.168.1.2:7878/"])
+        //     .output().await
+        //     .expect("failed to execute hey");
+
+        // let stdout = String::from_utf8_lossy(&output.stdout);
+        // let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // println!("--- hey output ---\n{stdout}");
+        // if !stderr.is_empty() {
+        //     eprintln!("--- hey errors ---\n{stderr}");
+        // }
 
         let stream = TcpStream::connect(address).await;
     });
