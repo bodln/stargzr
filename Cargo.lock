@@ -3,20 +3,6 @@
 version = 4
 
 [[package]]
-name = "NetworkTests"
-version = "0.1.0"
-dependencies = [
- "atomic-wait",
- "http-body-util",
- "hyper",
- "hyper-util",
- "local-ip-address",
- "pin-project",
- "tokio",
- "tower",
-]
-
-[[package]]
 name = "addr2line"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -422,6 +408,20 @@ dependencies = [
  "quote",
  "serde",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "network_tests"
+version = "0.1.0"
+dependencies = [
+ "atomic-wait",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "local-ip-address",
+ "pin-project",
+ "tokio",
+ "tower",
 ]
 
 [[package]]
