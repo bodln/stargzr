@@ -1,3 +1,6 @@
+use askama::Template;
+use axum::response::IntoResponse;
+use axum::{Router, response::Html, routing::get};
 use http_body_util::{BodyExt, combinators::BoxBody};
 use hyper::body::Frame;
 use hyper::body::{Body, Bytes};
@@ -13,7 +16,7 @@ use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tower::ServiceBuilder;
 
-use network_tests::middlewares::{Logger, RateLimit, SpawnRequest, full, empty};
+use network_tests::middlewares::{Logger, RateLimit, SpawnRequest, empty, full};
 
 type _BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -23,23 +26,21 @@ type _BoxError = Box<dyn std::error::Error + Send + Sync>;
 async fn echo(
     req: Request<hyper::body::Incoming>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
-    
     // Pattern match on (method, path) for manual routing
     match (req.method(), req.uri().path()) {
-        
         // GET / - Return simple text response
         (&Method::GET, "/") => {
             // full() creates a body with all data at once (buffered, not streamed)
             Ok(Response::new(full("Try POSTing data to /echo")))
         }
-        
+
         // POST /echo - Echo the request body back (streaming, no buffering)
         (&Method::POST, "/echo") => {
             // into_body() gives us the body stream, boxed() type-erases it
             // This streams frames through as they arrive - no memory buffering
             Ok(Response::new(req.into_body().boxed()))
         }
-        
+
         // POST /echo/uppercase - Transform body to uppercase while streaming
         (&Method::POST, "/echo/uppercase") => {
             // map_frame() transforms each chunk as it arrives (streaming transformation)
@@ -59,7 +60,7 @@ async fn echo(
 
             Ok(Response::new(frame_stream.boxed()))
         }
-        
+
         // POST /echo/reversed - Reverse the entire body (requires buffering)
         (&Method::POST, "/echo/reversed") => {
             // Check estimated body size to prevent OOM attacks
@@ -77,7 +78,7 @@ async fn echo(
 
             Ok(Response::new(full(reversed_body)))
         }
-        
+
         // 404 for all other routes
         _ => {
             let mut not_found = Response::new(empty());
@@ -86,6 +87,36 @@ async fn echo(
             Ok(not_found)
         }
     }
+}
+
+#[derive(Template)]
+#[template(path = "counter.html")]
+struct GreetingTemplate {
+    message: String,
+    count: u32,
+}
+
+impl IntoResponse for GreetingTemplate {
+    fn into_response(self) -> axum::response::Response {
+        match self.render() {
+            Ok(html) => Html(html).into_response(),
+            Err(err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to render template: {}", err),
+            ).into_response(),
+        }
+    }
+}
+
+async fn counter() -> GreetingTemplate {
+    GreetingTemplate {
+        message: "Hello from Rust!".to_string(),
+        count: 42,
+    }
+}
+
+async fn hello() -> Html<&'static str> {
+    Html(include_str!("../templates/index.html"))
 }
 
 async fn shutdown_signal() {
@@ -116,6 +147,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let graceful = Arc::new(hyper_util::server::graceful::GracefulShutdown::new());
     let mut signal = std::pin::pin!(shutdown_signal());
 
+    tokio::task::spawn(async {
+        let app = Router::new()
+                    .route("/", get(hello))
+                    .route("/count", get(counter));
+
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:8081").await {
+            Ok(listener) => {
+                println!(
+                    "✓ HTML server listening on {}",
+                    listener.local_addr().unwrap()
+                );
+                listener
+            }
+            Err(e) => {
+                eprintln!("✗ Failed to bind HTML server: {}", e);
+                return;
+            }
+        };
+
+        if let Err(e) = axum::serve(listener, app).await {
+            eprintln!("✗ HTML server error: {}", e);
+        } else {
+            println!("✓ HTML server shut down gracefully");
+        }
+    });
+
     // Client
     tokio::task::spawn(async move {
         let uri_str = format!("http://{}:{}", help_ip, port);
@@ -127,7 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
         let address = format!("{}:{}", host, port);
 
-        println!("Client prepared for host={}:{}", host, port);
+        println!("Client prepared for host: {}:{}", host, port);
 
         // Uncomment for testing the middlewares
 
