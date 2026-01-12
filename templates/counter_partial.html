@@ -1,0 +1,9 @@
+<!-- templates/counter_partial.html -->
+<p>Count: {{ count }}</p>
+<!-- ☝️ This is ONLY the part that changes
+     Notice: No <!DOCTYPE>, no <html>, no <body>
+     Just the fragment that will be inserted
+     
+     This matches exactly what's INSIDE the <div id="counter">
+     When the server renders this template, it becomes: "<p>Count: 6</p>"
+     HTMX receives this and puts it inside the div -->

@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>MP3 Player</title>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <style>
+        /* Basic styling to make it look decent */
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+        }
+        
+        #player-controls {
+            background: #f0f0f0;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            border: none;
+            background: #007bff;
+            color: white;
+            border-radius: 4px;
+        }
+        
+        button:hover {
+            background: #0056b3;
+        }
+        
+        audio {
+            width: 100%;
+            margin-top: 20px;
+        }
+        
+        .song-info {
+            font-size: 18px;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>MP3 Player</h1>
+    
+    <!-- This div is the target for HTMX updates -->
+    <!-- When you click prev/next, only THIS part updates -->
+    <div id="player-controls">
+        <div class="song-info">
+            <strong>Now Playing:</strong> {{ current_song }}
+        </div>
+        <div>
+            Track {{ current_index + 1 }} of {{ total_songs }}
+        </div>
+    </div>
+    
+    <!-- This is the actual HTML5 audio player -->
+    <!-- The browser handles ALL the playback, buffering, seeking, etc. -->
+    <!-- The id="audio-player" lets us control it with JavaScript -->
+    <audio id="audio-player" controls>
+        <source src="/player/stream/{{ current_index }}" type="audio/mpeg">
+        Your browser doesn't support audio playback.
+    </audio>
+    
+    <div class="controls">
+        <!-- Previous button -->
+        <!-- hx-post sends a POST request to /player/prev -->
+        <!-- hx-target="#player-controls" says "update the controls div" -->
+        <!-- hx-swap="innerHTML" says "replace what's inside" -->
+        <button 
+            hx-post="/player/prev"
+            hx-target="#player-controls"
+            hx-swap="innerHTML">
+            ⏮️ Previous
+        </button>
+        
+        <!-- Next button - same pattern -->
+        <button 
+            hx-post="/player/next"
+            hx-target="#player-controls"
+            hx-swap="innerHTML">
+            Next ⏭️
+        </button>
+    </div>
+    
+    <script>
+        // This JavaScript handles loading the new song when you click prev/next
+        // We listen for HTMX's afterSwap event, which fires after the controls update
+        document.body.addEventListener('htmx:afterSwap', function(event) {
+            // Only run this for our player controls, not other HTMX updates
+            if (event.detail.target.id === 'player-controls') {
+                // Get the new song index from the updated HTML
+                const songInfo = event.detail.target.textContent;
+                const match = songInfo.match(/Track (\d+)/);
+                
+                if (match) {
+                    const newIndex = parseInt(match[1]) - 1;
+                    const audioPlayer = document.getElementById('audio-player');
+                    const source = audioPlayer.querySelector('source');
+                    
+                    // Update the audio source to the new song
+                    source.src = `/player/stream/${newIndex}`;
+                    
+                    // Tell the audio element to load and play the new song
+                    audioPlayer.load();
+                    audioPlayer.play();
+                }
+            }
+        });
+    </script>
+</body>
+</html>
