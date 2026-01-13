@@ -571,7 +571,7 @@ impl CondvarToo {
 // For a more general purpose reader-writer lock, however, it is definitely worth opti‐
 // mizing further, to bring the performance of write-locking and -unlocking near the
 // performance of an efficient 3-state mutex.
-pub struct RwLock<T> {
+pub struct RwLockToo<T> {
     /// The number of readers, or u32::MAX if write-locked.
     state: AtomicU32,
     /// Incremented on each write lock acquisition. Prevents spurious wakeups
@@ -582,9 +582,9 @@ pub struct RwLock<T> {
     value: UnsafeCell<T>,
 }
 
-unsafe impl<T> Sync for RwLock<T> where T: Send + Sync {}
+unsafe impl<T> Sync for RwLockToo<T> where T: Send + Sync {}
 
-impl<T> RwLock<T> {
+impl<T> RwLockToo<T> {
     pub const fn new(value: T) -> Self {
         Self {
             state: AtomicU32::new(0),
@@ -653,7 +653,7 @@ impl<T> RwLock<T> {
 }
 
 pub struct ReadGuard<'a, T> {
-    rwlock: &'a RwLock<T>,
+    rwlock: &'a RwLockToo<T>,
 }
 
 impl<T> Deref for ReadGuard<'_, T> {
@@ -685,7 +685,7 @@ impl<T> Drop for ReadGuard<'_, T> {
 }
 
 pub struct WriteGuard<'a, T> {
-    rwlock: &'a RwLock<T>,
+    rwlock: &'a RwLockToo<T>,
 }
 
 impl<T> Deref for WriteGuard<'_, T> {

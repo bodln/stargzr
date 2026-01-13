@@ -3,7 +3,12 @@ use axum::extract::{Path, State};
 use axum::middleware::Next;
 use axum::response::IntoResponse;
 use axum::routing::post;
-use axum::{Router, response::Html, routing::get};
+use axum::{
+    Router,
+    http::{HeaderMap, header},
+    response::Html,
+    routing::get,
+};
 use http_body_util::{BodyExt, combinators::BoxBody};
 use hyper::body::Frame;
 use hyper::body::{Body, Bytes};
@@ -13,15 +18,18 @@ use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
 use local_ip_address;
-use network_tests::primitives::{ArcToo, MutexToo};
-use tokio::fs::File;
+use network_tests::primitives::{ArcToo, MutexToo, RwLockToo};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::fs::File;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::net::{TcpListener, TcpStream};
-use tower::ServiceBuilder;
 use tokio_util::io::ReaderStream;
+use tower::ServiceBuilder;
+use uuid::Uuid;
 
 use network_tests::middlewares::{Logger, RateLimit, SpawnRequest, empty, full};
 
@@ -99,7 +107,7 @@ async fn echo(
 // App state holds the counter value
 // Arc = Atomic Reference Counted (thread-safe sharing)
 // Mutex = Mutual Exclusion (only one thread can modify at a time)
-struct AppState {
+struct AppStateTest {
     count: MutexToo<u32>,
 }
 
@@ -149,7 +157,7 @@ impl IntoResponse for CounterPartial {
 }
 
 // Handler for GET / - Initial page load
-async fn handler(State(state): State<ArcToo<AppState>>) -> GreetingTemplate {
+async fn handler(State(state): State<ArcToo<AppStateTest>>) -> GreetingTemplate {
     // State(state) extracts the Arc<AppState> from the router
 
     let count = *state.count.lock();
@@ -166,7 +174,7 @@ async fn handler(State(state): State<ArcToo<AppState>>) -> GreetingTemplate {
 }
 
 // Handler for POST /increment - HTMX calls this
-async fn increment(State(state): State<ArcToo<AppState>>) -> CounterPartial {
+async fn increment(State(state): State<ArcToo<AppStateTest>>) -> CounterPartial {
     let mut count = state.count.lock();
     // mut because we're modifying the value
 
@@ -184,33 +192,46 @@ async fn hello() -> Html<&'static str> {
     Html(include_str!("../templates/index.html"))
 }
 
-// This struct holds all the data about our music player's current state
-// Think of it as the "brain" that remembers what's playing, what's in the playlist, etc.
-struct PlayerState {
-    // The list of all MP3 files we found in the folder
-    playlist: Vec<String>,
-    // Which song in the playlist is currently selected (0 = first song, 1 = second, etc.)
-    current_index: usize,
-    // The actual folder path where your MP3s live
-    music_folder: PathBuf,
+// ============================================================================
+// DATA STRUCTURES
+// ============================================================================
+
+#[derive(Clone)]
+struct SongInfo {
+    filename: String,
+    size: u64,
+    duration_secs: Option<u32>, // Could parse from ID3 tags
 }
 
-// We wrap PlayerState in Arc<Mutex<>> so multiple requests can safely share and modify it
-// Arc = multiple owners can reference it
-// Mutex = only one can modify at a time (prevents race conditions)
-type SharedState = ArcToo<MutexToo<PlayerState>>;
+struct PlayerSession {
+    current_index: usize,
+    last_activity: std::time::Instant,
+}
 
-// This template renders the complete player page when you first visit
+struct AppState {
+    // Read-only shared data (no locking needed for reads)
+    playlist: ArcToo<Vec<SongInfo>>,
+    music_folder: ArcToo<PathBuf>,
+
+    // Per-user sessions (needs locking)
+    sessions: RwLockToo<HashMap<String, PlayerSession>>,
+}
+
+type SharedState = ArcToo<AppState>;
+
+// ============================================================================
+// TEMPLATES
+// ============================================================================
+
 #[derive(Template)]
 #[template(path = "player.html")]
 struct PlayerTemplate {
     current_song: String,
     current_index: usize,
     total_songs: usize,
+    session_id: String,
 }
 
-// This template renders ONLY the song info section that HTMX will swap in
-// It's tiny - just the song name and progress info
 #[derive(Template)]
 #[template(path = "player_controls.html")]
 struct PlayerControlsTemplate {
@@ -219,15 +240,25 @@ struct PlayerControlsTemplate {
     total_songs: usize,
 }
 
-// We need to tell Axum how to turn our templates into HTTP responses
 impl IntoResponse for PlayerTemplate {
     fn into_response(self) -> axum::response::Response {
         match self.render() {
-            Ok(html) => Html(html).into_response(),
-            Err(err) => (
+            Ok(html) => Response::builder()
+                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                .header(
+                    header::SET_COOKIE,
+                    format!(
+                        "player_session={}; Path=/player; HttpOnly; SameSite=Strict; Max-Age=3600",
+                        self.session_id
+                    ),
+                )
+                .body(axum::body::Body::from(html))
+                .unwrap(),
+            Err(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Template error: {}", err),
-            ).into_response(),
+                format!("Template error: {}", e),
+            )
+                .into_response(),
         }
     }
 }
@@ -236,147 +267,253 @@ impl IntoResponse for PlayerControlsTemplate {
     fn into_response(self) -> axum::response::Response {
         match self.render() {
             Ok(html) => Html(html).into_response(),
-            Err(err) => (
+            Err(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Template error: {}", err),
-            ).into_response(),
+                format!("Template error: {}", e),
+            )
+                .into_response(),
         }
     }
 }
 
-// Handler for the initial page load - GET /player
-async fn player_page(State(state): State<SharedState>) -> PlayerTemplate {
-    let state = state.lock();
-    
-    // If we have songs in the playlist, show the current one
-    // If playlist is empty, show a placeholder message
-    let current_song = state.playlist
-        .get(state.current_index)
-        .cloned()
+// ============================================================================
+// SESSION MANAGEMENT
+// ============================================================================
+
+fn get_session_id(headers: &HeaderMap) -> String {
+    headers
+        .get(header::COOKIE)
+        .and_then(|cookie| cookie.to_str().ok())
+        .and_then(|cookies| {
+            cookies.split(';').find_map(|cookie| {
+                let cookie = cookie.trim();
+                cookie.strip_prefix("player_session=")
+            })
+        })
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| Uuid::new_v4().to_string())
+}
+
+fn get_or_create_session(state: &AppState, session_id: &str) -> usize {
+    let mut sessions = state.sessions.write();
+
+    // Cleanup old sessions (older than 1 hour)
+    let now = std::time::Instant::now();
+    sessions.retain(|_, session| now.duration_since(session.last_activity).as_secs() < 3600);
+
+    let session = sessions
+        .entry(session_id.to_string())
+        .or_insert(PlayerSession {
+            current_index: 0,
+            last_activity: now,
+        });
+
+    session.last_activity = now;
+    session.current_index
+}
+
+fn update_session_index(state: &AppState, session_id: &str, new_index: usize) {
+    let mut sessions = state.sessions.write();
+    if let Some(session) = sessions.get_mut(session_id) {
+        session.current_index = new_index;
+        session.last_activity = std::time::Instant::now();
+    }
+}
+
+// ============================================================================
+// HANDLERS
+// ============================================================================
+
+async fn player_page(State(state): State<SharedState>, headers: HeaderMap) -> PlayerTemplate {
+    let session_id = get_session_id(&headers);
+    let current_index = get_or_create_session(&state, &session_id);
+
+    let current_song = state
+        .playlist
+        .get(current_index)
+        .map(|s| s.filename.clone())
         .unwrap_or_else(|| "No songs found".to_string());
-    
+
     PlayerTemplate {
         current_song,
-        current_index: state.current_index,
+        current_index,
         total_songs: state.playlist.len(),
+        session_id,
     }
 }
 
-// Handler for clicking the "Next" button - POST /player/next
-async fn next_song(State(state): State<SharedState>) -> PlayerControlsTemplate {
-    let mut state = state.lock();
-    
-    // Only advance if we're not at the last song
-    if state.current_index < state.playlist.len().saturating_sub(1) {
-        state.current_index += 1;
-    }
-    
-    let current_song = state.playlist
-        .get(state.current_index)
-        .cloned()
+async fn next_song(State(state): State<SharedState>, headers: HeaderMap) -> PlayerControlsTemplate {
+    let session_id = get_session_id(&headers);
+    let current_index = get_or_create_session(&state, &session_id);
+
+    let new_index = (current_index + 1).min(state.playlist.len().saturating_sub(1));
+    update_session_index(&state, &session_id, new_index);
+
+    let current_song = state
+        .playlist
+        .get(new_index)
+        .map(|s| s.filename.clone())
         .unwrap_or_else(|| "No songs found".to_string());
-    
+
     PlayerControlsTemplate {
         current_song,
-        current_index: state.current_index,
+        current_index: new_index,
         total_songs: state.playlist.len(),
     }
 }
 
-// Handler for clicking the "Previous" button - POST /player/prev
-async fn prev_song(State(state): State<SharedState>) -> PlayerControlsTemplate {
-    let mut state = state.lock();
-    
-    // Only go back if we're not at the first song
-    if state.current_index > 0 {
-        state.current_index -= 1;
-    }
-    
-    let current_song = state.playlist
-        .get(state.current_index)
-        .cloned()
+async fn prev_song(State(state): State<SharedState>, headers: HeaderMap) -> PlayerControlsTemplate {
+    let session_id = get_session_id(&headers);
+    let current_index = get_or_create_session(&state, &session_id);
+
+    let new_index = current_index.saturating_sub(1);
+    update_session_index(&state, &session_id, new_index);
+
+    let current_song = state
+        .playlist
+        .get(new_index)
+        .map(|s| s.filename.clone())
         .unwrap_or_else(|| "No songs found".to_string());
-    
+
     PlayerControlsTemplate {
         current_song,
-        current_index: state.current_index,
+        current_index: new_index,
         total_songs: state.playlist.len(),
     }
 }
 
-// This is the CRITICAL function for speed - it streams the MP3 file
-// Instead of loading the entire file into memory, it reads and sends chunks
 async fn stream_audio(
     State(state): State<SharedState>,
     Path(index): Path<usize>,
+    headers: HeaderMap,
 ) -> Result<axum::response::Response, StatusCode> {
-    let state = state.lock();
-    
-    // Get the filename from our playlist
-    let filename = state.playlist
-        .get(index)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    
-    // Build the full path to the MP3 file
-    let file_path = state.music_folder.join(filename);
-    
-    // Open the file asynchronously (non-blocking)
-    let file = File::open(&file_path)
-        .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
-    
-    // Convert the file into a stream of chunks
-    // This is what makes it fast - we send data as we read it
-    let stream = ReaderStream::new(file);
-    let body = axum::body::Body::from_stream(stream);
-    
-    // Set proper headers so the browser knows it's an audio file
-    // Content-Type tells the browser it's MP3
-    // Accept-Ranges enables seeking (jumping to different parts of the song)
-    Ok(Response::builder()
-        .header(axum::http::header::CONTENT_TYPE, "audio/mpeg")
-        .header(axum::http::header::ACCEPT_RANGES, "bytes")
-        .body(body)
-        .unwrap())
-}
+    // Get song info
+    let song = state.playlist.get(index).ok_or(StatusCode::NOT_FOUND)?;
+    let file_path = state.music_folder.join(&song.filename);
+    let file_size = song.size;
 
-// Initialize the music player by scanning the folder for MP3 files
-async fn init_player_state(music_folder: PathBuf) -> SharedState {
-    let mut playlist = Vec::new();
-    
-    // Read all entries in the directory
-    if let Ok(mut entries) = tokio::fs::read_dir(&music_folder).await {
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            // Only include files that end with .mp3
-            if let Some(filename) = entry.file_name().to_str() {
-                if filename.ends_with(".mp3") {
-                    playlist.push(filename.to_string());
+    // Parse Range header if present
+    if let Some(range_value) = headers.get(header::RANGE) {
+        if let Ok(range_str) = range_value.to_str() {
+            if let Some(range_str) = range_str.strip_prefix("bytes=") {
+                let parts: Vec<&str> = range_str.split('-').collect();
+
+                if parts.len() == 2 {
+                    let start: u64 = parts[0].parse().unwrap_or(0);
+                    let end: u64 = if parts[1].is_empty() {
+                        file_size - 1
+                    } else {
+                        parts[1].parse().unwrap_or(file_size - 1).min(file_size - 1)
+                    };
+
+                    let mut file = File::open(&file_path)
+                        .await
+                        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+                    file.seek(std::io::SeekFrom::Start(start))
+                        .await
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+                    let length = end - start + 1;
+                    let limited_file = file.take(length);
+                    let stream = ReaderStream::with_capacity(limited_file, 128 * 1024);
+                    let body = axum::body::Body::from_stream(stream);
+
+                    return Ok(Response::builder()
+                        .status(StatusCode::PARTIAL_CONTENT)
+                        .header(header::CONTENT_TYPE, "audio/mpeg")
+                        .header(header::ACCEPT_RANGES, "bytes")
+                        .header(
+                            header::CONTENT_RANGE,
+                            format!("bytes {}-{}/{}", start, end, file_size),
+                        )
+                        .header(header::CONTENT_LENGTH, length.to_string())
+                        .header(header::CACHE_CONTROL, "public, max-age=31536000")
+                        .body(body)
+                        .unwrap());
                 }
             }
         }
     }
-    
-    // Sort alphabetically so songs are in a predictable order
-    playlist.sort();
-    
-    ArcToo::new(MutexToo::new(PlayerState {
-        playlist,
-        current_index: 0,
-        music_folder,
-    }))
+
+    // No range - stream full file
+    let file = File::open(&file_path)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    let stream = ReaderStream::with_capacity(file, 128 * 1024);
+    let body = axum::body::Body::from_stream(stream);
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "audio/mpeg")
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_LENGTH, file_size.to_string())
+        .header(header::CACHE_CONTROL, "public, max-age=31536000")
+        .body(body)
+        .unwrap())
 }
 
-async fn add_ngrok_header(mut req: Request<axum::body::Body>, next: Next) -> axum::response::Response {
-    req.headers_mut().insert(
-        "ngrok-skip-browser-warning",
-        "true".parse().unwrap(),
-    );
+// ============================================================================
+// INITIALIZATION
+// ============================================================================
+
+async fn init_player_state(music_folder: PathBuf) -> SharedState {
+    let mut playlist = Vec::new();
+
+    if let Ok(mut entries) = tokio::fs::read_dir(&music_folder).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if let Some(filename) = entry.file_name().to_str() {
+                if filename.ends_with(".mp3") {
+                    if let Ok(metadata) = entry.metadata().await {
+                        playlist.push(SongInfo {
+                            filename: filename.to_string(),
+                            size: metadata.len(),
+                            duration_secs: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    playlist.sort_by(|a, b| a.filename.cmp(&b.filename));
+
+    ArcToo::new(AppState {
+        playlist: ArcToo::new(playlist),
+        music_folder: ArcToo::new(music_folder),
+        sessions: RwLockToo::new(HashMap::new()),
+    })
+}
+
+// ============================================================================
+// ROUTER SETUP
+// ============================================================================
+
+pub fn create_player_router(music_folder: PathBuf) -> impl std::future::Future<Output = Router> {
+    async move {
+        let state = init_player_state(music_folder).await;
+
+        Router::new()
+            .route("/", get(player_page))
+            .route("/player", get(player_page))
+            .route("/player/next", post(next_song))
+            .route("/player/prev", post(prev_song))
+            .route("/player/stream/{index}", get(stream_audio))
+            .with_state(state)
+    }
+}
+
+async fn add_ngrok_header(
+    mut req: Request<axum::body::Body>,
+    next: Next,
+) -> axum::response::Response {
+    req.headers_mut()
+        .insert("ngrok-skip-browser-warning", "true".parse().unwrap());
 
     let mut res = next.run(req).await;
-    res.headers_mut().insert(
-        "ngrok-skip-browser-warning",
-        "true".parse().unwrap(),
-    );
+    res.headers_mut()
+        .insert("ngrok-skip-browser-warning", "true".parse().unwrap());
     res
 }
 
@@ -402,40 +539,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let graceful = Arc::new(hyper_util::server::graceful::GracefulShutdown::new());
     let mut signal = std::pin::pin!(shutdown_signal());
 
-    let music_folder = PathBuf::from("D:/Skola/.projekti/Tests/NetworkTests/NetworkTests/music");
-    let player_state = init_player_state(music_folder).await;
-    // ngrok http --url=evolved-gladly-possum.ngrok-free.app 8083
-    tokio::task::spawn(async move {
-        let app = Router::new()
-            .route("/player", get(player_page))
-            .route("/player/next", post(next_song))
-            .route("/player/prev", post(prev_song))
-            .route("/player/stream/{index}", get(stream_audio))
-            .with_state(player_state);
-        
-        let listener = match tokio::net::TcpListener::bind("127.0.0.1:8083").await {
-            Ok(listener) => {
-                println!(
-                    "✓ MP3 Player running on http://{}/player -> https://evolved-gladly-possum.ngrok-free.app/player",
-                    listener.local_addr().unwrap()
-                );
-                listener
-            }
-            Err(e) => {
-                eprintln!("✗ Failed to bind player server: {}", e);
-                return;
-            }
-        };
-        
-        if let Err(e) = axum::serve(listener, app).await {
-            eprintln!("✗ Player server error: {}", e);
-        }
+    let player_router = create_player_router(PathBuf::from(
+        "D:/Skola/.projekti/Tests/NetworkTests/NetworkTests/music",
+    ))
+    .await;
+
+    tokio::spawn(async move {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:8083")
+            .await
+            .unwrap();
+
+        println!(
+            "✓ MP3 Player on http://{}/player -> https://evolved-gladly-possum.ngrok-free.app/player",
+            listener.local_addr().unwrap()
+        );
+        axum::serve(listener, player_router).await.unwrap();
     });
 
     // Setting up the server (inside your tokio::spawn)
     tokio::task::spawn(async {
         // Create shared state
-        let app_state = ArcToo::new(AppState {
+        let app_state = ArcToo::new(AppStateTest {
             count: MutexToo::new(0), // Start at 0
         });
 
