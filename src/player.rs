@@ -7,9 +7,9 @@ use axum::{
     http::{HeaderMap, header},
     response::Html,
     routing::get,
+    response::Response
 };
 use hyper::StatusCode;
-use hyper::Response;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -61,7 +61,7 @@ struct PlayerControlsTemplate {
 }
 
 impl IntoResponse for PlayerTemplate {
-    fn into_response(self) -> axum::response::Response {
+    fn into_response(self) -> Response {
         match self.render() {
             Ok(html) => Response::builder()
                 .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
@@ -84,7 +84,7 @@ impl IntoResponse for PlayerTemplate {
 }
 
 impl IntoResponse for PlayerControlsTemplate {
-    fn into_response(self) -> axum::response::Response {
+    fn into_response(self) -> Response {
         match self.render() {
             Ok(html) => Html(html).into_response(),
             Err(e) => (
@@ -193,12 +193,12 @@ async fn prev_song(State(state): State<SharedState>, headers: HeaderMap) -> Play
         total_songs: state.playlist.len(),
     }
 }
-
+// https://chatgpt.com/c/69691537-f034-832d-adbf-ef224c8ac03b
 async fn stream_audio(
     State(state): State<SharedState>,
     Path(index): Path<usize>,
     headers: HeaderMap,
-) -> Result<axum::response::Response, StatusCode> {
+) -> Result<Response, StatusCode> {
     // Get song info
     let song = state.playlist.get(index).ok_or(StatusCode::NOT_FOUND)?;
     let file_path = state.music_folder.join(&song.filename);
@@ -304,7 +304,7 @@ pub fn create_player_router(music_folder: PathBuf) -> impl std::future::Future<O
             .route("/player/next", post(next_song))
             .route("/player/prev", post(prev_song))
             .route("/player/stream/{index}", get(stream_audio))
-            .with_state(state)
+            .with_state(state) // This allows the copying of the state via State(state)
     }
 }
 
