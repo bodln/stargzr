@@ -1,8 +1,7 @@
 use http_body_util::{BodyExt, combinators::BoxBody};
 use http_body_util::{Empty, Full};
-use hyper::body::Bytes;
-use hyper::StatusCode;
-use hyper::Response;
+use hyper::{Response, StatusCode, Method, Request};
+use hyper::body::{Bytes, Body, Frame};
 use pin_project::pin_project;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -12,6 +11,75 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::time::Sleep;
 use tower::Service;
+
+// Main request handler - routes incoming HTTP requests
+// Takes: Request with incoming body stream
+// Returns: Response with a BoxBody (type-erased body that streams Bytes chunks)
+pub async fn echo(
+    req: Request<hyper::body::Incoming>,
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
+    // Pattern match on (method, path) for manual routing
+    match (req.method(), req.uri().path()) {
+        // GET / - Return simple text response
+        (&Method::GET, "/") => {
+            // full() creates a body with all data at once (buffered, not streamed)
+            Ok(Response::new(full("Try POSTing data to /echo")))
+        }
+
+        // POST /echo - Echo the request body back (streaming, no buffering)
+        (&Method::POST, "/echo") => {
+            // into_body() gives us the body stream, boxed() type-erases it
+            // This streams frames through as they arrive - no memory buffering
+            Ok(Response::new(req.into_body().boxed()))
+        }
+
+        // POST /echo/uppercase - Transform body to uppercase while streaming
+        (&Method::POST, "/echo/uppercase") => {
+            // map_frame() transforms each chunk as it arrives (streaming transformation)
+            let frame_stream = req.into_body().map_frame(|frame| {
+                // Extract data from the frame (or empty if it's trailers/metadata)
+                let frame = if let Ok(data) = frame.into_data() {
+                    // data is one Bytes chunk, transform each byte to uppercase
+                    data.iter()
+                        .map(|byte| byte.to_ascii_uppercase())
+                        .collect::<Bytes>()
+                } else {
+                    Bytes::new()
+                };
+                // Wrap back into a data frame
+                Frame::data(frame)
+            });
+
+            Ok(Response::new(frame_stream.boxed()))
+        }
+
+        // POST /echo/reversed - Reverse the entire body (requires buffering)
+        (&Method::POST, "/echo/reversed") => {
+            // Check estimated body size to prevent OOM attacks
+            let upper = req.body().size_hint().upper().unwrap_or(u64::MAX);
+            if upper > 1024 * 64 {
+                let mut resp = Response::new(full("Body too big"));
+                *resp.status_mut() = hyper::StatusCode::PAYLOAD_TOO_LARGE;
+                return Ok(resp);
+            }
+
+            // collect() waits for ALL frames and concatenates them into memory
+            // This is buffering - we need the entire body to reverse it
+            let whole_body = req.collect().await?.to_bytes();
+            let reversed_body = whole_body.iter().rev().cloned().collect::<Vec<u8>>();
+
+            Ok(Response::new(full(reversed_body)))
+        }
+
+        // 404 for all other routes
+        _ => {
+            let mut not_found = Response::new(empty());
+            *not_found.status_mut() = StatusCode::NOT_FOUND;
+            println!("Not found: {} {}", req.method(), req.uri().path());
+            Ok(not_found)
+        }
+    }
+}
 
 // Creates empty body (0 bytes) - used for 404s
 pub fn empty() -> BoxBody<Bytes, hyper::Error> {
