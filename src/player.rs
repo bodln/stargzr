@@ -34,6 +34,8 @@ struct PlayerSession {
 
 struct AppState {
     // Read-only shared data (no locking needed for reads)
+    // These are in Arc because outherwise they aren't easy to Clone
+    // this way instead of cloning the entire vector we just increment a reference count
     playlist: Arc<Vec<SongInfo>>,
     music_folder: Arc<PathBuf>,
 
@@ -41,6 +43,7 @@ struct AppState {
     sessions: RwLock<HashMap<String, PlayerSession>>,
 }
 
+// Wrapping the state in an Arc makes it very cheap to Clone 
 type SharedState = Arc<AppState>;
 
 #[derive(Template)]
@@ -110,7 +113,8 @@ fn get_session_id(headers: &HeaderMap) -> String {
         .unwrap_or_else(|| Uuid::new_v4().to_string())
 }
 
-fn get_or_create_session(state: &AppState, session_id: &str) -> usize {
+// Position in playlist per user
+fn get_or_create_position(state: &AppState, session_id: &str) -> usize {
     let mut sessions = state.sessions.write();
 
     // Cleanup old sessions (older than 1 hour)
@@ -138,7 +142,7 @@ fn update_session_index(state: &AppState, session_id: &str, new_index: usize) {
 
 async fn player_page(State(state): State<SharedState>, headers: HeaderMap) -> PlayerTemplate {
     let session_id = get_session_id(&headers);
-    let current_index = get_or_create_session(&state, &session_id);
+    let current_index = get_or_create_position(&state, &session_id);
 
     let current_song = state
         .playlist
@@ -156,7 +160,7 @@ async fn player_page(State(state): State<SharedState>, headers: HeaderMap) -> Pl
 
 async fn next_song(State(state): State<SharedState>, headers: HeaderMap) -> PlayerControlsTemplate {
     let session_id = get_session_id(&headers);
-    let current_index = get_or_create_session(&state, &session_id);
+    let current_index = get_or_create_position(&state, &session_id);
 
     let new_index = (current_index + 1).min(state.playlist.len().saturating_sub(1));
     update_session_index(&state, &session_id, new_index);
@@ -176,7 +180,7 @@ async fn next_song(State(state): State<SharedState>, headers: HeaderMap) -> Play
 
 async fn prev_song(State(state): State<SharedState>, headers: HeaderMap) -> PlayerControlsTemplate {
     let session_id = get_session_id(&headers);
-    let current_index = get_or_create_session(&state, &session_id);
+    let current_index = get_or_create_position(&state, &session_id);
 
     let new_index = current_index.saturating_sub(1);
     update_session_index(&state, &session_id, new_index);
@@ -193,7 +197,7 @@ async fn prev_song(State(state): State<SharedState>, headers: HeaderMap) -> Play
         total_songs: state.playlist.len(),
     }
 }
-// https://chatgpt.com/c/69691537-f034-832d-adbf-ef224c8ac03b
+
 async fn stream_audio(
     State(state): State<SharedState>,
     Path(index): Path<usize>,
@@ -208,6 +212,9 @@ async fn stream_audio(
     if let Some(range_value) = headers.get(header::RANGE) {
         if let Ok(range_str) = range_value.to_str() {
             if let Some(range_str) = range_str.strip_prefix("bytes=") {
+                // Range requests have the format "start-end", and both parts are optional. 
+                // You might see "bytes=0-999" (first 1000 bytes), "bytes=2000000-" (from byte 2 million to the end), 
+                // or even "bytes=-1000" (last 1000 bytes, though we don't handle this case)
                 let parts: Vec<&str> = range_str.split('-').collect();
 
                 if parts.len() == 2 {
@@ -226,20 +233,26 @@ async fn stream_audio(
                         .await
                         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-                    let length = end - start + 1;
+                    let length = end - start + 1; // example end = 0, start = 0, that is counted as one byte (the first one)
                     let limited_file = file.take(length);
-                    let stream = ReaderStream::with_capacity(limited_file, 128 * 1024);
+                    let stream = ReaderStream::with_capacity(limited_file, 128 * 1024); // we read 128 kilobytes at a time
                     let body = axum::body::Body::from_stream(stream);
 
                     return Ok(Response::builder()
                         .status(StatusCode::PARTIAL_CONTENT)
                         .header(header::CONTENT_TYPE, "audio/mpeg")
+                        // We tell the browser that this server supports range requests on this resource, 
+                        // which enables the seeking functionality in the HTML5 audio player.
                         .header(header::ACCEPT_RANGES, "bytes")
                         .header(
-                            header::CONTENT_RANGE,
+                            header::CONTENT_RANGE, // required for partial content responses
                             format!("bytes {}-{}/{}", start, end, file_size),
                         )
-                        .header(header::CONTENT_LENGTH, length.to_string())
+                        .header(header::CONTENT_LENGTH, length.to_string()) // specifies how many bytes are in this particular response body (not the whole file)
+                        // CACHE_CONTROL header tells browsers and intermediate proxies that this content can be cached 
+                        // for up to 31,536,000 seconds (one year). 
+                        // Since MP3 files don't change, aggressive caching dramatically improves performance for repeated playback.
+                        // (seeking to previously loaded part of the song)
                         .header(header::CACHE_CONTROL, "public, max-age=31536000")
                         .body(body)
                         .unwrap());
