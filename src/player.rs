@@ -321,7 +321,7 @@ pub fn create_player_router(music_folder: PathBuf) -> impl std::future::Future<O
     }
 }
 
-pub async fn initialize(player_router: Router) {
+pub async fn initialize(path_buf: PathBuf) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8083")
             .await
             .unwrap();
@@ -330,5 +330,9 @@ pub async fn initialize(player_router: Router) {
             "✓ MP3 Player on http://{}/player -> https://evolved-gladly-possum.ngrok-free.app/player",
             listener.local_addr().unwrap()
         );
-        axum::serve(listener, player_router).await.unwrap();
+        
+        axum::serve(
+            listener, 
+            create_player_router(path_buf).await)
+        .await.unwrap();
 }

@@ -5,7 +5,6 @@ use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
 use local_ip_address;
 use network_tests::{axum_test, player};
-use network_tests::player::create_player_router;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -42,12 +41,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     //  #   Player  #
     //  #############
 
-    let player_router = create_player_router(PathBuf::from(
+    tokio::spawn(player::initialize(PathBuf::from(
         "D:/Skola/.projekti/Tests/NetworkTests/NetworkTests/music",
-    ))
-    .await;
-
-    tokio::spawn(player::initialize(player_router));
+    )));
 
     //  ####################
     //  #   Hyper testing  #
