@@ -1,21 +1,25 @@
 use askama::Template;
-use axum::extract::{Path, State};
+use axum::extract::ws::{Message, WebSocket};
+use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{
     Router,
     http::{HeaderMap, header},
     response::Html,
+    response::Response,
     routing::get,
-    response::Response
 };
+use futures_util::{SinkExt, StreamExt};
 use hyper::StatusCode;
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::sync::broadcast;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
@@ -23,28 +27,80 @@ use uuid::Uuid;
 struct SongInfo {
     filename: String,
     size: u64,
-    _duration_secs: Option<u32>, // Could parse from ID3 tags
+    _duration_secs: Option<u32>,
 }
 
-// Represents a single user's player state
+// Represents a single user's PRIVATE player state
 struct PlayerSession {
     current_index: usize,
     last_activity: std::time::Instant,
 }
 
+// Represents a broadcaster's state (the authoritative source)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct BroadcastState {
+    broadcaster_id: String,
+    song_index: usize,
+    playback_time: f64, // Current position in seconds
+    is_playing: bool,
+    server_timestamp_ms: u128, // When this state was recorded
+}
+
 struct AppState {
-    // Read-only shared data (no locking needed for reads)
-    // These are in Arc because outherwise they aren't easy to Clone
-    // this way instead of cloning the entire vector we just increment a reference count
     playlist: Arc<Vec<SongInfo>>,
     music_folder: Arc<PathBuf>,
 
-    // Per-user sessions (needs locking)
+    // Private mode sessions
     sessions: RwLock<HashMap<String, PlayerSession>>,
+
+    // Radio mode state
+    // Maps broadcaster_id -> their current state
+    broadcast_states: RwLock<HashMap<String, BroadcastState>>,
+
+    // Broadcast channel for real-time updates
+    // When a broadcaster updates their state, we send it here
+    // and all their listeners receive it
+    broadcast_tx: broadcast::Sender<RadioMessage>,
 }
 
-// Wrapping the state in an Arc makes it very cheap to Clone 
 type SharedState = Arc<AppState>;
+
+// Messages sent over WebSocket
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum RadioMessage {
+    // Leader sends this when play/pause/seek/next/prev happens
+    Sync {
+        broadcaster_id: String,
+        song_index: usize,
+        playback_time: f64,
+        is_playing: bool,
+        server_timestamp_ms: u128,
+    },
+
+    // Leader sends this every 2-3 seconds to prevent drift
+    Heartbeat {
+        broadcaster_id: String,
+        playback_time: f64,
+        server_timestamp_ms: u128,
+    },
+
+    // Client -> Server: "I want to tune into this broadcaster"
+    TuneIn {
+        broadcaster_id: String,
+    },
+
+    // Client -> Server: "I'm going back to private mode"
+    TuneOut,
+
+    // Client -> Server: "I'm broadcasting, here's my state"
+    BroadcastUpdate {
+        broadcaster_id: String,
+        song_index: usize,
+        playback_time: f64,
+        is_playing: bool,
+    },
+}
 
 #[derive(Template)]
 #[template(path = "player.html")]
@@ -113,11 +169,8 @@ fn get_session_id(headers: &HeaderMap) -> String {
         .unwrap_or_else(|| Uuid::new_v4().to_string())
 }
 
-// Position in playlist per user
 fn get_or_create_position(state: &AppState, session_id: &str) -> usize {
     let mut sessions = state.sessions.write();
-
-    // Cleanup old sessions (older than 1 hour)
     let now = std::time::Instant::now();
     sessions.retain(|_, session| now.duration_since(session.last_activity).as_secs() < 3600);
 
@@ -138,6 +191,14 @@ fn update_session_index(state: &AppState, session_id: &str, new_index: usize) {
         session.current_index = new_index;
         session.last_activity = std::time::Instant::now();
     }
+}
+
+// Get current server time in milliseconds (for timestamping)
+fn now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
 }
 
 async fn player_page(State(state): State<SharedState>, headers: HeaderMap) -> PlayerTemplate {
@@ -203,18 +264,13 @@ async fn stream_audio(
     Path(index): Path<usize>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    // Get song info
     let song = state.playlist.get(index).ok_or(StatusCode::NOT_FOUND)?;
     let file_path = state.music_folder.join(&song.filename);
     let file_size = song.size;
 
-    // Parse Range header if present
     if let Some(range_value) = headers.get(header::RANGE) {
         if let Ok(range_str) = range_value.to_str() {
             if let Some(range_str) = range_str.strip_prefix("bytes=") {
-                // Range requests have the format "start-end", and both parts are optional. 
-                // You might see "bytes=0-999" (first 1000 bytes), "bytes=2000000-" (from byte 2 million to the end), 
-                // or even "bytes=-1000" (last 1000 bytes, though we don't handle this case)
                 let parts: Vec<&str> = range_str.split('-').collect();
 
                 if parts.len() == 2 {
@@ -233,26 +289,20 @@ async fn stream_audio(
                         .await
                         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-                    let length = end - start + 1; // example end = 0, start = 0, that is counted as one byte (the first one)
+                    let length = end - start + 1;
                     let limited_file = file.take(length);
-                    let stream = ReaderStream::with_capacity(limited_file, 128 * 1024); // we read 128 kilobytes at a time
+                    let stream = ReaderStream::with_capacity(limited_file, 128 * 1024);
                     let body = axum::body::Body::from_stream(stream);
 
                     return Ok(Response::builder()
                         .status(StatusCode::PARTIAL_CONTENT)
                         .header(header::CONTENT_TYPE, "audio/mpeg")
-                        // We tell the browser that this server supports range requests on this resource, 
-                        // which enables the seeking functionality in the HTML5 audio player.
                         .header(header::ACCEPT_RANGES, "bytes")
                         .header(
-                            header::CONTENT_RANGE, // required for partial content responses
+                            header::CONTENT_RANGE,
                             format!("bytes {}-{}/{}", start, end, file_size),
                         )
-                        .header(header::CONTENT_LENGTH, length.to_string()) // specifies how many bytes are in this particular response body (not the whole file)
-                        // CACHE_CONTROL header tells browsers and intermediate proxies that this content can be cached 
-                        // for up to 31,536,000 seconds (one year). 
-                        // Since MP3 files don't change, aggressive caching dramatically improves performance for repeated playback.
-                        // (seeking to previously loaded part of the song)
+                        .header(header::CONTENT_LENGTH, length.to_string())
                         .header(header::CACHE_CONTROL, "public, max-age=31536000")
                         .body(body)
                         .unwrap());
@@ -261,7 +311,6 @@ async fn stream_audio(
         }
     }
 
-    // No range - stream full file
     let file = File::open(&file_path)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
@@ -277,6 +326,179 @@ async fn stream_audio(
         .header(header::CACHE_CONTROL, "public, max-age=31536000")
         .body(body)
         .unwrap())
+}
+
+// Upgrade with WebRTC? to have p2p
+
+// WebSocket handler
+async fn radio_websocket(
+    ws: WebSocketUpgrade,
+    State(state): State<SharedState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(|socket| handle_radio_connection(socket, state))
+}
+
+use tokio::sync::{Mutex, mpsc};
+
+async fn handle_radio_connection(socket: WebSocket, state: SharedState) {
+    let (mut sender, mut receiver) = socket.split();
+
+    // Subscription to the global broadcast channel.
+    // Receives real-time updates from all broadcasters, which the send task
+    // filters based on which broadcaster this client is tuned to.
+    let global_rx = state.broadcast_tx.subscribe();
+
+    // Private channel for responses from the receive task to the send task (same WebSocket)
+    let (out_tx, mut out_rx) = mpsc::channel::<RadioMessage>(32);
+
+    let tuned_broadcaster = Arc::new(Mutex::new(None::<String>));
+    let my_broadcaster_id = Arc::new(Mutex::new(None::<String>));
+
+    let tuned_for_send = tuned_broadcaster.clone();
+    let mut global_rx_for_send = global_rx.resubscribe();
+
+    let mut tasks = tokio::task::JoinSet::new();
+
+    // Send task
+    tasks.spawn(async move {
+        loop {
+            tokio::select! {
+                Some(msg) = out_rx.recv() => {
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        if sender.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+
+                Ok(msg) = global_rx_for_send.recv() => {
+                    let should_send = match &msg {
+                        RadioMessage::Sync { broadcaster_id, .. } => {
+                            let guard = tuned_for_send.lock().await;
+                            guard.as_ref() == Some(broadcaster_id)
+                        }
+                        RadioMessage::Heartbeat { broadcaster_id, .. } => {
+                            let guard = tuned_for_send.lock().await;
+                            guard.as_ref() == Some(broadcaster_id)
+                        }
+                        _ => false,
+                    };
+
+                    if should_send {
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            if sender.send(Message::Text(json.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                else => {
+                    break;
+                }
+            }
+        }
+    });
+
+    // Receive task
+    let state_clone = state.clone();
+    let tuned_for_recv = tuned_broadcaster.clone();
+    let _my_id_for_recv = my_broadcaster_id.clone();
+
+    tasks.spawn(async move {
+        while let Some(Ok(msg)) = receiver.next().await {
+            if let Message::Text(text) = msg {
+                println!("Received WebSocket message: {}", text);
+
+                if let Ok(radio_msg) = serde_json::from_str::<RadioMessage>(&text) {
+                    match radio_msg {
+                        RadioMessage::TuneIn { broadcaster_id } => {
+                            println!("Client tuning into: {}", broadcaster_id);
+
+                            {
+                                let mut guard = tuned_for_recv.lock().await;
+                                *guard = Some(broadcaster_id.clone());
+                            }
+
+                            let maybe_state = {
+                                let broadcasts = state_clone.broadcast_states.read();
+                                broadcasts.get(&broadcaster_id).cloned()
+                            };
+
+                            if let Some(b_state) = maybe_state {
+                                println!(
+                                    "Found broadcaster state: song_index={}, playback_time={}",
+                                    b_state.song_index, b_state.playback_time
+                                );
+
+                                let sync_msg = RadioMessage::Sync {
+                                    broadcaster_id: b_state.broadcaster_id.clone(),
+                                    song_index: b_state.song_index,
+                                    playback_time: b_state.playback_time,
+                                    is_playing: b_state.is_playing,
+                                    server_timestamp_ms: now_ms(),
+                                };
+
+                                if out_tx.send(sync_msg).await.is_err() {
+                                    break;
+                                }
+                            } else {
+                                println!("No broadcaster found with id: {}", broadcaster_id);
+                            }
+                        }
+
+                        RadioMessage::TuneOut => {
+                            println!("Client tuned out");
+                            let mut guard = tuned_for_recv.lock().await;
+                            *guard = None;
+                        }
+
+                        RadioMessage::BroadcastUpdate {
+                            broadcaster_id,
+                            song_index,
+                            playback_time,
+                            is_playing,
+                        } => {
+                            println!(
+                                "Broadcast update from {}: song={}, time={:.2}, playing={}",
+                                broadcaster_id, song_index, playback_time, is_playing
+                            );
+
+                            let server_ts = now_ms();
+
+                            let new_state = BroadcastState {
+                                broadcaster_id: broadcaster_id.clone(),
+                                song_index,
+                                playback_time,
+                                is_playing,
+                                server_timestamp_ms: server_ts,
+                            };
+
+                            state_clone
+                                .broadcast_states
+                                .write()
+                                .insert(broadcaster_id.clone(), new_state);
+
+                            let sync_msg = RadioMessage::Sync {
+                                broadcaster_id: broadcaster_id.clone(),
+                                song_index,
+                                playback_time,
+                                is_playing,
+                                server_timestamp_ms: server_ts,
+                            };
+
+                            let _ = state_clone.broadcast_tx.send(sync_msg);
+                        }
+
+                        _ => {}
+                    }
+                }
+            }
+        }
+    });
+
+    tasks.join_next().await;
+    tasks.abort_all();
 }
 
 async fn init_player_state(music_folder: PathBuf) -> SharedState {
@@ -300,10 +522,15 @@ async fn init_player_state(music_folder: PathBuf) -> SharedState {
 
     playlist.sort_by(|a, b| a.filename.cmp(&b.filename));
 
+    // Create a broadcast channel with capacity for 100 messages
+    let (broadcast_tx, _) = broadcast::channel(100);
+
     Arc::new(AppState {
         playlist: Arc::new(playlist),
         music_folder: Arc::new(music_folder),
         sessions: RwLock::new(HashMap::new()),
+        broadcast_states: RwLock::new(HashMap::new()),
+        broadcast_tx,
     })
 }
 
@@ -317,22 +544,22 @@ pub fn create_player_router(music_folder: PathBuf) -> impl std::future::Future<O
             .route("/player/next", post(next_song))
             .route("/player/prev", post(prev_song))
             .route("/player/stream/{index}", get(stream_audio))
-            .with_state(state) // This allows the copying of the state via State(state)
+            .route("/player/radio", get(radio_websocket)) // NEW: WebSocket endpoint
+            .with_state(state)
     }
 }
 
 pub async fn initialize(path_buf: PathBuf) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8083")
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
-        println!(
-            "✓ MP3 Player on http://{}/player -> https://evolved-gladly-possum.ngrok-free.app/player",
-            listener.local_addr().unwrap()
-        );
-        
-        axum::serve(
-            listener, 
-            create_player_router(path_buf).await)
-        .await.unwrap();
+    println!(
+        "✓ MP3 Player on http://{}/player -> https://evolved-gladly-possum.ngrok-free.app/player",
+        listener.local_addr().unwrap()
+    );
+
+    axum::serve(listener, create_player_router(path_buf).await)
+        .await
+        .unwrap();
 }

@@ -4,7 +4,7 @@
     <title>MP3 Player</title>
     <script src="https://unpkg.com/htmx.org@1.9.10"></script>
     <style>
-                body {
+        body {
             font-family: Arial, sans-serif;
             max-width: 800px;
             margin: 50px auto;
@@ -37,7 +37,7 @@
         button:hover {
             background: #0056b3;
         }
-
+        
         button:disabled {
             background: #6c757d;
             cursor: not-allowed;
@@ -52,7 +52,7 @@
             font-size: 18px;
             margin-bottom: 10px;
         }
-
+        
         /* Radio Mode Styles */
         .mode-container {
             background: #e9ecef;
@@ -167,7 +167,7 @@
         </div>
         
         <div class="radio-controls">
-    <!-- Tune In -->
+            <!-- Tune In -->
             <div class="radio-input-group">
                 <input 
                     type="text" 
@@ -197,17 +197,13 @@
     </div>
     
     <!-- Audio Player -->
-        <audio id="audio-player" controls>
+    <audio id="audio-player" controls>
         <source src="/player/stream/{{ current_index }}" type="audio/mpeg">
         Your browser doesn't support audio playback.
     </audio>
     
     <!-- Playback Controls -->
     <div class="controls">
-        <!-- Previous button -->
-        <!-- hx-post sends a POST request to /player/prev -->
-        <!-- hx-target="#player-controls" says "update the controls div" -->
-        <!-- hx-swap="innerHTML" says "replace what's inside" -->
         <button 
             id="prev-btn"
             hx-post="/player/prev"
@@ -216,7 +212,6 @@
             ⏮️ Previous
         </button>
         
-        <!-- Next button - same pattern -->
         <button 
             id="next-btn"
             hx-post="/player/next"
@@ -526,9 +521,7 @@
 
         // HTMX afterSwap handler (existing functionality)
         document.body.addEventListener('htmx:afterSwap', function(event) {
-            // Only run this for our player controls, not other HTMX updates
             if (event.detail.target.id === 'player-controls') {
-                // Get the new song index from the updated HTML
                 const songInfo = event.detail.target.textContent;
                 const match = songInfo.match(/Track (\d+)/);
                 
@@ -537,10 +530,7 @@
                     const audioPlayer = document.getElementById('audio-player');
                     const source = audioPlayer.querySelector('source');
                     
-                    // Update the audio source to the new song
                     source.src = `/player/stream/${newIndex}`;
-                    
-                    // Tell the audio element to load and play the new song
                     audioPlayer.load();
                     audioPlayer.play();
                 }
