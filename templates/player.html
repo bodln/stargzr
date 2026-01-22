@@ -230,8 +230,301 @@
     <div id="debug-log"></div>
     
     <script>
-        // This JavaScript handles loading the new song when you click prev/next
-        // We listen for HTMX's afterSwap event, which fires after the controls update
+        // Debug logging
+        function debugLog(message) {
+            const log = document.getElementById('debug-log');
+            const time = new Date().toLocaleTimeString();
+            log.innerHTML += `[${time}] ${message}<br>`;
+            log.scrollTop = log.scrollHeight;
+            console.log(message);
+        }
+
+        function copySessionId() {
+            const sessionId = document.getElementById('my-session-id').textContent;
+            navigator.clipboard.writeText(sessionId);
+            alert('Session ID copied!');
+        }
+
+        // Radio Player Class
+        class RadioPlayer {
+            constructor(audioElement, sessionId) {
+                this.audio = audioElement;
+                this.sessionId = sessionId;
+                this.mode = 'private';
+                this.tunedBroadcaster = null;
+                this.ws = null;
+                this.heartbeatInterval = null;
+                this.targetTime = 0;
+                this.isBroadcasting = false;
+                
+                debugLog(`Initialized with session ID: ${sessionId}`);
+            }
+
+            connectWebSocket() {
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const wsUrl = `${protocol}//${window.location.host}/player/radio`;
+                
+                debugLog(`Connecting to WebSocket: ${wsUrl}`);
+                this.ws = new WebSocket(wsUrl);
+                
+                this.ws.onopen = () => {
+                    debugLog('✓ WebSocket connected');
+                };
+                
+                this.ws.onmessage = (event) => {
+                    debugLog(`← Received: ${event.data}`);
+                    const msg = JSON.parse(event.data);
+                    this.handleRadioMessage(msg);
+                };
+                
+                this.ws.onerror = (error) => {
+                    debugLog(`✗ WebSocket error: ${error}`);
+                };
+                
+                this.ws.onclose = () => {
+                    debugLog('WebSocket disconnected, reconnecting in 3s...');
+                    setTimeout(() => this.connectWebSocket(), 3000);
+                };
+            }
+
+            handleRadioMessage(msg) {
+                debugLog(`Handling message type: ${msg.type}, mode: ${this.mode}`);
+                
+                if (this.mode !== 'radio') {
+                    debugLog('Ignoring message - not in radio mode');
+                    return;
+                }
+
+                switch (msg.type) {
+                    case 'Sync':
+                        this.syncToBroadcaster(msg);
+                        break;
+                    
+                    case 'Heartbeat':
+                        this.adjustForDrift(msg);
+                        break;
+                }
+            }
+
+            syncToBroadcaster(msg) {
+                const { song_index, playback_time, is_playing, server_timestamp_ms } = msg;
+
+                const now = Date.now();
+                const elapsed = (now - server_timestamp_ms) / 1000;
+
+                if (is_playing) {
+                    this.targetTime = playback_time + elapsed;
+                } else {
+                    this.targetTime = playback_time;
+                }
+
+                debugLog(`Syncing to song ${song_index}, time ${this.targetTime.toFixed(2)}s, playing: ${is_playing}`);
+
+                const currentIndex = this.getCurrentSongIndex();
+                if (currentIndex !== song_index) {
+                    debugLog(`Switching from song ${currentIndex} to song ${song_index}`);
+                    const newSrc = `/player/stream/${song_index}`;
+                    this.audio.src = newSrc;
+                    this.audio.load();
+                    
+                    // Update the UI to reflect the new song
+                    this.updateUIForSong(song_index);
+                }
+
+                this.audio.currentTime = this.targetTime;
+
+                if (is_playing && this.audio.paused) {
+                    debugLog('Starting playback');
+                    this.audio.play().catch(e => debugLog(`Play failed: ${e}`));
+                } else if (!is_playing && !this.audio.paused) {
+                    debugLog('Pausing playback');
+                    this.audio.pause();
+                }
+            }
+
+            adjustForDrift(msg) {
+                if (this.audio.paused) return;
+
+                const { playback_time, server_timestamp_ms } = msg;
+                
+                const now = Date.now();
+                const elapsed = (now - server_timestamp_ms) / 1000;
+                this.targetTime = playback_time + elapsed;
+
+                const drift = Math.abs(this.audio.currentTime - this.targetTime);
+
+                if (drift > 0.25) {
+                    debugLog(`Drift: ${drift.toFixed(3)}s - correcting`);
+                    this.audio.currentTime = this.targetTime;
+                }
+            }
+
+            tuneIn(broadcasterId) {
+                if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+                    debugLog('WebSocket not ready, connecting...');
+                    this.connectWebSocket();
+                    setTimeout(() => this.tuneIn(broadcasterId), 500);
+                    return;
+                }
+
+                this.mode = 'radio';
+                this.tunedBroadcaster = broadcasterId;
+
+                const msg = {
+                    type: 'TuneIn',
+                    broadcaster_id: broadcasterId
+                };
+                
+                debugLog(`→ Sending TuneIn: ${JSON.stringify(msg)}`);
+                this.ws.send(JSON.stringify(msg));
+            }
+
+            tuneOut() {
+                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                    const msg = { type: 'TuneOut' };
+                    debugLog(`→ Sending TuneOut: ${JSON.stringify(msg)}`);
+                    this.ws.send(JSON.stringify(msg));
+                }
+
+                this.mode = 'private';
+                this.tunedBroadcaster = null;
+                debugLog('Tuned out - back to private mode');
+            }
+
+            startBroadcasting() {
+                if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+                    debugLog('WebSocket not ready for broadcasting, connecting...');
+                    this.connectWebSocket();
+                    setTimeout(() => this.startBroadcasting(), 500);
+                    return;
+                }
+
+                this.isBroadcasting = true;
+                debugLog(`Broadcasting as: ${this.sessionId}`);
+
+                const sendUpdate = () => {
+                    if (this.isBroadcasting && this.ws.readyState === WebSocket.OPEN) {
+                        const msg = {
+                            type: 'BroadcastUpdate',
+                            broadcaster_id: this.sessionId,
+                            song_index: this.getCurrentSongIndex(),
+                            playback_time: this.audio.currentTime,
+                            is_playing: !this.audio.paused
+                        };
+                        debugLog(`→ Broadcasting: song ${msg.song_index}, time ${msg.playback_time.toFixed(2)}s`);
+                        this.ws.send(JSON.stringify(msg));
+                    }
+                };
+
+                this.audio.addEventListener('play', sendUpdate);
+                this.audio.addEventListener('pause', sendUpdate);
+                this.audio.addEventListener('seeked', sendUpdate);
+
+                this.heartbeatInterval = setInterval(sendUpdate, 2000);
+                
+                // Send initial state immediately
+                sendUpdate();
+            }
+
+            stopBroadcasting() {
+                this.isBroadcasting = false;
+                
+                if (this.heartbeatInterval) {
+                    clearInterval(this.heartbeatInterval);
+                    this.heartbeatInterval = null;
+                }
+                
+                debugLog('Broadcasting stopped');
+            }
+
+            getCurrentSongIndex() {
+                const match = this.audio.src.match(/\/stream\/(\d+)/);
+                return match ? parseInt(match[1]) : 0;
+            }
+
+            isInRadioMode() {
+                return this.mode === 'radio';
+            }
+        }
+
+        // Initialize
+        const audio = document.getElementById('audio-player');
+        const sessionId = '{{ session_id }}';
+        const player = new RadioPlayer(audio, sessionId);
+
+        // Connect WebSocket
+        player.connectWebSocket();
+
+        // UI Elements
+        const tuneInBtn = document.getElementById('tune-in-btn');
+        const tuneOutBtn = document.getElementById('tune-out-btn');
+        const broadcastBtn = document.getElementById('broadcast-btn');
+        const stopBroadcastBtn = document.getElementById('stop-broadcast-btn');
+        const broadcasterInput = document.getElementById('broadcaster-input');
+        const modeDisplay = document.getElementById('mode-display');
+        const broadcastStatus = document.getElementById('broadcast-status');
+        const broadcasterInfo = document.getElementById('broadcaster-info');
+        const broadcasterName = document.getElementById('broadcaster-name');
+        const prevBtn = document.getElementById('prev-btn');
+        const nextBtn = document.getElementById('next-btn');
+
+        // Tune In
+        tuneInBtn.addEventListener('click', () => {
+            const broadcasterId = broadcasterInput.value.trim();
+            if (!broadcasterId) {
+                alert('Please enter a broadcaster session ID');
+                return;
+            }
+
+            debugLog(`Tuning into broadcaster: ${broadcasterId}`);
+            player.tuneIn(broadcasterId);
+            
+            modeDisplay.textContent = 'Radio Mode';
+            modeDisplay.className = 'mode-badge radio';
+            broadcasterName.textContent = broadcasterId;
+            broadcasterInfo.classList.remove('hidden');
+            
+            tuneInBtn.classList.add('hidden');
+            tuneOutBtn.classList.remove('hidden');
+            
+            prevBtn.disabled = true;
+            nextBtn.disabled = true;
+        });
+
+        // Tune Out
+        tuneOutBtn.addEventListener('click', () => {
+            player.tuneOut();
+            
+            modeDisplay.textContent = 'Private Mode';
+            modeDisplay.className = 'mode-badge private';
+            broadcasterInfo.classList.add('hidden');
+            
+            tuneOutBtn.classList.add('hidden');
+            tuneInBtn.classList.remove('hidden');
+            
+            prevBtn.disabled = false;
+            nextBtn.disabled = false;
+        });
+
+        // Start Broadcasting
+        broadcastBtn.addEventListener('click', () => {
+            player.startBroadcasting();
+            
+            broadcastStatus.classList.remove('hidden');
+            broadcastBtn.classList.add('hidden');
+            stopBroadcastBtn.classList.remove('hidden');
+        });
+
+        // Stop Broadcasting
+        stopBroadcastBtn.addEventListener('click', () => {
+            player.stopBroadcasting();
+            
+            broadcastStatus.classList.add('hidden');
+            stopBroadcastBtn.classList.add('hidden');
+            broadcastBtn.classList.remove('hidden');
+        });
+
+        // HTMX afterSwap handler (existing functionality)
         document.body.addEventListener('htmx:afterSwap', function(event) {
             // Only run this for our player controls, not other HTMX updates
             if (event.detail.target.id === 'player-controls') {
