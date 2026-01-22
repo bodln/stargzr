@@ -4,10 +4,9 @@
     <title>MP3 Player</title>
     <script src="https://unpkg.com/htmx.org@1.9.10"></script>
     <style>
-        /* Basic styling to make it look decent */
-        body {
+                body {
             font-family: Arial, sans-serif;
-            max-width: 600px;
+            max-width: 800px;
             margin: 50px auto;
             padding: 20px;
         }
@@ -38,6 +37,11 @@
         button:hover {
             background: #0056b3;
         }
+
+        button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
         
         audio {
             width: 100%;
@@ -48,13 +52,141 @@
             font-size: 18px;
             margin-bottom: 10px;
         }
+
+        /* Radio Mode Styles */
+        .mode-container {
+            background: #e9ecef;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        
+        .mode-indicator {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        
+        .mode-badge {
+            padding: 5px 12px;
+            border-radius: 12px;
+            font-weight: bold;
+            font-size: 14px;
+        }
+        
+        .mode-badge.private {
+            background: #28a745;
+            color: white;
+        }
+        
+        .mode-badge.radio {
+            background: #dc3545;
+            color: white;
+        }
+        
+        .mode-badge.broadcasting {
+            background: #ffc107;
+            color: black;
+        }
+        
+        .radio-controls {
+            display: grid;
+            gap: 10px;
+            margin-top: 15px;
+        }
+        
+        .radio-input-group {
+            display: flex;
+            gap: 10px;
+        }
+        
+        .radio-input-group input {
+            flex: 1;
+            padding: 8px;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        
+        .radio-input-group button {
+            flex-shrink: 0;
+        }
+        
+        .broadcaster-info {
+            background: #fff;
+            padding: 10px;
+            border-radius: 4px;
+            margin-top: 10px;
+            font-size: 14px;
+        }
+        
+        .session-id-display {
+            background: #fff;
+            padding: 10px;
+            border-radius: 4px;
+            margin-top: 10px;
+            font-size: 14px;
+            font-family: monospace;
+        }
+        
+        .hidden {
+            display: none;
+        }
+        
+        #debug-log {
+            background: #000;
+            color: #0f0;
+            padding: 10px;
+            border-radius: 4px;
+            margin-top: 20px;
+            font-family: monospace;
+            font-size: 12px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
     </style>
 </head>
 <body>
     <h1>MP3 Player</h1>
     
-    <!-- This div is the target for HTMX updates -->
-    <!-- When you click prev/next, only THIS part updates -->
+    <!-- Mode Indicator and Radio Controls -->
+    <div class="mode-container">
+        <div class="mode-indicator">
+            <span id="mode-display" class="mode-badge private">Private Mode</span>
+            <span id="broadcast-status" class="mode-badge broadcasting hidden">Broadcasting</span>
+        </div>
+        
+        <div class="session-id-display">
+            <strong>Your Session ID:</strong> <span id="my-session-id">{{ session_id }}</span>
+            <button onclick="copySessionId()" style="margin-left: 10px; padding: 5px 10px; font-size: 12px;">📋 Copy</button>
+        </div>
+        
+        <div id="broadcaster-info" class="broadcaster-info hidden">
+            Tuned into: <strong id="broadcaster-name"></strong>
+        </div>
+        
+        <div class="radio-controls">
+    <!-- Tune In -->
+            <div class="radio-input-group">
+                <input 
+                    type="text" 
+                    id="broadcaster-input" 
+                    placeholder="Paste broadcaster's session ID here..."
+                    value="">
+                <button id="tune-in-btn">📻 Tune In</button>
+                <button id="tune-out-btn" class="hidden">🏠 Back to Private</button>
+            </div>
+            
+            <!-- Broadcasting Controls -->
+            <div class="radio-input-group">
+                <button id="broadcast-btn">📡 Start Broadcasting</button>
+                <button id="stop-broadcast-btn" class="hidden">⏹️ Stop Broadcasting</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Player Controls (existing) -->
     <div id="player-controls">
         <div class="song-info">
             <strong>Now Playing:</strong> {{ current_song }}
@@ -64,20 +196,20 @@
         </div>
     </div>
     
-    <!-- This is the actual HTML5 audio player -->
-    <!-- The browser handles ALL the playback, buffering, seeking, etc. -->
-    <!-- The id="audio-player" lets us control it with JavaScript -->
-    <audio id="audio-player" controls>
+    <!-- Audio Player -->
+        <audio id="audio-player" controls>
         <source src="/player/stream/{{ current_index }}" type="audio/mpeg">
         Your browser doesn't support audio playback.
     </audio>
     
+    <!-- Playback Controls -->
     <div class="controls">
         <!-- Previous button -->
         <!-- hx-post sends a POST request to /player/prev -->
         <!-- hx-target="#player-controls" says "update the controls div" -->
         <!-- hx-swap="innerHTML" says "replace what's inside" -->
         <button 
+            id="prev-btn"
             hx-post="/player/prev"
             hx-target="#player-controls"
             hx-swap="innerHTML">
@@ -86,12 +218,16 @@
         
         <!-- Next button - same pattern -->
         <button 
+            id="next-btn"
             hx-post="/player/next"
             hx-target="#player-controls"
             hx-swap="innerHTML">
             Next ⏭️
         </button>
     </div>
+    
+    <!-- Debug Log -->
+    <div id="debug-log"></div>
     
     <script>
         // This JavaScript handles loading the new song when you click prev/next

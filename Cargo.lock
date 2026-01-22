@@ -687,6 +687,7 @@ dependencies = [
  "atomic-wait",
  "axum",
  "futures",
+ "futures-util",
  "http-body-util",
  "hyper",
  "hyper-util",
