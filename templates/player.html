@@ -253,6 +253,15 @@
                 }
             }
         });
+
+        // Prevent controls in radio mode
+        document.body.addEventListener('htmx:beforeRequest', function(event) {
+            if (player.isInRadioMode() && 
+                (event.detail.target.id === 'prev-btn' || event.detail.target.id === 'next-btn')) {
+                event.preventDefault();
+                alert('Controls disabled while tuned into a radio');
+            }
+        });
     </script>
 </body>
 </html>
