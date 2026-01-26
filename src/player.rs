@@ -173,7 +173,7 @@ fn get_or_create_position(state: &AppState, session_id: &str) -> usize {
     let mut sessions = state.sessions.write();
     let now = std::time::Instant::now();
     sessions.retain(|_, session| now.duration_since(session.last_activity).as_secs() < 3600);
-
+    
     let session = sessions
         .entry(session_id.to_string())
         .or_insert(PlayerSession {
@@ -219,15 +219,15 @@ fn update_broadcast_index(state: &AppState, session_id: &str, new_index: usize) 
 // Get current server time in milliseconds (for timestamping)
 fn now_ms() -> u128 {
     std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis()
+    .duration_since(std::time::UNIX_EPOCH)
+    .unwrap()
+    .as_millis()
 }
 
 async fn player_page(State(state): State<SharedState>, headers: HeaderMap) -> PlayerTemplate {
     let session_id = get_session_id(&headers);
     let current_index = get_or_create_position(&state, &session_id);
-
+    
     let current_song = state
         .playlist
         .get(current_index)
@@ -249,7 +249,7 @@ async fn next_song(State(state): State<SharedState>, headers: HeaderMap) -> Play
     let new_index = (current_index + 1).min(state.playlist.len().saturating_sub(1));
     update_session_index(&state, &session_id, new_index);
     update_broadcast_index(&state, &session_id, new_index);
-
+    
     let current_song = state
         .playlist
         .get(new_index)
@@ -268,8 +268,8 @@ async fn prev_song(State(state): State<SharedState>, headers: HeaderMap) -> Play
     let current_index = get_or_create_position(&state, &session_id);
 
     let new_index = current_index.saturating_sub(1);
-    update_broadcast_index(&state, &session_id, new_index);
     update_session_index(&state, &session_id, new_index);
+    update_broadcast_index(&state, &session_id, new_index);
 
     let current_song = state
         .playlist
@@ -417,16 +417,14 @@ async fn handle_radio_connection(socket: WebSocket, state: SharedState) {
     // Subscription to the global broadcast channel.
     // Receives real-time updates from all broadcasters, which the send task
     // filters based on which broadcaster this client is tuned to.
-    let global_rx = state.broadcast_tx.subscribe();
+    let mut broadcast_rx = state.broadcast_tx.subscribe();
 
     // Private channel for responses from the receive task to the send task (same WebSocket)
     let (out_tx, mut out_rx) = mpsc::channel::<RadioMessage>(32);
 
     let tuned_broadcaster = Arc::new(Mutex::new(None::<String>));
-    let my_broadcaster_id = Arc::new(Mutex::new(None::<String>));
 
     let tuned_for_send = tuned_broadcaster.clone();
-    let mut global_rx_for_send = global_rx.resubscribe();
 
     let mut tasks = tokio::task::JoinSet::new();
 
@@ -442,7 +440,7 @@ async fn handle_radio_connection(socket: WebSocket, state: SharedState) {
                     }
                 }
 
-                Ok(msg) = global_rx_for_send.recv() => {
+                Ok(msg) = broadcast_rx.recv() => {
                     let should_send = match &msg {
                         RadioMessage::Sync { broadcaster_id, .. } => {
                             let guard = tuned_for_send.lock().await;
@@ -474,7 +472,6 @@ async fn handle_radio_connection(socket: WebSocket, state: SharedState) {
     // Receive task
     let state_clone = state.clone();
     let tuned_for_recv = tuned_broadcaster.clone();
-    let _my_id_for_recv = my_broadcaster_id.clone();
 
     tasks.spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
@@ -615,7 +612,8 @@ pub fn create_player_router(music_folder: PathBuf) -> impl std::future::Future<O
             .route("/player/next", post(next_song))
             .route("/player/prev", post(prev_song))
             .route("/player/stream/{index}", get(stream_audio))
-            .route("/player/radio", get(radio_websocket)) // NEW: WebSocket endpoint
+            .route("/player/radio", get(radio_websocket))
+            .route("/player/controls", get(player_controls))
             .with_state(state)
     }
 }
