@@ -295,58 +295,56 @@ style="margin-left: 10px; padding: 5px 10px; font-size: 12px"
             }
 
             handleRadioMessage(msg) {
+          if (msg.type === "Sync" && msg.broadcaster_id === this.sessionId) {
+            return; // ignore own sync
+          }
+
                 debugLog(`Handling message type: ${msg.type}, mode: ${this.mode}`);
                 
-                if (this.mode !== 'radio') {
-                    debugLog('Ignoring message - not in radio mode');
-                    return;
-                }
+          if (this.mode !== "radio") return;
 
                 switch (msg.type) {
-                    case 'Sync':
+            case "Sync":
                         this.syncToBroadcaster(msg);
                         break;
-                    
-                    case 'Heartbeat':
+            case "Heartbeat":
                         this.adjustForDrift(msg);
                         break;
                 }
             }
 
             syncToBroadcaster(msg) {
-                const { song_index, playback_time, is_playing, server_timestamp_ms } = msg;
+          const { song_index, playback_time, is_playing, server_timestamp_ms } =
+            msg;
 
                 const now = Date.now();
                 const elapsed = (now - server_timestamp_ms) / 1000;
 
-                if (is_playing) {
-                    this.targetTime = playback_time + elapsed;
-                } else {
-                    this.targetTime = playback_time;
-                }
-
-                debugLog(`Syncing to song ${song_index}, time ${this.targetTime.toFixed(2)}s, playing: ${is_playing}`);
+          // Account for time dilation between request and response
+          this.targetTime = is_playing
+            ? playback_time + elapsed
+            : playback_time;
 
                 const currentIndex = this.getCurrentSongIndex();
+
                 if (currentIndex !== song_index) {
-                    debugLog(`Switching from song ${currentIndex} to song ${song_index}`);
-                    const newSrc = `/player/stream/${song_index}`;
-                    this.audio.src = newSrc;
+            debugLog(
+              `Switching from song ${currentIndex} to song ${song_index}`,
+            );
+            this.audio.src = `/player/stream/${song_index}`;
                     this.audio.load();
                     
-                    // Update the UI to reflect the new song
-                    this.updateUIForSong(song_index);
+            htmx.ajax(
+              "GET",
+              `/player/controls?broadcaster=${this.tunedBroadcaster}`,
+              { target: "#player-controls", swap: "innerHTML" },
+            );
                 }
 
                 this.audio.currentTime = this.targetTime;
 
-                if (is_playing && this.audio.paused) {
-                    debugLog('Starting playback');
-                    this.audio.play().catch(e => debugLog(`Play failed: ${e}`));
-                } else if (!is_playing && !this.audio.paused) {
-                    debugLog('Pausing playback');
-                    this.audio.pause();
-                }
+          if (is_playing && this.audio.paused) this.audio.play();
+          if (!is_playing && !this.audio.paused) this.audio.pause();
             }
 
             adjustForDrift(msg) {
