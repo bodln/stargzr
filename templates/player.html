@@ -154,12 +154,20 @@
     <div class="mode-container">
         <div class="mode-indicator">
             <span id="mode-display" class="mode-badge private">Private Mode</span>
-            <span id="broadcast-status" class="mode-badge broadcasting hidden">Broadcasting</span>
+            <span id="broadcast-status" class="mode-badge broadcasting hidden"
+>Broadcasting</span
+>
         </div>
         
         <div class="session-id-display">
-            <strong>Your Session ID:</strong> <span id="my-session-id">{{ session_id }}</span>
-            <button onclick="copySessionId()" style="margin-left: 10px; padding: 5px 10px; font-size: 12px;">📋 Copy</button>
+            <strong>Your Session ID:</strong>
+<span id="my-session-id">{{ session_id }}</span>
+            <button
+onclick="copySessionId()"
+style="margin-left: 10px; padding: 5px 10px; font-size: 12px"
+        >
+📋 Copy
+</button>
         </div>
         
         <div id="broadcaster-info" class="broadcaster-info hidden">
@@ -173,7 +181,8 @@
                     type="text" 
                     id="broadcaster-input" 
                     placeholder="Paste broadcaster's session ID here..."
-                    value="">
+                    value=""
+          />
                 <button id="tune-in-btn">📻 Tune In</button>
                 <button id="tune-out-btn" class="hidden">🏠 Back to Private</button>
             </div>
@@ -181,7 +190,9 @@
             <!-- Broadcasting Controls -->
             <div class="radio-input-group">
                 <button id="broadcast-btn">📡 Start Broadcasting</button>
-                <button id="stop-broadcast-btn" class="hidden">⏹️ Stop Broadcasting</button>
+                <button id="stop-broadcast-btn" class="hidden">
+⏹️ Stop Broadcasting
+</button>
             </div>
         </div>
     </div>
@@ -191,14 +202,12 @@
         <div class="song-info">
             <strong>Now Playing:</strong> {{ current_song }}
         </div>
-        <div>
-            Track {{ current_index + 1 }} of {{ total_songs }}
-        </div>
+      <div>Track {{ current_index + 1 }} of {{ total_songs }}</div>
     </div>
     
     <!-- Audio Player -->
     <audio id="audio-player" controls>
-        <source src="/player/stream/{{ current_index }}" type="audio/mpeg">
+      <source src="/player/stream/{{ current_index }}" type="audio/mpeg" />
         Your browser doesn't support audio playback.
     </audio>
     
@@ -208,7 +217,8 @@
             id="prev-btn"
             hx-post="/player/prev"
             hx-target="#player-controls"
-            hx-swap="innerHTML">
+            hx-swap="innerHTML"
+>
             ⏮️ Previous
         </button>
         
@@ -216,7 +226,8 @@
             id="next-btn"
             hx-post="/player/next"
             hx-target="#player-controls"
-            hx-swap="innerHTML">
+            hx-swap="innerHTML"
+>
             Next ⏭️
         </button>
     </div>
