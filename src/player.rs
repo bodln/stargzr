@@ -1,6 +1,6 @@
 use askama::Template;
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{Path, State, WebSocketUpgrade};
+use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{
@@ -187,9 +187,32 @@ fn get_or_create_position(state: &AppState, session_id: &str) -> usize {
 
 fn update_session_index(state: &AppState, session_id: &str, new_index: usize) {
     let mut sessions = state.sessions.write();
+
     if let Some(session) = sessions.get_mut(session_id) {
         session.current_index = new_index;
         session.last_activity = std::time::Instant::now();
+    }
+}
+
+fn update_broadcast_index(state: &AppState, session_id: &str, new_index: usize) {
+    let server_ts = now_ms();
+
+    let mut broadcasts = state.broadcast_states.write();
+
+    if let Some(broadcast) = broadcasts.get_mut(session_id) {
+        // Update authoritative state
+        broadcast.song_index = new_index;
+        broadcast.playback_time = 0.0;
+        broadcast.server_timestamp_ms = server_ts;
+
+        // Push sync to all listeners
+        let _ = state.broadcast_tx.send(RadioMessage::Sync {
+            broadcaster_id: session_id.to_string(),
+            song_index: new_index,
+            playback_time: 0.0,
+            is_playing: broadcast.is_playing,
+            server_timestamp_ms: server_ts,
+        });
     }
 }
 
@@ -225,6 +248,7 @@ async fn next_song(State(state): State<SharedState>, headers: HeaderMap) -> Play
 
     let new_index = (current_index + 1).min(state.playlist.len().saturating_sub(1));
     update_session_index(&state, &session_id, new_index);
+    update_broadcast_index(&state, &session_id, new_index);
 
     let current_song = state
         .playlist
@@ -244,6 +268,7 @@ async fn prev_song(State(state): State<SharedState>, headers: HeaderMap) -> Play
     let current_index = get_or_create_position(&state, &session_id);
 
     let new_index = current_index.saturating_sub(1);
+    update_broadcast_index(&state, &session_id, new_index);
     update_session_index(&state, &session_id, new_index);
 
     let current_song = state
@@ -255,6 +280,52 @@ async fn prev_song(State(state): State<SharedState>, headers: HeaderMap) -> Play
     PlayerControlsTemplate {
         current_song,
         current_index: new_index,
+        total_songs: state.playlist.len(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ControlsQuery {
+    broadcaster: Option<String>,
+}
+
+async fn player_controls(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<ControlsQuery>,
+) -> PlayerControlsTemplate {
+    // RADIO MODE
+    if let Some(broadcaster_id) = query.broadcaster {
+        if let Some(broadcast) = state.broadcast_states.read().get(&broadcaster_id) {
+            let index = broadcast.song_index;
+
+            let song = state
+                .playlist
+                .get(index)
+                .map(|s| s.filename.clone())
+                .unwrap_or_else(|| "No songs found".to_string());
+
+            return PlayerControlsTemplate {
+                current_song: song,
+                current_index: index,
+                total_songs: state.playlist.len(),
+            };
+        }
+    }
+
+    // PRIVATE MODE (fallback)
+    let session_id = get_session_id(&headers);
+    let index = get_or_create_position(&state, &session_id);
+
+    let song = state
+        .playlist
+        .get(index)
+        .map(|s| s.filename.clone())
+        .unwrap_or_else(|| "No songs found".to_string());
+
+    PlayerControlsTemplate {
+        current_song: song,
+        current_index: index,
         total_songs: state.playlist.len(),
     }
 }
