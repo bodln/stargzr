@@ -238,7 +238,7 @@ style="margin-left: 10px; padding: 5px 10px; font-size: 12px"
     <script>
         // Debug logging
         function debugLog(message) {
-            const log = document.getElementById('debug-log');
+            const log = document.getElementById("debug-log");
             const time = new Date().toLocaleTimeString();
             log.innerHTML += `[${time}] ${message}<br>`;
             log.scrollTop = log.scrollHeight;
@@ -246,9 +246,9 @@ style="margin-left: 10px; padding: 5px 10px; font-size: 12px"
         }
 
         function copySessionId() {
-            const sessionId = document.getElementById('my-session-id').textContent;
+        const sessionId = document.getElementById("my-session-id").textContent;
             navigator.clipboard.writeText(sessionId);
-            alert('Session ID copied!');
+        //alert("Session ID copied!");
         }
 
         // Radio Player Class
@@ -256,7 +256,7 @@ style="margin-left: 10px; padding: 5px 10px; font-size: 12px"
             constructor(audioElement, sessionId) {
                 this.audio = audioElement;
                 this.sessionId = sessionId;
-                this.mode = 'private';
+          this.mode = "private";
                 this.tunedBroadcaster = null;
                 this.ws = null;
                 this.heartbeatInterval = null;
@@ -267,14 +267,15 @@ style="margin-left: 10px; padding: 5px 10px; font-size: 12px"
             }
 
             connectWebSocket() {
-                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+          const protocol =
+            window.location.protocol === "https:" ? "wss:" : "ws:";
                 const wsUrl = `${protocol}//${window.location.host}/player/radio`;
                 
                 debugLog(`Connecting to WebSocket: ${wsUrl}`);
                 this.ws = new WebSocket(wsUrl);
                 
                 this.ws.onopen = () => {
-                    debugLog('✓ WebSocket connected');
+            debugLog("✓ WebSocket connected");
                 };
                 
                 this.ws.onmessage = (event) => {
@@ -288,7 +289,7 @@ style="margin-left: 10px; padding: 5px 10px; font-size: 12px"
                 };
                 
                 this.ws.onclose = () => {
-                    debugLog('WebSocket disconnected, reconnecting in 3s...');
+            debugLog("WebSocket disconnected, reconnecting in 3s...");
                     setTimeout(() => this.connectWebSocket(), 3000);
                 };
             }
