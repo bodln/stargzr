@@ -82,7 +82,6 @@ enum RadioMessage {
     Heartbeat {
         broadcaster_id: String,
         playback_time: f64,
-        server_timestamp_ms: u128,
     },
 
     // Client -> Server: "I want to tune into this broadcaster"
@@ -173,7 +172,7 @@ fn get_or_create_position(state: &AppState, session_id: &str) -> usize {
     let mut sessions = state.sessions.write();
     let now = std::time::Instant::now();
     sessions.retain(|_, session| now.duration_since(session.last_activity).as_secs() < 3600);
-    
+
     let session = sessions
         .entry(session_id.to_string())
         .or_insert(PlayerSession {
@@ -219,15 +218,15 @@ fn update_broadcast_index(state: &AppState, session_id: &str, new_index: usize) 
 // Get current server time in milliseconds (for timestamping)
 fn now_ms() -> u128 {
     std::time::SystemTime::now()
-    .duration_since(std::time::UNIX_EPOCH)
-    .unwrap()
-    .as_millis()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
 }
 
 async fn player_page(State(state): State<SharedState>, headers: HeaderMap) -> PlayerTemplate {
     let session_id = get_session_id(&headers);
     let current_index = get_or_create_position(&state, &session_id);
-    
+
     let current_song = state
         .playlist
         .get(current_index)
@@ -249,7 +248,7 @@ async fn next_song(State(state): State<SharedState>, headers: HeaderMap) -> Play
     let new_index = (current_index + 1).min(state.playlist.len().saturating_sub(1));
     update_session_index(&state, &session_id, new_index);
     update_broadcast_index(&state, &session_id, new_index);
-    
+
     let current_song = state
         .playlist
         .get(new_index)
@@ -556,6 +555,20 @@ async fn handle_radio_connection(socket: WebSocket, state: SharedState) {
                             };
 
                             let _ = state_clone.broadcast_tx.send(sync_msg);
+                        }
+
+                        RadioMessage::Heartbeat {
+                            broadcaster_id,
+                            playback_time,
+                        } => {
+                            let server_ts = now_ms();
+
+                            let mut broadcasts = state_clone.broadcast_states.write();
+
+                            if let Some(broadcast) = broadcasts.get_mut(&broadcaster_id) {
+                                broadcast.playback_time = playback_time;
+                                broadcast.server_timestamp_ms = server_ts;
+                            }
                         }
 
                         _ => {}

@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
   <head>
     <title>MP3 Player</title>
@@ -267,6 +267,11 @@
         }
 
         connectWebSocket() {
+          if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+            debugLog(`WebSocket already ${this.ws.readyState === WebSocket.OPEN ? 'connected' : 'connecting'}, skipping...`);
+            return;
+          }
+
           const protocol =
             window.location.protocol === "https:" ? "wss:" : "ws:";
           const wsUrl = `${protocol}//${window.location.host}/player/radio`;
@@ -384,16 +389,26 @@
           this.ws.send(JSON.stringify(msg));
         }
 
-        tuneOut() {
+        tuneOut(reason = "manual") {
+          debugLog(`Leaving radio mode: ${reason}`);
+
           if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            const msg = { type: "TuneOut" };
-            debugLog(`→ Sending TuneOut: ${JSON.stringify(msg)}`);
-            this.ws.send(JSON.stringify(msg));
+            this.ws.send(JSON.stringify({ type: "TuneOut" }));
           }
 
           this.mode = "private";
           this.tunedBroadcaster = null;
-          debugLog("Tuned out - back to private mode");
+
+          // UI reset
+          modeDisplay.textContent = "Private Mode";
+          modeDisplay.className = "mode-badge private";
+          broadcasterInfo.classList.add("hidden");
+
+          tuneOutBtn.classList.add("hidden");
+          tuneInBtn.classList.remove("hidden");
+
+          prevBtn.disabled = false;
+          nextBtn.disabled = false;
         }
 
         startBroadcasting() {
@@ -423,11 +438,27 @@
             }
           };
 
+          const sendHeartbeat = () => {
+            if (this.isBroadcasting && this.ws.readyState === WebSocket.OPEN) {
+              const msg = {
+                type: "Heartbeat",
+                broadcaster_id: this.sessionId,
+                playback_time: this.audio.currentTime,
+              };
+              debugLog(
+                `→ Heartbeat: song ${this.getCurrentSongIndex()}, time ${msg.playback_time.toFixed(2)}s`,
+              );
+              this.ws.send(JSON.stringify(msg));
+            }
+          };
+
           this.audio.addEventListener("play", sendUpdate);
           this.audio.addEventListener("pause", sendUpdate);
           this.audio.addEventListener("seeked", sendUpdate);
+          this.audio.addEventListener("waiting", sendUpdate);
+          this.audio.addEventListener("playing", sendUpdate);
 
-          this.heartbeatInterval = setInterval(sendUpdate, 2000);
+          this.heartbeatInterval = setInterval(sendHeartbeat, 2000);
 
           // Send initial state immediately
           sendUpdate();
@@ -501,16 +532,6 @@
       // Tune Out
       tuneOutBtn.addEventListener("click", () => {
         player.tuneOut();
-
-        modeDisplay.textContent = "Private Mode";
-        modeDisplay.className = "mode-badge private";
-        broadcasterInfo.classList.add("hidden");
-
-        tuneOutBtn.classList.add("hidden");
-        tuneInBtn.classList.remove("hidden");
-
-        prevBtn.disabled = false;
-        nextBtn.disabled = false;
       });
 
       // Start Broadcasting
