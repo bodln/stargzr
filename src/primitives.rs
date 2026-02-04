@@ -426,6 +426,7 @@ impl<T> MutexToo<T> {
 fn lock_contended(state: &AtomicU32) {
     let mut spin_count = 0;
 
+    // If there is only one waiting, spin loop and maybe acquire the lock without syscalling with wait
     while state.load(Relaxed) == 1 && spin_count < 100 {
         spin_count += 1;
         std::hint::spin_loop();
