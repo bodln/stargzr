@@ -99,6 +99,10 @@ enum RadioMessage {
         playback_time: f64,
         is_playing: bool,
     },
+
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Template)]
@@ -334,13 +338,18 @@ async fn stream_audio(
     Path(index): Path<usize>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
+    // Get song info
     let song = state.playlist.get(index).ok_or(StatusCode::NOT_FOUND)?;
     let file_path = state.music_folder.join(&song.filename);
     let file_size = song.size;
 
+    // Parse Range header if present
     if let Some(range_value) = headers.get(header::RANGE) {
         if let Ok(range_str) = range_value.to_str() {
             if let Some(range_str) = range_str.strip_prefix("bytes=") {
+                // Range requests have the format "start-end", and both parts are optional. 
+                // You might see "bytes=0-999" (first 1000 bytes), "bytes=2000000-" (from byte 2 million to the end), 
+                // or even "bytes=-1000" (last 1000 bytes, though we don't handle this case)
                 let parts: Vec<&str> = range_str.split('-').collect();
 
                 if parts.len() == 2 {
@@ -359,20 +368,26 @@ async fn stream_audio(
                         .await
                         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-                    let length = end - start + 1;
+                    let length = end - start + 1; // example end = 0, start = 0, that is counted as one byte (the first one)
                     let limited_file = file.take(length);
-                    let stream = ReaderStream::with_capacity(limited_file, 128 * 1024);
+                    let stream = ReaderStream::with_capacity(limited_file, 128 * 1024); // we read 128 kilobytes at a time
                     let body = axum::body::Body::from_stream(stream);
 
                     return Ok(Response::builder()
                         .status(StatusCode::PARTIAL_CONTENT)
                         .header(header::CONTENT_TYPE, "audio/mpeg")
-                        .header(header::ACCEPT_RANGES, "bytes")
+                        // We tell the browser that this server supports range requests on this resource, 
+                        // which enables the seeking functionality in the HTML5 audio player.
+                        .header(header::ACCEPT_RANGES, "bytes") // required for partial content responses
                         .header(
                             header::CONTENT_RANGE,
                             format!("bytes {}-{}/{}", start, end, file_size),
                         )
-                        .header(header::CONTENT_LENGTH, length.to_string())
+                        .header(header::CONTENT_LENGTH, length.to_string()) // specifies how many bytes are in this particular response body (not the whole file)
+                        // CACHE_CONTROL header tells browsers and intermediate proxies that this content can be cached 
+                        // for up to 31,536,000 seconds (one year). 
+                        // Since MP3 files don't change, aggressive caching dramatically improves performance for repeated playback.
+                        // (seeking to previously loaded part of the song)
                         .header(header::CACHE_CONTROL, "public, max-age=31536000")
                         .body(body)
                         .unwrap());
@@ -410,6 +425,11 @@ async fn radio_websocket(
 
 use tokio::sync::{Mutex, mpsc};
 
+use crate::error::{PlayerError, PlayerResult};
+use crate::logging::init_logging;
+use crate::rate_limit::RateLimiter;
+use crate::validation::{SessionId, validate_song_index};
+
 async fn handle_radio_connection(socket: WebSocket, state: SharedState) {
     let (mut sender, mut receiver) = socket.split();
 
@@ -421,165 +441,279 @@ async fn handle_radio_connection(socket: WebSocket, state: SharedState) {
     // Private channel for responses from the receive task to the send task (same WebSocket)
     let (out_tx, mut out_rx) = mpsc::channel::<RadioMessage>(32);
 
+    // Store broadcaster ID as String (we validate it when needed)
     let tuned_broadcaster = Arc::new(Mutex::new(None::<String>));
 
-    let tuned_for_send = tuned_broadcaster.clone();
-
-    let mut tasks = tokio::task::JoinSet::new();
+    let heartbeat_limiter = Arc::new(RateLimiter::for_heartbeat());
+    let broadcast_limiter = Arc::new(RateLimiter::for_broadcast());
 
     // Send task
-    tasks.spawn(async move {
+    let tuned_for_send = tuned_broadcaster.clone();
+    let mut send_task = tokio::spawn(async move {
         loop {
+            // Polls both channels simultaneously 
             tokio::select! {
+                // Messages from the receive task
                 Some(msg) = out_rx.recv() => {
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        if sender.send(Message::Text(json.into())).await.is_err() {
+                    if let Err(e) = send_message(&mut sender, &msg).await {
+                        tracing::error!("Failed to send message: {}", e);
+                        break;
+                    }
+                }
+                
+                // Broadcast messages from other connections
+                Ok(msg) = broadcast_rx.recv() => {
+                    let should_forward = should_forward_message(&msg, &tuned_for_send).await;
+                    
+                    if should_forward {
+                        if let Err(e) = send_message(&mut sender, &msg).await {
+                            tracing::error!("Failed to forward broadcast: {}", e);
                             break;
                         }
                     }
                 }
-
-                Ok(msg) = broadcast_rx.recv() => {
-                    let should_send = match &msg {
-                        RadioMessage::Sync { broadcaster_id, .. } => {
-                            let guard = tuned_for_send.lock().await;
-                            guard.as_ref() == Some(broadcaster_id)
-                        }
-                        RadioMessage::Heartbeat { broadcaster_id, .. } => {
-                            let guard = tuned_for_send.lock().await;
-                            guard.as_ref() == Some(broadcaster_id)
-                        }
-                        _ => false,
-                    };
-
-                    if should_send {
-                        if let Ok(json) = serde_json::to_string(&msg) {
-                            if sender.send(Message::Text(json.into())).await.is_err() {
-                                break;
-                            }
-                        }
-                    }
-                }
-
+                
                 else => {
+                    tracing::debug!("Send task channel closed");
                     break;
                 }
             }
         }
     });
-
+    
     // Receive task
     let state_clone = state.clone();
     let tuned_for_recv = tuned_broadcaster.clone();
-
-    tasks.spawn(async move {
-        while let Some(Ok(msg)) = receiver.next().await {
-            if let Message::Text(text) = msg {
-                println!("Received WebSocket message: {}", text);
-
-                if let Ok(radio_msg) = serde_json::from_str::<RadioMessage>(&text) {
-                    match radio_msg {
-                        RadioMessage::TuneIn { broadcaster_id } => {
-                            println!("Client tuning into: {}", broadcaster_id);
-
-                            {
-                                let mut guard = tuned_for_recv.lock().await;
-                                *guard = Some(broadcaster_id.clone());
-                            }
-
-                            let maybe_state = {
-                                let broadcasts = state_clone.broadcast_states.read();
-                                broadcasts.get(&broadcaster_id).cloned()
-                            };
-
-                            if let Some(b_state) = maybe_state {
-                                println!(
-                                    "Found broadcaster state: song_index={}, playback_time={}",
-                                    b_state.song_index, b_state.playback_time
-                                );
-
-                                let sync_msg = RadioMessage::Sync {
-                                    broadcaster_id: b_state.broadcaster_id.clone(),
-                                    song_index: b_state.song_index,
-                                    playback_time: b_state.playback_time,
-                                    is_playing: b_state.is_playing,
-                                    server_timestamp_ms: now_ms(),
-                                };
-
-                                if out_tx.send(sync_msg).await.is_err() {
-                                    break;
-                                }
-                            } else {
-                                println!("No broadcaster found with id: {}", broadcaster_id);
+    
+    let mut receive_task = tokio::spawn(async move {
+        while let Some(msg_result) = receiver.next().await {
+            match msg_result {
+                Ok(Message::Text(text)) => {
+                    tracing::trace!("Received message: {}", text);
+                    
+                    match serde_json::from_str::<RadioMessage>(&text) {
+                        Ok(radio_msg) => {
+                            if let Err(e) = handle_client_message(
+                                radio_msg,
+                                &state_clone,
+                                &tuned_for_recv,
+                                &out_tx,
+                                &heartbeat_limiter,
+                                &broadcast_limiter,
+                            ).await {
+                                tracing::error!("Failed to handle message: {}", e);
+                                // Send error to client
+                                let error_msg = create_error_message(&e);
+                                let _ = out_tx.send(error_msg).await;
                             }
                         }
-
-                        RadioMessage::TuneOut => {
-                            println!("Client tuned out");
-                            let mut guard = tuned_for_recv.lock().await;
-                            *guard = None;
+                        Err(e) => {
+                            tracing::warn!("Failed to parse message: {}", e);
                         }
-
-                        RadioMessage::BroadcastUpdate {
-                            broadcaster_id,
-                            song_index,
-                            playback_time,
-                            is_playing,
-                        } => {
-                            println!(
-                                "Broadcast update from {}: song={}, time={:.2}, playing={}",
-                                broadcaster_id, song_index, playback_time, is_playing
-                            );
-
-                            let server_ts = now_ms();
-
-                            let new_state = BroadcastState {
-                                broadcaster_id: broadcaster_id.clone(),
-                                song_index,
-                                playback_time,
-                                is_playing,
-                                server_timestamp_ms: server_ts,
-                            };
-
-                            state_clone
-                                .broadcast_states
-                                .write()
-                                .insert(broadcaster_id.clone(), new_state);
-
-                            let sync_msg = RadioMessage::Sync {
-                                broadcaster_id: broadcaster_id.clone(),
-                                song_index,
-                                playback_time,
-                                is_playing,
-                                server_timestamp_ms: server_ts,
-                            };
-
-                            let _ = state_clone.broadcast_tx.send(sync_msg);
-                        }
-
-                        RadioMessage::Heartbeat {
-                            broadcaster_id,
-                            playback_time,
-                        } => {
-                            let server_ts = now_ms();
-
-                            let mut broadcasts = state_clone.broadcast_states.write();
-
-                            if let Some(broadcast) = broadcasts.get_mut(&broadcaster_id) {
-                                broadcast.playback_time = playback_time;
-                                broadcast.server_timestamp_ms = server_ts;
-                            }
-                        }
-
-                        _ => {}
                     }
                 }
+                Ok(Message::Close(_)) => {
+                    tracing::info!("Client closed connection");
+                    break;
+                }
+                Ok(Message::Ping(_)) => {
+                    // Respond to ping with pong (handled automatically by axum)
+                    tracing::trace!("Received ping (auto-handled by axum)");
+                }
+                Ok(Message::Pong(_)) => {
+                    tracing::trace!("Received pong");
+                }
+                Err(e) => {
+                    tracing::error!("WebSocket error: {}", e);
+                    break;
+                }
+                _ => {}
             }
         }
+        
+        tracing::debug!("Receive task ended");
     });
+    
+    // Wait for either task to complete, then abort the other too
+    tokio::select! {
+        _ = &mut send_task => {
+            tracing::debug!("Send task completed, aborting receive task");
+            receive_task.abort();
+        }
+        _ = &mut receive_task => {
+            tracing::debug!("Receive task completed, aborting send task");
+            send_task.abort();
+        }
+    }
+    
+    // Cleanup when connection closes
+    if let Some(broadcaster_id) = tuned_broadcaster.lock().await.as_ref() {
+        tracing::info!("Cleaning up connection tuned to: {}", broadcaster_id);
+    }
+}
 
-    tasks.join_next().await;
-    tasks.abort_all();
+async fn send_message(sender: &mut futures_util::stream::SplitSink<WebSocket, Message>, msg: &RadioMessage) -> PlayerResult<()> {
+    let json = serde_json::to_string(msg)?;
+    sender.send(Message::Text(json.into()))
+        .await
+        .map_err(|e| PlayerError::WebSocketError(e.to_string()))
+}
+
+async fn should_forward_message(msg: &RadioMessage, tuned_broadcaster: &Arc<Mutex<Option<String>>>) -> bool {
+    let broadcaster_id = match msg {
+        RadioMessage::Sync { broadcaster_id, .. } => Some(broadcaster_id.as_str()),
+        RadioMessage::Heartbeat { broadcaster_id, .. } => Some(broadcaster_id.as_str()),
+        _ => None,
+    };
+    
+    if let Some(id) = broadcaster_id {
+        let guard = tuned_broadcaster.lock().await;
+        return guard.as_ref().map(|s| s.as_str()) == Some(id);
+    }
+    
+    false
+}
+
+async fn handle_client_message(
+    msg: RadioMessage,
+    state: &SharedState,
+    tuned_broadcaster: &Arc<Mutex<Option<String>>>,
+    out_tx: &mpsc::Sender<RadioMessage>,
+    heartbeat_limiter: &Arc<RateLimiter>,
+    broadcast_limiter: &Arc<RateLimiter>,
+) -> PlayerResult<()> {
+    match msg {
+        RadioMessage::TuneIn { broadcaster_id } => {
+            // Validate the session ID
+            let session_id = SessionId::new(broadcaster_id.clone())?;
+            
+            tracing::info!("Client tuning into: {}", session_id);
+            
+            // Update tuned broadcaster (store as String after validation)
+            {
+                let mut guard = tuned_broadcaster.lock().await;
+                *guard = Some(broadcaster_id.clone());
+            }
+            
+            // Send current broadcaster state if available
+            let maybe_state = {
+                let broadcasts = state.broadcast_states.read();
+                broadcasts.get(&broadcaster_id).cloned()
+            };
+            
+            if let Some(b_state) = maybe_state {
+                tracing::debug!(
+                    "Sending initial sync: song={}, time={:.2}",
+                    b_state.song_index,
+                    b_state.playback_time
+                );
+                
+                let sync_msg = RadioMessage::Sync {
+                    broadcaster_id: broadcaster_id.clone(),
+                    song_index: b_state.song_index,
+                    playback_time: b_state.playback_time,
+                    is_playing: b_state.is_playing,
+                    server_timestamp_ms: now_ms(),
+                };
+                
+                out_tx.send(sync_msg).await
+                    .map_err(|_| PlayerError::WebSocketError("Failed to send sync".into()))?;
+            } else {
+                return Err(PlayerError::BroadcasterNotFound(broadcaster_id));
+            }
+        }
+        
+        RadioMessage::TuneOut => {
+            tracing::info!("Client tuned out");
+            let mut guard = tuned_broadcaster.lock().await;
+            *guard = None;
+        }
+        
+        RadioMessage::BroadcastUpdate {
+            broadcaster_id,
+            song_index,
+            playback_time,
+            is_playing,
+        } => {
+            // Validate session ID
+            let session_id = SessionId::new(broadcaster_id.clone())?;
+            
+            // Check rate limit
+            broadcast_limiter.check_and_consume(session_id.as_str()).await?;
+            
+            // Validate song index
+            validate_song_index(song_index, state.playlist.len())?;
+            
+            tracing::debug!(
+                "Broadcast update from {}: song={}, time={:.2}, playing={}",
+                session_id,
+                song_index,
+                playback_time,
+                is_playing
+            );
+            
+            let server_ts = now_ms();
+            
+            let new_state = BroadcastState {
+                broadcaster_id: broadcaster_id.clone(),
+                song_index,
+                playback_time,
+                is_playing,
+                server_timestamp_ms: server_ts,
+            };
+            
+            state.broadcast_states.write()
+                .insert(broadcaster_id.clone(), new_state);
+            
+            let sync_msg = RadioMessage::Sync {
+                broadcaster_id: broadcaster_id.clone(),
+                song_index,
+                playback_time,
+                is_playing,
+                server_timestamp_ms: server_ts,
+            };
+            
+            state.broadcast_tx.send(sync_msg)
+                .map_err(|_| PlayerError::BroadcastSendError)?;
+        }
+        
+        RadioMessage::Heartbeat {
+            broadcaster_id,
+            playback_time,
+        } => {
+            let session_id = SessionId::new(broadcaster_id.clone())?;
+            
+            // Check rate limit for heartbeats
+            heartbeat_limiter.check_and_consume(session_id.as_str()).await?;
+            
+            let server_ts = now_ms();
+            
+            let mut broadcasts = state.broadcast_states.write();
+            
+            if let Some(broadcast) = broadcasts.get_mut(&broadcaster_id) {
+                broadcast.playback_time = playback_time;
+                broadcast.server_timestamp_ms = server_ts;
+                
+                tracing::trace!(
+                    "Heartbeat from {}: time={:.2}",
+                    session_id,
+                    playback_time
+                );
+            }
+        }
+        
+        _ => {
+            tracing::warn!("Received unexpected message type");
+        }
+    }
+    
+    Ok(())
+}
+
+fn create_error_message(error: &PlayerError) -> RadioMessage {
+    RadioMessage::Error {
+        message: error.to_string(),
+    }
 }
 
 async fn init_player_state(music_folder: PathBuf) -> SharedState {
@@ -632,16 +766,24 @@ pub fn create_player_router(music_folder: PathBuf) -> impl std::future::Future<O
 }
 
 pub async fn initialize(path_buf: PathBuf) {
+    init_logging();
+    
+    tracing::info!("Starting MP3 Player server");
+    
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8083")
         .await
-        .unwrap();
-
-    println!(
-        "✓ MP3 Player on http://{}/player -> https://evolved-gladly-possum.ngrok-free.app/player",
-        listener.local_addr().unwrap()
+        .expect("Failed to bind to port 8083");
+    
+    let addr = listener.local_addr().unwrap();
+    
+    tracing::info!(
+        "✓ MP3 Player listening on http://{} -> https://evolved-gladly-possum.ngrok-free.app/player",
+        addr
     );
-
-    axum::serve(listener, create_player_router(path_buf).await)
+    
+    let router = create_player_router(path_buf).await;
+    
+    axum::serve(listener, router)
         .await
-        .unwrap();
+        .expect("Server failed");
 }
