@@ -198,9 +198,18 @@ fn update_session_index(state: &AppState, session_id: &str, new_index: usize) {
 }
 
 fn update_broadcast_index(state: &AppState, session_id: &str, new_index: usize) {
-    let server_ts = now_ms();
-
+// Check if this session is broadcasting ( with a cheap read lock)
+    {
+    let broadcasts = state.broadcast_states.read();
+if !broadcasts.contains_key(session_id) {
+            // Not a broadcaster, skip entirely
+            return;
+        }
+    }
+    
+    // Only acquire write lock if we know they're broadcasting
     let mut broadcasts = state.broadcast_states.write();
+    let server_ts = now_ms();
 
     if let Some(broadcast) = broadcasts.get_mut(session_id) {
         // Update authoritative state
