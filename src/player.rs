@@ -790,7 +790,7 @@ async fn handle_client_message(
             // Store the tuned broadcaster for this client
             {
                 let mut guard = tuned_broadcaster.lock().await;
-                *guard = Some(broadcaster_id.clone());
+                *guard = Some(session_id.as_str().to_string());
             }
 
             // Retrieve current broadcast state if it exists
