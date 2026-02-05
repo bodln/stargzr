@@ -70,6 +70,16 @@ struct AppState {
     /// Should evntually get moved int obroadcast states,
     /// so each broadcaster has their own channel.
     broadcast_tx: broadcast::Sender<RadioMessage>,
+    
+    // TODO: Add broadcaster_last_seen: RwLock<HashMap<String, std::time::Instant>>
+    // This tracks when each broadcaster last sent a heartbeat/update
+    // Used for cleanup of stale broadcasters (prevents memory leak)
+    
+    // TODO: Add metrics tracking:
+    // - total_connections: Arc<AtomicU64>
+    // - active_broadcasters: Arc<AtomicU64>
+    // - active_listeners: Arc<AtomicU64>
+    // For observability and monitoring
 }
 
 /// Helper type for cleaner function signatures
@@ -113,6 +123,19 @@ enum RadioMessage {
     Error {
         message: String,
     },
+    
+    // TODO: Add StartBroadcasting { broadcaster_id: String }
+    // Explicitly register a broadcaster before they start sending updates
+    // Prevents BroadcasterNotFound errors when listeners try to tune in early
+    
+    // TODO: Add StopBroadcasting { broadcaster_id: String }
+    // Explicitly unregister a broadcaster and notify listeners
+    
+    // TODO: Add BroadcasterOnline { broadcaster_id: String }
+    // Notify all clients when a new broadcaster goes live
+    
+    // TODO: Add BroadcasterOffline { broadcaster_id: String }
+    // Notify listeners when their broadcaster disconnects
 }
 
 #[derive(Template)]
@@ -187,6 +210,11 @@ fn get_session_id(headers: &HeaderMap) -> String {
 
 /// Based on the session id extracts the current playlist position
 fn get_or_create_position(state: &AppState, session_id: &str) -> usize {
+    // TODO: Optimize this function with read-then-write pattern:
+    // 1. First try to read with read lock (most common case)
+    // 2. Only acquire write lock if session doesn't exist
+    // This avoids write lock contention when session already exists
+    
     let mut sessions = state.sessions.write();
     let now = std::time::Instant::now();
 
@@ -208,6 +236,10 @@ fn get_or_create_position(state: &AppState, session_id: &str) -> usize {
 
 /// Changes the playlist position for the session id
 fn update_session_index(state: &AppState, session_id: &str, new_index: usize) {
+    // TODO: Add read-then-write optimization here too:
+    // Check if session exists with read lock first
+    // Only acquire write lock if it exists
+    
     let mut sessions = state.sessions.write();
 
     if let Some(session) = sessions.get_mut(session_id) {
@@ -255,6 +287,19 @@ fn now_ms() -> u128 {
         .unwrap()
         .as_millis()
 }
+
+// TODO: Add cleanup_stale_sessions(state: SharedState) background task
+// Should run every 5 minutes and remove sessions older than 1 hour
+// This moves the cleanup out of the hot path (get_or_create_position)
+
+// TODO: Add cleanup_stale_broadcasters(state: SharedState) background task
+// CRITICAL: Without this, broadcast_states grows forever (memory leak!)
+// Should run every 60 seconds and remove broadcasters that haven't sent
+// a heartbeat in 30+ seconds. Also notify listeners when broadcaster goes offline.
+
+// TODO: Add metrics endpoint: async fn metrics(State(state): State<SharedState>) -> String
+// Returns basic stats: total connections, active broadcasters, sessions count
+// Useful for monitoring and debugging production issues
 
 /// Renders the main player page for the current user session.
 ///
@@ -389,8 +434,8 @@ struct ControlsQuery {
 ///
 /// Behavior depends on mode:
 /// - **Radio mode**: If a `broadcaster` query param is present and valid,
-///   the UI reflects the broadcaster’s current song and index.
-/// - **Private mode**: Falls back to the caller’s own session state.
+///   the UI reflects the broadcaster's current song and index.
+/// - **Private mode**: Falls back to the caller's own session state.
 ///
 /// This endpoint is triggered when:
 /// - A listener syncs to a broadcaster
@@ -413,7 +458,7 @@ async fn player_controls(
                 .map(|s| s.filename.clone())
                 .unwrap_or_else(|| "No songs found".to_string());
 
-            // Return controls reflecting the broadcaster’s state
+            // Return controls reflecting the broadcaster's state
             return PlayerControlsTemplate {
                 current_song: song,
                 current_index: index,
@@ -572,6 +617,8 @@ async fn radio_websocket(
 /// The connection terminates when either task exits, at which point the
 /// remaining task is aborted and any per-connection state is cleaned up.
 async fn handle_radio_connection(socket: WebSocket, state: SharedState) {
+    // TODO: Increment connection counter here: state.total_connections.fetch_add(1, Ordering::Relaxed)
+    
     let (mut sender, mut receiver) = socket.split();
 
     // Subscription to the global broadcast channel.
@@ -693,6 +740,8 @@ async fn handle_radio_connection(socket: WebSocket, state: SharedState) {
     if let Some(broadcaster_id) = tuned_broadcaster.lock().await.as_ref() {
         tracing::info!("Cleaning up connection tuned to: {}", broadcaster_id);
     }
+    
+    // TODO: Decrement connection counter here: state.total_connections.fetch_sub(1, Ordering::Relaxed)
 }
 
 /// Serializes a `RadioMessage` and sends it to the client over the WebSocket.
@@ -858,6 +907,9 @@ async fn handle_client_message(
             );
 
             let server_ts = now_ms();
+            
+            // TODO: Track broadcaster activity here:
+            // state.broadcaster_last_seen.write().insert(broadcaster_id.clone(), std::time::Instant::now());
 
             // Update the server-side broadcast state
             let new_state = BroadcastState {
@@ -900,6 +952,9 @@ async fn handle_client_message(
                 .await?;
 
             let server_ts = now_ms();
+            
+            // TODO: Track broadcaster activity here too:
+            // state.broadcaster_last_seen.write().insert(broadcaster_id.clone(), std::time::Instant::now());
 
             // Update playback time for the broadcaster
             let mut broadcasts = state.broadcast_states.write();
@@ -985,6 +1040,7 @@ pub fn create_player_router(music_folder: PathBuf) -> impl std::future::Future<O
             .route("/player/radio", get(radio_websocket))       // Radio WebSocket
             .route("/player/controls", get(player_controls))    // Return current controls/status
             .with_state(state)                                  // Attach shared state to all routes
+            // TODO: Add metrics route: .route("/player/metrics", get(metrics))
     }
 }
 
@@ -1009,8 +1065,16 @@ pub async fn initialize(path_buf: PathBuf) {
 
     // Create the router with async initialization
     let router = create_player_router(path_buf).await;
+    
+    // TODO: Spawn cleanup tasks here:
+    // let state = init_player_state(path_buf.clone()).await;
+    // tokio::spawn(cleanup_stale_sessions(state.clone()));
+    // tokio::spawn(cleanup_stale_broadcasters(state.clone()));
+    
+    // TODO: Add graceful shutdown handling:
+    // Set up signal handler for Ctrl+C and shutdown_rx channel
+    // Use: axum::serve(listener, router).with_graceful_shutdown(async { shutdown_rx.await.ok(); })
 
     // Start serving requests using the Axum router
     axum::serve(listener, router).await.expect("Server failed");
 }
-
