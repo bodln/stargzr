@@ -504,7 +504,7 @@
             if (this.tunedBroadcaster === msg.broadcaster_id) {
               debugLog(`User ${msg.broadcaster_id} is now broadcasting`);
             }
-            
+
             return;
           }
 
@@ -694,6 +694,24 @@
           this.audio.addEventListener("play", sendUpdate);
           this.audio.addEventListener("pause", sendUpdate);
           this.audio.addEventListener("seeked", sendUpdate);
+
+          audio.addEventListener("ended", () => {
+            // Don't auto-skip if we're listening to a broadcaster
+            if (player.isInRadioMode()) {
+              debugLog(
+                "Track ended, but in radio mode — waiting for broadcaster",
+              );
+              return;
+            }
+
+            debugLog("Track ended — moving to next track");
+
+            // Trigger the same logic as clicking "Next"
+            htmx.ajax("POST", "/player/next", {
+              target: "#player-controls",
+              swap: "innerHTML",
+            });
+          });
 
           this.heartbeatInterval = setInterval(sendHeartbeat, 2000);
 
