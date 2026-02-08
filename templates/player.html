@@ -262,7 +262,7 @@
           this.heartbeatInterval = null;
           this.targetTime = 0;
           this.isBroadcasting = false;
-          
+
           // Reconnection state
           this.reconnectAttempts = 0;
           this.maxReconnectAttempts = 10;
@@ -270,64 +270,74 @@
           this.maxReconnectDelay = 30000;
           this.reconnectTimer = null;
           this.isIntentionalDisconnect = false;
-          
+
           // Event listener tracking for cleanup
-          this.boundHandlers = new Map();
-          
+          this.boundHandlers = new Map(); // WebSocket handlers
+          this.audioEventHandlers = new Map(); // Audio event handlers
+
           // Connection state for UI
-          this.connectionState = 'disconnected'; // 'disconnected', 'connecting', 'connected', 'error'
+          this.connectionState = "disconnected"; // 'disconnected', 'connecting', 'connected', 'error'
 
           debugLog(`Initialized with session ID: ${sessionId}`);
         }
-        
+
         // Calculate exponential backoff with jitter
         getReconnectDelay() {
-          const exponential = this.baseReconnectDelay * Math.pow(2, this.reconnectAttempts);
+          const exponential =
+            this.baseReconnectDelay * Math.pow(2, this.reconnectAttempts);
           const jitter = exponential * 0.2 * (Math.random() - 0.5);
           const delay = Math.min(
             Math.max(this.baseReconnectDelay, exponential + jitter),
-            this.maxReconnectDelay
+            this.maxReconnectDelay,
           );
           return delay;
         }
-        
+
         updateConnectionState(newState) {
           this.connectionState = newState;
           this.notifyConnectionChange(newState);
         }
-        
+
         notifyConnectionChange(state) {
-          const event = new CustomEvent('connectionStateChange', {
-            detail: { 
-              state, 
+          const event = new CustomEvent("connectionStateChange", {
+            detail: {
+              state,
               attempt: this.reconnectAttempts,
-              maxAttempts: this.maxReconnectAttempts
-            }
+              maxAttempts: this.maxReconnectAttempts,
+            },
           });
           document.dispatchEvent(event);
         }
 
         connectWebSocket() {
           // Don't reconnect if already connected or connecting
-          if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
-            debugLog(`WebSocket already ${this.ws.readyState === WebSocket.OPEN ? 'connected' : 'connecting'}, skipping...`);
+          if (
+            this.ws &&
+            (this.ws.readyState === WebSocket.OPEN ||
+              this.ws.readyState === WebSocket.CONNECTING)
+          ) {
+            debugLog(
+              `WebSocket already ${this.ws.readyState === WebSocket.OPEN ? "connected" : "connecting"}, skipping...`,
+            );
             return;
           }
-          
+
           // Clear any pending reconnection timer
           if (this.reconnectTimer) {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;
           }
-          
-          this.updateConnectionState('connecting');
+
+          this.updateConnectionState("connecting");
 
           const protocol =
             window.location.protocol === "https:" ? "wss:" : "ws:";
           const wsUrl = `${protocol}//${window.location.host}/player/radio`;
 
-          debugLog(`Connecting to WebSocket: ${wsUrl} (attempt ${this.reconnectAttempts + 1})`);
-          
+          debugLog(
+            `Connecting to WebSocket: ${wsUrl} (attempt ${this.reconnectAttempts + 1})`,
+          );
+
           try {
             this.ws = new WebSocket(wsUrl);
           } catch (error) {
@@ -335,26 +345,28 @@
             this.scheduleReconnect();
             return;
           }
-          
+
           // Store bound handlers so we can remove them later
           const onOpen = () => {
             debugLog("✓ WebSocket connected");
             this.reconnectAttempts = 0; // Reset on successful connection
-            this.updateConnectionState('connected');
-            
+            this.updateConnectionState("connected");
+
             // If we were broadcasting before disconnect, resume
             if (this.isBroadcasting) {
               debugLog("Resuming broadcast after reconnection");
               this.startBroadcasting();
             }
-            
+
             // If we were tuned in, re-tune
             if (this.tunedBroadcaster) {
-              debugLog(`Re-tuning to ${this.tunedBroadcaster} after reconnection`);
+              debugLog(
+                `Re-tuning to ${this.tunedBroadcaster} after reconnection`,
+              );
               this.tuneIn(this.tunedBroadcaster);
             }
           };
-          
+
           const onMessage = (event) => {
             debugLog(`← Received: ${event.data}`);
             try {
@@ -364,19 +376,21 @@
               debugLog(`Failed to parse message: ${error.message}`);
             }
           };
-          
+
           const onError = (error) => {
             debugLog(`✗ WebSocket error`);
-            this.updateConnectionState('error');
+            this.updateConnectionState("error");
           };
-          
+
           const onClose = (event) => {
-            debugLog(`WebSocket closed (code: ${event.code}, clean: ${event.wasClean})`);
-            this.updateConnectionState('disconnected');
-            
+            debugLog(
+              `WebSocket closed (code: ${event.code}, clean: ${event.wasClean})`,
+            );
+            this.updateConnectionState("disconnected");
+
             // Clean up existing handlers
             this.removeWebSocketHandlers();
-            
+
             // Only attempt reconnection if it wasn't intentional
             if (!this.isIntentionalDisconnect) {
               this.scheduleReconnect();
@@ -385,70 +399,79 @@
               this.isIntentionalDisconnect = false;
             }
           };
-          
+
           // Store handlers for cleanup
-          this.boundHandlers.set('open', onOpen);
-          this.boundHandlers.set('message', onMessage);
-          this.boundHandlers.set('error', onError);
-          this.boundHandlers.set('close', onClose);
-          
+          this.boundHandlers.set("open", onOpen);
+          this.boundHandlers.set("message", onMessage);
+          this.boundHandlers.set("error", onError);
+          this.boundHandlers.set("close", onClose);
+
           // Attach handlers
-          this.ws.addEventListener('open', onOpen);
-          this.ws.addEventListener('message', onMessage);
-          this.ws.addEventListener('error', onError);
-          this.ws.addEventListener('close', onClose);
+          this.ws.addEventListener("open", onOpen);
+          this.ws.addEventListener("message", onMessage);
+          this.ws.addEventListener("error", onError);
+          this.ws.addEventListener("close", onClose);
         }
-        
+
         scheduleReconnect() {
           if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-            debugLog(`Max reconnection attempts (${this.maxReconnectAttempts}) reached`);
-            this.updateConnectionState('error');
-            alert('Unable to connect to server after multiple attempts. Please refresh the page.');
+            debugLog(
+              `Max reconnection attempts (${this.maxReconnectAttempts}) reached`,
+            );
+            this.updateConnectionState("error");
+            alert(
+              "Unable to connect to server after multiple attempts. Please refresh the page.",
+            );
             return;
           }
-          
+
           const delay = this.getReconnectDelay();
-          debugLog(`Scheduling reconnection in ${delay}ms (attempt ${this.reconnectAttempts + 1}/${this.maxReconnectAttempts})`);
-          
+          debugLog(
+            `Scheduling reconnection in ${delay}ms (attempt ${this.reconnectAttempts + 1}/${this.maxReconnectAttempts})`,
+          );
+
           this.reconnectTimer = setTimeout(() => {
             this.reconnectAttempts++;
             this.connectWebSocket();
           }, delay);
         }
-        
+
         removeWebSocketHandlers() {
           if (!this.ws) return;
-          
+
           this.boundHandlers.forEach((handler, event) => {
             this.ws.removeEventListener(event, handler);
           });
           this.boundHandlers.clear();
         }
-        
+
         disconnect() {
           this.isIntentionalDisconnect = true;
-          
+
           // Clear reconnection timer
           if (this.reconnectTimer) {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;
           }
-          
+
           // Stop broadcasting if active
           if (this.isBroadcasting) {
             this.stopBroadcasting();
           }
-          
+
           // Close WebSocket
           if (this.ws) {
             this.removeWebSocketHandlers();
-            if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
+            if (
+              this.ws.readyState === WebSocket.OPEN ||
+              this.ws.readyState === WebSocket.CONNECTING
+            ) {
               this.ws.close();
             }
             this.ws = null;
           }
-          
-          this.updateConnectionState('disconnected');
+
+          this.updateConnectionState("disconnected");
           debugLog("Disconnected");
         }
 
@@ -458,11 +481,30 @@
           }
 
           debugLog(`Handling message type: ${msg.type}, mode: ${this.mode}`);
-          
+
           // Handle error messages
           if (msg.type === "Error") {
             debugLog(`Server error: ${msg.message}`);
             alert(`Error: ${msg.message}`);
+            return;
+          }
+
+          if (msg.type === "BroadcasterOffline") {
+            if (this.tunedBroadcaster === msg.broadcaster_id) {
+              debugLog(`Broadcaster ${msg.broadcaster_id} went offline`);
+              alert(
+                "The broadcaster you were listening to has stopped broadcasting.",
+              );
+              this.tuneOut("broadcaster_offline");
+            }
+            return;
+          }
+
+          if (msg.type === "BroadcasterOnline") {
+            if (this.tunedBroadcaster === msg.broadcaster_id) {
+              debugLog(`User ${msg.broadcaster_id} is now broadcasting`);
+            }
+            
             return;
           }
 
@@ -578,15 +620,39 @@
             setTimeout(() => this.startBroadcasting(), 500);
             return;
           }
-          
-          // Clean up any existing broadcast
+
+          // Clean up any existing broadcast FIRST
           this.stopBroadcasting();
 
           this.isBroadcasting = true;
           debugLog(`Broadcasting as: ${this.sessionId}`);
 
+          const initBroadcast = () => {
+            if (
+              this.isBroadcasting &&
+              this.ws &&
+              this.ws.readyState === WebSocket.OPEN
+            ) {
+              const msg = {
+                type: "StartBroadcasting",
+                broadcaster_id: this.sessionId,
+                song_index: this.getCurrentSongIndex(),
+                playback_time: this.audio.currentTime,
+                is_playing: !this.audio.paused,
+              };
+              debugLog(
+                `→ Broadcasting: song ${msg.song_index}, time ${msg.playback_time.toFixed(2)}s`,
+              );
+              this.ws.send(JSON.stringify(msg));
+            }
+          };
+
           const sendUpdate = () => {
-            if (this.isBroadcasting && this.ws && this.ws.readyState === WebSocket.OPEN) {
+            if (
+              this.isBroadcasting &&
+              this.ws &&
+              this.ws.readyState === WebSocket.OPEN
+            ) {
               const msg = {
                 type: "BroadcastUpdate",
                 broadcaster_id: this.sessionId,
@@ -602,7 +668,11 @@
           };
 
           const sendHeartbeat = () => {
-            if (this.isBroadcasting && this.ws && this.ws.readyState === WebSocket.OPEN) {
+            if (
+              this.isBroadcasting &&
+              this.ws &&
+              this.ws.readyState === WebSocket.OPEN
+            ) {
               const msg = {
                 type: "Heartbeat",
                 broadcaster_id: this.sessionId,
@@ -614,25 +684,21 @@
               this.ws.send(JSON.stringify(msg));
             }
           };
-          
-          // Create bound handlers for cleanup
-          this.boundHandlers.set('play', sendUpdate);
-          this.boundHandlers.set('pause', sendUpdate);
-          this.boundHandlers.set('seeked', sendUpdate);
-          this.boundHandlers.set('waiting', sendUpdate);
-          this.boundHandlers.set('playing', sendUpdate);
-          
-          // Attach audio event listeners
-          this.boundHandlers.forEach((handler, event) => {
-            if (['play', 'pause', 'seeked', 'waiting', 'playing'].includes(event)) {
-              this.audio.addEventListener(event, handler);
-            }
-          });
+
+          // Store audio event handlers in separate map
+          this.audioEventHandlers.set("play", sendUpdate);
+          this.audioEventHandlers.set("pause", sendUpdate);
+          this.audioEventHandlers.set("seeked", sendUpdate);
+
+          // Attach ONLY these three events
+          this.audio.addEventListener("play", sendUpdate);
+          this.audio.addEventListener("pause", sendUpdate);
+          this.audio.addEventListener("seeked", sendUpdate);
 
           this.heartbeatInterval = setInterval(sendHeartbeat, 2000);
 
           // Send initial state immediately
-          sendUpdate();
+          initBroadcast();
         }
 
         stopBroadcasting() {
@@ -642,15 +708,21 @@
             clearInterval(this.heartbeatInterval);
             this.heartbeatInterval = null;
           }
-          
-          // Remove audio event listeners
-          ['play', 'pause', 'seeked', 'waiting', 'playing'].forEach(event => {
-            const handler = this.boundHandlers.get(event);
-            if (handler) {
-              this.audio.removeEventListener(event, handler);
-              this.boundHandlers.delete(event);
-            }
+
+          // Remove ONLY the audio listeners we attached
+          this.audioEventHandlers.forEach((handler, event) => {
+            this.audio.removeEventListener(event, handler);
           });
+          this.audioEventHandlers.clear();
+
+          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(
+              JSON.stringify({
+                type: "StopBroadcasting",
+                broadcaster_id: this.sessionId,
+              }),
+            );
+          }
 
           debugLog("Broadcasting stopped");
         }
@@ -758,41 +830,41 @@
           alert("Controls disabled while tuned into a radio");
         }
       });
-      
+
       // Connection state indicator
-      document.addEventListener('connectionStateChange', (event) => {
+      document.addEventListener("connectionStateChange", (event) => {
         const { state, attempt, maxAttempts } = event.detail;
-        
-        let statusText = '';
-        let statusColor = '';
-        
+
+        let statusText = "";
+        let statusColor = "";
+
         switch (state) {
-          case 'connected':
-            statusText = '🟢 Connected';
-            statusColor = '#28a745';
+          case "connected":
+            statusText = "🟢 Connected";
+            statusColor = "#28a745";
             break;
-          case 'connecting':
-            statusText = `🟡 Connecting${attempt > 0 ? ` (${attempt}/${maxAttempts})` : ''}...`;
-            statusColor = '#ffc107';
+          case "connecting":
+            statusText = `🟡 Connecting${attempt > 0 ? ` (${attempt}/${maxAttempts})` : ""}...`;
+            statusColor = "#ffc107";
             break;
-          case 'disconnected':
-            statusText = '⚪ Disconnected';
-            statusColor = '#6c757d';
+          case "disconnected":
+            statusText = "⚪ Disconnected";
+            statusColor = "#6c757d";
             break;
-          case 'error':
-            statusText = '🔴 Connection Error';
-            statusColor = '#dc3545';
+          case "error":
+            statusText = "🔴 Connection Error";
+            statusColor = "#dc3545";
             break;
         }
-        
+
         debugLog(`Connection state: ${statusText}`);
-        
+
         // You can update UI here with connection status
         // For example, add a status indicator element
       });
 
       // Clean up on page unload
-      window.addEventListener('beforeunload', () => {
+      window.addEventListener("beforeunload", () => {
         if (window.player) {
           window.player.disconnect();
         }

@@ -33,6 +33,9 @@ pub enum PlayerError {
     
     #[error("Rate limit exceeded for session {0}")]
     RateLimitExceeded(String),
+
+    #[error("Unauthorized for this broadcast, reason: {0}")]
+    BroadcastUnauthorized(String),
 }
 
 // Tells Axum how to convert our errors into HTTP responses
@@ -44,6 +47,7 @@ impl IntoResponse for PlayerError {
             PlayerError::BroadcasterNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
             PlayerError::FileNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
             PlayerError::RateLimitExceeded(_) => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
+            PlayerError::BroadcastUnauthorized(_) => (StatusCode::UNAUTHORIZED, self.to_string()),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()),
         };
 

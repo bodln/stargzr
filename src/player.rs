@@ -70,11 +70,10 @@ struct AppState {
     /// Should evntually get moved int obroadcast states,
     /// so each broadcaster has their own channel.
     broadcast_tx: broadcast::Sender<RadioMessage>,
-    
     // TODO: Add broadcaster_last_seen: RwLock<HashMap<String, std::time::Instant>>
     // This tracks when each broadcaster last sent a heartbeat/update
     // Used for cleanup of stale broadcasters (prevents memory leak)
-    
+
     // TODO: Add metrics tracking:
     // - total_connections: Arc<AtomicU64>
     // - active_broadcasters: Arc<AtomicU64>
@@ -123,19 +122,33 @@ enum RadioMessage {
     Error {
         message: String,
     },
-    
+
     // TODO: Add StartBroadcasting { broadcaster_id: String }
-    // Explicitly register a broadcaster before they start sending updates
-    // Prevents BroadcasterNotFound errors when listeners try to tune in early
-    
+    /// Explicitly register a broadcaster before they start sending updates
+    /// Prevents BroadcasterNotFound errors when listeners try to tune in early
+    StartBroadcasting {
+        broadcaster_id: String,
+        song_index: usize,
+        playback_time: f64,
+        is_playing: bool,
+    },
+
     // TODO: Add StopBroadcasting { broadcaster_id: String }
-    // Explicitly unregister a broadcaster and notify listeners
-    
+    /// Explicitly unregister a broadcaster and notify listeners
+    StopBroadcasting {
+        broadcaster_id: String,
+    },
     // TODO: Add BroadcasterOnline { broadcaster_id: String }
-    // Notify all clients when a new broadcaster goes live
-    
+    /// Notify all clients when a new broadcaster goes live
+    BroadcasterOnline {
+        broadcaster_id: String,
+    },
+
     // TODO: Add BroadcasterOffline { broadcaster_id: String }
-    // Notify listeners when their broadcaster disconnects
+    /// Notify listeners when their broadcaster disconnects
+    BroadcasterOffline {
+        broadcaster_id: String,
+    },
 }
 
 #[derive(Template)]
@@ -214,7 +227,7 @@ fn get_or_create_position(state: &AppState, session_id: &str) -> usize {
     // 1. First try to read with read lock (most common case)
     // 2. Only acquire write lock if session doesn't exist
     // This avoids write lock contention when session already exists
-    
+
     let mut sessions = state.sessions.write();
     let now = std::time::Instant::now();
 
@@ -239,7 +252,7 @@ fn update_session_index(state: &AppState, session_id: &str, new_index: usize) {
     // TODO: Add read-then-write optimization here too:
     // Check if session exists with read lock first
     // Only acquire write lock if it exists
-    
+
     let mut sessions = state.sessions.write();
 
     if let Some(session) = sessions.get_mut(session_id) {
@@ -269,14 +282,22 @@ fn update_broadcast_index(state: &AppState, session_id: &str, new_index: usize) 
         broadcast.playback_time = 0.0;
         broadcast.server_timestamp_ms = server_ts;
 
+        // NOTICE!!! THis is commented out to try and decrease the number of sync messages being received by the listener from 2 to 1 <---------------------------
+        // no avail < --------------------------------------------------------------------------------------------------------------------------------------------
+
+        // also theres 3 broadcasting update messages loggged on the frontend every seek/pause/start/next/prev <--------------------------------------------------
+
+        // also if broadcaster haold the mouse on exactly say 1:30, the listeners bar is holding at the same position but once released <-------------------------
+        // broadcaster goes from 1:30 but the listener jumps back 4 seconds... why
+
         // Push sync to all listeners
-        let _ = state.broadcast_tx.send(RadioMessage::Sync {
-            broadcaster_id: session_id.to_string(),
-            song_index: new_index,
-            playback_time: 0.0,
-            is_playing: broadcast.is_playing,
-            server_timestamp_ms: server_ts,
-        });
+        // let _ = state.broadcast_tx.send(RadioMessage::Sync {
+        //     broadcaster_id: session_id.to_string(),
+        //     song_index: new_index,
+        //     playback_time: 0.0,
+        //     is_playing: broadcast.is_playing,
+        //     server_timestamp_ms: server_ts,
+        // });
     }
 }
 
@@ -591,11 +612,31 @@ async fn stream_audio(
 /// immediately delegates all connection logic to `handle_radio_connection`.
 /// No state is modified here; it exists purely as a thin Axum integration
 /// layer for the radio protocol.
+///
+/// It also remembers the session id, which we then use to validate
+/// if some malcontent changed it.
 async fn radio_websocket(
     ws: WebSocketUpgrade,
     State(state): State<SharedState>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_radio_connection(socket, state))
+    let session_id_str = get_session_id(&headers);
+
+    let validated_session_id = match SessionId::new(session_id_str) {
+        Ok(id) => id,
+        Err(e) => {
+            // If the session ID is invalid, reject the WebSocket upgrade
+            tracing::warn!(
+                "Rejected WebSocket connection with invalid session ID: {}",
+                e
+            );
+            return (StatusCode::BAD_REQUEST, "Invalid session ID").into_response();
+        }
+    };
+
+    ws.on_upgrade(|socket| {
+        handle_radio_connection(socket, state, validated_session_id.into_inner())
+    })
 }
 
 /// Manages the full lifecycle of a radio WebSocket connection.
@@ -616,9 +657,13 @@ async fn radio_websocket(
 ///
 /// The connection terminates when either task exits, at which point the
 /// remaining task is aborted and any per-connection state is cleaned up.
-async fn handle_radio_connection(socket: WebSocket, state: SharedState) {
+async fn handle_radio_connection(
+    socket: WebSocket,
+    state: SharedState,
+    validated_session_id: String,
+) {
     // TODO: Increment connection counter here: state.total_connections.fetch_add(1, Ordering::Relaxed)
-    
+
     let (mut sender, mut receiver) = socket.split();
 
     // Subscription to the global broadcast channel.
@@ -627,6 +672,7 @@ async fn handle_radio_connection(socket: WebSocket, state: SharedState) {
     let mut broadcast_rx = state.broadcast_tx.subscribe();
 
     // Private channel for responses from the receive task to the send task (same WebSocket)
+    // For when you receive soemthing and want to return it to yourself and only yourself
     let (out_tx, mut out_rx) = mpsc::channel::<RadioMessage>(32);
 
     // Store broadcaster ID as String (we validate it when needed)
@@ -684,6 +730,7 @@ async fn handle_radio_connection(socket: WebSocket, state: SharedState) {
                             if let Err(e) = handle_client_message(
                                 radio_msg,
                                 &state_clone,
+                                &validated_session_id,
                                 &tuned_for_recv,
                                 &out_tx,
                                 &heartbeat_limiter,
@@ -740,7 +787,7 @@ async fn handle_radio_connection(socket: WebSocket, state: SharedState) {
     if let Some(broadcaster_id) = tuned_broadcaster.lock().await.as_ref() {
         tracing::info!("Cleaning up connection tuned to: {}", broadcaster_id);
     }
-    
+
     // TODO: Decrement connection counter here: state.total_connections.fetch_sub(1, Ordering::Relaxed)
 }
 
@@ -775,10 +822,17 @@ async fn should_forward_message(
     msg: &RadioMessage,
     tuned_broadcaster: &Arc<Mutex<Option<String>>>,
 ) -> bool {
+    // If it is a broadcaster online messaage it should be sent to everyone 
+    // no matter to who or if they are tuned in
+    if matches!(msg, RadioMessage::BroadcasterOnline { .. }) {
+        return true;
+    }
+
     // Extract the broadcaster ID from messages that contain it
     let broadcaster_id = match msg {
         RadioMessage::Sync { broadcaster_id, .. } => Some(broadcaster_id.as_str()),
         RadioMessage::Heartbeat { broadcaster_id, .. } => Some(broadcaster_id.as_str()),
+        RadioMessage::BroadcasterOffline { broadcaster_id, .. } => Some(broadcaster_id.as_str()),
         _ => None, // Other message types do not have a broadcaster ID or aren't meant to be sent, only received
     };
 
@@ -791,6 +845,7 @@ async fn should_forward_message(
 
                 // Compare the tuned broadcaster with the message's broadcaster ID
                 // If they match, this message should be forwarded
+                // Checks if the client is tuned to this specific broadcaster
                 return guard.as_ref().map(|s| s.as_str()) == Some(valid_id.as_str());
             }
             Err(e) => {
@@ -805,7 +860,7 @@ async fn should_forward_message(
 }
 
 /// Handles an incoming `RadioMessage` from a client WebSocket.
-/// 
+///
 /// This function performs the following tasks based on message type:
 /// - `TuneIn`: Validates the broadcaster session ID, updates the client's tuned broadcaster,
 ///   and sends the current broadcaster state as a `Sync` message.
@@ -824,6 +879,7 @@ async fn should_forward_message(
 async fn handle_client_message(
     msg: RadioMessage,
     state: &SharedState,
+    validated_session_id: &str,
     tuned_broadcaster: &Arc<Mutex<Option<String>>>,
     out_tx: &mpsc::Sender<RadioMessage>,
     heartbeat_limiter: &Arc<RateLimiter>,
@@ -887,27 +943,29 @@ async fn handle_client_message(
             playback_time,
             is_playing,
         } => {
-            // Validate broadcaster session ID
-            let session_id = SessionId::new(broadcaster_id.clone())?;
+            let _ = ensure_same_session(&broadcaster_id, validated_session_id);
 
             // Enforce broadcast update rate limits (prevents spam)
-            broadcast_limiter
-                .check_and_consume(session_id.as_str())
-                .await?;
+            broadcast_limiter.check_and_consume(&broadcaster_id).await?;
 
             // Ensure the requested song index exists in the playlist
             validate_song_index(song_index, state.playlist.len())?;
 
             tracing::debug!(
                 "Broadcast update from {}: song={}, time={:.2}, playing={}",
-                session_id,
+                &broadcaster_id,
                 song_index,
                 playback_time,
                 is_playing
             );
 
+            // If the session isnt boadcasting dont update
+            if !state.broadcast_states.read().contains_key(&broadcaster_id){
+                return Err(PlayerError::BroadcasterNotFound(broadcaster_id));
+            } 
+
             let server_ts = now_ms();
-            
+
             // TODO: Track broadcaster activity here:
             // state.broadcaster_last_seen.write().insert(broadcaster_id.clone(), std::time::Instant::now());
 
@@ -952,7 +1010,7 @@ async fn handle_client_message(
                 .await?;
 
             let server_ts = now_ms();
-            
+
             // TODO: Track broadcaster activity here too:
             // state.broadcaster_last_seen.write().insert(broadcaster_id.clone(), std::time::Instant::now());
 
@@ -966,6 +1024,68 @@ async fn handle_client_message(
             }
         }
 
+        RadioMessage::StopBroadcasting { broadcaster_id } => {
+            // Validate broadcaster session ID
+            let _ = ensure_same_session(validated_session_id, &broadcaster_id);
+
+            let mut broadcasts = state.broadcast_states.write();
+            broadcasts.remove(&broadcaster_id);
+            drop(broadcasts);
+
+            let offline_msg = RadioMessage::BroadcasterOffline { broadcaster_id };
+
+            state
+                .broadcast_tx
+                .send(offline_msg)
+                .map_err(|_| PlayerError::BroadcastSendError)?;
+        }
+
+        RadioMessage::StartBroadcasting {
+            broadcaster_id,
+            song_index,
+            playback_time,
+            is_playing,
+        } => {
+            let _ = ensure_same_session(&broadcaster_id, validated_session_id);
+
+            // Enforce broadcast update rate limits (prevents spam)
+            broadcast_limiter.check_and_consume(&broadcaster_id).await?;
+
+            // Ensure the requested song index exists in the playlist
+            validate_song_index(song_index, state.playlist.len())?;
+
+            tracing::debug!(
+                "Starting broadcast from {}: song={}, time={:.2}, playing={}",
+                &broadcaster_id,
+                song_index,
+                playback_time,
+                is_playing
+            );
+
+            let server_ts = now_ms();
+
+            // Update the server-side broadcast state
+            let new_state = BroadcastState {
+                broadcaster_id: broadcaster_id.clone(),
+                song_index,
+                playback_time,
+                is_playing,
+                server_timestamp_ms: server_ts,
+            };
+
+            state
+                .broadcast_states
+                .write()
+                .insert(broadcaster_id.clone(), new_state);
+
+            let broadcasting_msg = RadioMessage::BroadcasterOnline { broadcaster_id };
+
+            state
+                .broadcast_tx
+                .send(broadcasting_msg)
+                .map_err(|_| PlayerError::BroadcastSendError)?;
+        }
+
         _ => {
             // Any unexpected messages are logged but ignored
             tracing::warn!("Received unexpected message type");
@@ -973,6 +1093,26 @@ async fn handle_client_message(
     }
 
     Ok(())
+}
+
+/// Verifies that the provided identifier matches the session identifier
+/// recorded when the WebSocket connection was first established.
+///
+/// This is used to ensure that a client cannot act or broadcast as another
+/// session by supplying a different ID after the connection is open.
+///
+/// # Errors
+/// Returns `PlayerError::BroadcastUnauthorized` if the provided ID does not
+/// match the validated session ID associated with the connection.
+fn ensure_same_session(expected: &str, actual: &str) -> Result<(), PlayerError> {
+    (expected == actual).then_some(()).ok_or_else(|| {
+        tracing::warn!(
+            "Session {} attempted to act as {}",
+            actual,
+            expected
+        );
+        PlayerError::BroadcastUnauthorized("Trying to use session id that differs from the one established upon websocket handshake.".into())
+    })
 }
 
 /// Creates a RadioMessage::Error from a PlayerError
@@ -1017,9 +1157,9 @@ async fn init_player_state(music_folder: PathBuf) -> SharedState {
     Arc::new(AppState {
         playlist: Arc::new(playlist),
         music_folder: Arc::new(music_folder),
-        sessions: RwLock::new(HashMap::new()),           // tracks client sessions
-        broadcast_states: RwLock::new(HashMap::new()),   // tracks broadcaster states
-        broadcast_tx,                                    // used to send Sync messages to listeners
+        sessions: RwLock::new(HashMap::new()), // tracks client sessions
+        broadcast_states: RwLock::new(HashMap::new()), // tracks broadcaster states
+        broadcast_tx,                          // used to send Sync messages to listeners
     })
 }
 
@@ -1032,15 +1172,15 @@ pub fn create_player_router(music_folder: PathBuf) -> impl std::future::Future<O
 
         // Build the router with all routes
         Router::new()
-            .route("/", get(player_page))                       // Root page
-            .route("/player", get(player_page))                 // Player main page
-            .route("/player/next", post(next_song))             // Next song action
-            .route("/player/prev", post(prev_song))             // Previous song action
+            .route("/", get(player_page)) // Root page
+            .route("/player", get(player_page)) // Player main page
+            .route("/player/next", post(next_song)) // Next song action
+            .route("/player/prev", post(prev_song)) // Previous song action
             .route("/player/stream/{index}", get(stream_audio)) // Audio streaming route
-            .route("/player/radio", get(radio_websocket))       // Radio WebSocket
-            .route("/player/controls", get(player_controls))    // Return current controls/status
-            .with_state(state)                                  // Attach shared state to all routes
-            // TODO: Add metrics route: .route("/player/metrics", get(metrics))
+            .route("/player/radio", get(radio_websocket)) // Radio WebSocket
+            .route("/player/controls", get(player_controls)) // Return current controls/status
+            .with_state(state) // Attach shared state to all routes
+        // TODO: Add metrics route: .route("/player/metrics", get(metrics))
     }
 }
 
@@ -1065,12 +1205,12 @@ pub async fn initialize(path_buf: PathBuf) {
 
     // Create the router with async initialization
     let router = create_player_router(path_buf).await;
-    
+
     // TODO: Spawn cleanup tasks here:
     // let state = init_player_state(path_buf.clone()).await;
     // tokio::spawn(cleanup_stale_sessions(state.clone()));
     // tokio::spawn(cleanup_stale_broadcasters(state.clone()));
-    
+
     // TODO: Add graceful shutdown handling:
     // Set up signal handler for Ctrl+C and shutdown_rx channel
     // Use: axum::serve(listener, router).with_graceful_shutdown(async { shutdown_rx.await.ok(); })
