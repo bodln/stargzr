@@ -666,6 +666,8 @@ async fn handle_radio_connection(
 
     let (tune_tx, mut tune_rx) = tokio::sync::watch::channel::<Option<String>>(None);
 
+    let mut global_broadcast_rx = state.global_broadcast_tx.subscribe();
+
     // Store broadcaster ID as String (we validate it when needed)
     let tuned_broadcaster = Arc::new(Mutex::new(None::<String>));
 
@@ -682,6 +684,17 @@ async fn handle_radio_connection(
         loop {
             // Polls both channels simultaneously
             tokio::select! {
+                Ok(msg) = global_broadcast_rx.recv() => {
+                    let should_forward = should_forward_message(&msg).await;
+
+                    if should_forward {
+                        if let Err(e) = send_message(&mut sender, &msg).await {
+                            tracing::error!("Failed to forward broadcast: {}", e);
+                            break;
+                        }
+                    }
+                }
+
                 Ok(()) = tune_rx.changed() => {
                     match tune_rx.borrow().clone() {
                         Some(broadcast_id) => {
@@ -828,6 +841,7 @@ async fn send_message(
         .map_err(|e| PlayerError::WebSocketError(e.to_string()))
 }
 
+// TODO change these comments 
 /// Determines whether a given `RadioMessage` should be forwarded to the client
 /// based on which broadcaster the client is currently tuned to.
 ///
@@ -1117,14 +1131,19 @@ async fn handle_client_message(
                 broadcaster_id: broadcaster_id.clone(),
             };
 
-            match broadcast_tx.send(broadcasting_msg) {
-                Ok(count) => {
-                    tracing::debug!("BroadcasterOnline sent to {} listeners", count);
-                }
-                Err(_) => {
-                    tracing::debug!("BroadcasterOnline sent but no listeners yet");
-                }
-            }
+            state
+                .global_broadcast_tx
+                .send(broadcasting_msg)
+                .map_err(|_| PlayerError::BroadcastSendError)?;
+
+            // match broadcast_tx.send(broadcasting_msg) {
+            //     Ok(count) => {
+            //         tracing::debug!("BroadcasterOnline sent to {} listeners", count);
+            //     }
+            //     Err(_) => {
+            //         tracing::debug!("BroadcasterOnline sent but no listeners yet");
+            //     }
+            // }
         }
 
         _ => {
