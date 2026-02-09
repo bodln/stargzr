@@ -933,7 +933,7 @@ async fn handle_client_message(
 
                 tune_tx
                     .send(Some(broadcaster_id.clone()))
-                    .map_err(|_| PlayerError::WebSocketError("Failed to send sync".into()))?;
+                    .map_err(|_| PlayerError::WebSocketError("Failed to tune".into()))?;
 
                 out_tx
                     .send(sync_msg)
@@ -950,7 +950,7 @@ async fn handle_client_message(
             tracing::info!("Client tuned out");
             tune_tx
                 .send(None)
-                .map_err(|_| PlayerError::WebSocketError("Failed to send sync".into()))?;
+                .map_err(|_| PlayerError::WebSocketError("Failed to tune out".into()))?;
         }
 
         RadioMessage::BroadcastUpdate {
@@ -959,7 +959,7 @@ async fn handle_client_message(
             playback_time,
             is_playing,
         } => {
-            let _ = ensure_same_session(&broadcaster_id, validated_session_id);
+            ensure_same_session(&broadcaster_id, validated_session_id)?;
 
             // Enforce broadcast update rate limits (prevents spam)
             broadcast_limiter.check_and_consume(&broadcaster_id).await?;
@@ -975,15 +975,12 @@ async fn handle_client_message(
                 is_playing
             );
 
-            // If the session isnt boadcasting dont update
+            // If the session isn't broadcasting don't update
             if !state.broadcast_states.read().contains_key(&broadcaster_id) {
                 return Err(PlayerError::BroadcasterNotFound(broadcaster_id));
             }
 
             let server_ts = now_ms();
-
-            // TODO: Track broadcaster activity here:
-            // state.broadcaster_last_seen.write().insert(broadcaster_id.clone(), std::time::Instant::now());
 
             // Update the server-side broadcast state
             let new_state = BroadcastState {
@@ -1007,19 +1004,16 @@ async fn handle_client_message(
                 server_timestamp_ms: server_ts,
             };
 
-            // Get the channel and send in one expression
-            state
-                .broadcast_channels
-                .read()
-                .get(&broadcaster_id)
-                .ok_or_else(|| PlayerError::BroadcasterNotFound(broadcaster_id.clone()))?
-                .send(sync_msg)
-                .map_err(|_| PlayerError::BroadcastSendError)?;
-
-            // state
-            //     .broadcast_tx
-            //     .send(sync_msg)
-            //     .map_err(|_| PlayerError::BroadcastSendError)?;
+            if let Some(tx) = state.broadcast_channels.read().get(&broadcaster_id) {
+                match tx.send(sync_msg) {
+                    Ok(count) => {
+                        tracing::trace!("Sync sent to {} listeners", count);
+                    }
+                    Err(_) => {
+                        tracing::trace!("Sync sent but no active listeners");
+                    }
+                }
+            }
         }
 
         RadioMessage::Heartbeat {
@@ -1036,9 +1030,6 @@ async fn handle_client_message(
 
             let server_ts = now_ms();
 
-            // TODO: Track broadcaster activity here too:
-            // state.broadcaster_last_seen.write().insert(broadcaster_id.clone(), std::time::Instant::now());
-
             // Update playback time for the broadcaster
             let mut broadcasts = state.broadcast_states.write();
             if let Some(broadcast) = broadcasts.get_mut(&broadcaster_id) {
@@ -1051,7 +1042,7 @@ async fn handle_client_message(
 
         RadioMessage::StopBroadcasting { broadcaster_id } => {
             // Validate broadcaster session ID
-            let _ = ensure_same_session(validated_session_id, &broadcaster_id);
+            ensure_same_session(&broadcaster_id, validated_session_id)?;
 
             let mut broadcasts = state.broadcast_states.write();
             broadcasts.remove(&broadcaster_id);
@@ -1061,18 +1052,9 @@ async fn handle_client_message(
                 broadcaster_id: broadcaster_id.clone(),
             };
 
-            state
-                .broadcast_channels
-                .read()
-                .get(&broadcaster_id)
-                .ok_or_else(|| PlayerError::BroadcasterNotFound(broadcaster_id.clone()))?
-                .send(offline_msg)
-                .map_err(|_| PlayerError::BroadcastSendError)?;
-
-            // state
-            //     .broadcast_tx
-            //     .send(offline_msg)
-            //     .map_err(|_| PlayerError::BroadcastSendError)?;
+            if let Some(tx) = state.broadcast_channels.read().get(&broadcaster_id) {
+                let _ = tx.send(offline_msg);
+            }
         }
 
         RadioMessage::StartBroadcasting {
@@ -1081,7 +1063,7 @@ async fn handle_client_message(
             playback_time,
             is_playing,
         } => {
-            let _ = ensure_same_session(&broadcaster_id, validated_session_id);
+            ensure_same_session(&broadcaster_id, validated_session_id)?;
 
             // Enforce broadcast update rate limits (prevents spam)
             broadcast_limiter.check_and_consume(&broadcaster_id).await?;
@@ -1131,16 +1113,18 @@ async fn handle_client_message(
             };
 
             // Now broadcast on THIS broadcaster's channel
-            let broadcasting_msg = RadioMessage::BroadcasterOnline { broadcaster_id };
+            let broadcasting_msg = RadioMessage::BroadcasterOnline {
+                broadcaster_id: broadcaster_id.clone(),
+            };
 
-            broadcast_tx
-                .send(broadcasting_msg)
-                .map_err(|_| PlayerError::BroadcastSendError)?;
-
-            // state
-            //     .broadcast_tx
-            //     .send(broadcasting_msg)
-            //     .map_err(|_| PlayerError::BroadcastSendError)?;
+            match broadcast_tx.send(broadcasting_msg) {
+                Ok(count) => {
+                    tracing::debug!("BroadcasterOnline sent to {} listeners", count);
+                }
+                Err(_) => {
+                    tracing::debug!("BroadcasterOnline sent but no listeners yet");
+                }
+            }
         }
 
         _ => {
