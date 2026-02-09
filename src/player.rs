@@ -668,15 +668,11 @@ async fn handle_radio_connection(
 
     let mut global_broadcast_rx = state.global_broadcast_tx.subscribe();
 
-    // Store broadcaster ID as String (we validate it when needed)
-    let tuned_broadcaster = Arc::new(Mutex::new(None::<String>));
-
     let heartbeat_limiter = Arc::new(RateLimiter::for_heartbeat());
     let broadcast_limiter = Arc::new(RateLimiter::for_broadcast());
 
     // Send task
     let state_clone = state.clone();
-    //let tuned_for_send = tuned_broadcaster.clone();
 
     let mut send_task = tokio::spawn(async move {
         let mut current_rx: Option<broadcast::Receiver<RadioMessage>> = None;
@@ -746,7 +742,6 @@ async fn handle_radio_connection(
 
     // Receive task
     let state_clone = state.clone();
-    let tuned_for_recv = tuned_broadcaster.clone();
 
     let mut receive_task = tokio::spawn(async move {
         while let Some(msg_result) = receiver.next().await {
@@ -760,7 +755,6 @@ async fn handle_radio_connection(
                                 radio_msg,
                                 &state_clone,
                                 &validated_session_id,
-                                &tuned_for_recv,
                                 &out_tx,
                                 &tune_tx,
                                 &heartbeat_limiter,
@@ -811,11 +805,6 @@ async fn handle_radio_connection(
             tracing::debug!("Receive task completed, aborting send task");
             send_task.abort();
         }
-    }
-
-    // Cleanup when connection closes
-    if let Some(broadcaster_id) = tuned_broadcaster.lock().await.as_ref() {
-        tracing::info!("Cleaning up connection tuned to: {}", broadcaster_id);
     }
 
     // TODO: Decrement connection counter here: state.total_connections.fetch_sub(1, Ordering::Relaxed)
@@ -904,7 +893,6 @@ async fn handle_client_message(
     msg: RadioMessage,
     state: &SharedState,
     validated_session_id: &str,
-    tuned_broadcaster: &Arc<Mutex<Option<String>>>,
     out_tx: &mpsc::Sender<RadioMessage>,
     tune_tx: &tokio::sync::watch::Sender<Option<String>>,
     heartbeat_limiter: &Arc<RateLimiter>,
@@ -916,12 +904,6 @@ async fn handle_client_message(
             let session_id = SessionId::new(broadcaster_id.clone())?;
 
             tracing::info!("Client tuning into: {}", session_id);
-
-            // Store the tuned broadcaster for this client
-            {
-                let mut guard = tuned_broadcaster.lock().await;
-                *guard = Some(session_id.as_str().to_string());
-            }
 
             // Retrieve current broadcast state if it exists
             let maybe_state = {
