@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -33,7 +34,6 @@ use uuid::Uuid;
 struct SongInfo {
     filename: String,
     size: u64,
-    _duration_secs: Option<u32>,
 }
 
 /// Represents a single user's PRIVATE player state
@@ -67,7 +67,7 @@ pub struct AppState {
     /// Used for BroadcasterOnline/Offline messages that all clients should see,
     /// regardless of which broadcaster they're tuned to.
     global_broadcast_tx: broadcast::Sender<RadioMessage>,
-    
+
     /// Per-broadcaster channels for targeted playback sync.
     /// Each broadcaster has their own channel that only their listeners subscribe to.
     /// Used for Sync and Heartbeat messages specific to that broadcaster.
@@ -222,16 +222,17 @@ fn get_session_id(headers: &HeaderMap) -> String {
 
 /// Based on the session id extracts the current playlist position
 fn get_or_create_position(state: &AppState, session_id: &str) -> usize {
-    // TODO: Optimize this function with read-then-write pattern:
-    // 1. First try to read with read lock (most common case)
-    // 2. Only acquire write lock if session doesn't exist
-    // This avoids write lock contention when session already exists
-
-    let mut sessions = state.sessions.write();
     let now = std::time::Instant::now();
 
-    // TODO: This should be made less aggressive nad put into a background task
-    sessions.retain(|_, session| now.duration_since(session.last_activity).as_secs() < 3600);
+    // First try with cheap read lock
+    {
+        let sessions = state.sessions.read();
+        if let Some(session) = sessions.get(session_id) {
+            return session.current_index;
+        }
+    }
+    
+    let mut sessions = state.sessions.write();
 
     // Either returns a valid session or creates a new one,
     // in the case of there not being one or it having expired
@@ -248,10 +249,6 @@ fn get_or_create_position(state: &AppState, session_id: &str) -> usize {
 
 /// Changes the playlist position for the session id
 fn update_session_index(state: &AppState, session_id: &str, new_index: usize) {
-    // TODO: Add read-then-write optimization here too:
-    // Check if session exists with read lock first
-    // Only acquire write lock if it exists
-
     let mut sessions = state.sessions.write();
 
     if let Some(session) = sessions.get_mut(session_id) {
@@ -299,19 +296,6 @@ fn now_ms() -> u128 {
         .unwrap()
         .as_millis()
 }
-
-// TODO: Add cleanup_stale_sessions(state: SharedState) background task
-// Should run every 5 minutes and remove sessions older than 1 hour
-// This moves the cleanup out of the hot path (get_or_create_position)
-
-// TODO: Add cleanup_stale_broadcasters(state: SharedState) background task
-// CRITICAL: Without this, broadcast_states grows forever (memory leak!)
-// Should run every 60 seconds and remove broadcasters that haven't sent
-// a heartbeat in 30+ seconds. Also notify listeners when broadcaster goes offline.
-
-// TODO: Add metrics endpoint: async fn metrics(State(state): State<SharedState>) -> String
-// Returns basic stats: total connections, active broadcasters, sessions count
-// Useful for monitoring and debugging production issues
 
 /// Renders the main player page for the current user session.
 ///
@@ -655,8 +639,6 @@ async fn handle_radio_connection(
     state: SharedState,
     validated_session_id: String,
 ) {
-    // TODO: Increment connection counter here: state.total_connections.fetch_add(1, Ordering::Relaxed)
-
     let (mut sender, mut receiver) = socket.split();
 
     // Private channel for responses from the receive task to the send task (same WebSocket)
@@ -975,6 +957,7 @@ async fn handle_client_message(
                 server_timestamp_ms: server_ts,
             };
 
+            // A return value of Err does not mean that future calls to send will fail
             if let Some(tx) = state.broadcast_channels.read().get(&broadcaster_id) {
                 match tx.send(sync_msg) {
                     Ok(count) => {
@@ -1023,9 +1006,17 @@ async fn handle_client_message(
                 broadcaster_id: broadcaster_id.clone(),
             };
 
-            if let Err(e) = state.global_broadcast_tx.send(offline_msg) {
-                tracing::error!("Failed to send message through the global channel: {}", e);
+            match state.global_broadcast_tx.send(offline_msg) {
+                Ok(count) => {
+                    tracing::debug!("BroadcasterOffline sent to {} clients", count);
+                }
+                Err(_) => {
+                    tracing::debug!("BroadcasterOffline sent but no clients connected");
+                }
             }
+
+            // Clean up the broadcaster's channel
+            state.broadcast_channels.write().remove(&broadcaster_id);
 
             // if let Some(tx) = state.broadcast_channels.read().get(&broadcaster_id) {
             //     let _ = tx.send(offline_msg);
@@ -1130,39 +1121,39 @@ fn create_error_message(error: &PlayerError) -> RadioMessage {
 }
 
 /// Periodically cleans up stale player sessions and broadcaster channels.
-/// 
+///
 /// This function runs in a background task and performs two types of cleanup:
-/// 
+///
 /// 1. **Player Sessions**: Removes sessions that haven't been active for over 1 hour.
 ///    These are tracked by `last_activity` timestamp and represent private playback state.
-/// 
+///
 /// 2. **Broadcaster Sessions**: Removes broadcasters that haven't sent updates for over 30 seconds.
 ///    These are tracked by `server_timestamp_ms` and represent active radio broadcasts.
 ///    When a broadcaster is cleaned up, we also notify any listeners that were tuned in.
-/// 
+///
 /// The function runs every 60 seconds to balance responsiveness with CPU overhead.
 async fn cleanup_stale_sessions(state: Arc<AppState>) {
     // Create an interval timer that fires every 60 seconds
     let mut interval = tokio::time::interval(Duration::from_secs(60));
-    
+
     loop {
         // Wait for the next tick (initially fires immediately, then every 60s)
         interval.tick().await;
-        
+
         let now = std::time::Instant::now();
         let now_ms = now_ms();
-        
-        // === Cleanup Player Sessions ===
+
+        // Cleanup Player Sessions
         // These are private playback sessions for users not in radio mode
         {
             let mut sessions = state.sessions.write();
             let before_count = sessions.len();
-            
-            // Remove sessions older than 1 hour (3600 seconds)
+
+            // Remove sessions older than 1 hour
             sessions.retain(|session_id, session| {
                 let age = now.duration_since(session.last_activity);
                 let should_keep = age.as_secs() < 3600;
-                
+
                 if !should_keep {
                     tracing::info!(
                         "Cleaning up stale player session: {} (age: {}s)",
@@ -1170,28 +1161,28 @@ async fn cleanup_stale_sessions(state: Arc<AppState>) {
                         age.as_secs()
                     );
                 }
-                
+
                 should_keep
             });
-            
+
             let removed = before_count - sessions.len();
             if removed > 0 {
                 tracing::info!("Cleaned up {} stale player session(s)", removed);
             }
         }
-        
-        // === Cleanup Broadcaster Sessions ===
+
+        // Cleanup Broadcaster Sessions
         // These are active radio broadcasts that should be recent
         let mut stale_broadcasters = Vec::new();
-        
+
         {
             let broadcasts = state.broadcast_states.read();
-            
+
             // Find broadcasters that haven't updated in 30+ seconds
             for (broadcaster_id, broadcast_state) in broadcasts.iter() {
                 let age_ms = now_ms.saturating_sub(broadcast_state.server_timestamp_ms);
                 let age_secs = age_ms / 1000;
-                
+
                 // 30 seconds is chosen because:
                 // - Heartbeats come every 2-3 seconds normally
                 // - 30 seconds allows for network hiccups and reconnects
@@ -1206,7 +1197,7 @@ async fn cleanup_stale_sessions(state: Arc<AppState>) {
                 }
             }
         }
-        
+
         // Now remove the stale broadcasters and notify listeners
         for broadcaster_id in stale_broadcasters {
             // Remove from broadcast states
@@ -1216,14 +1207,14 @@ async fn cleanup_stale_sessions(state: Arc<AppState>) {
                     tracing::info!("Removed stale broadcaster state: {}", broadcaster_id);
                 }
             }
-            
+
             // Send offline notification to any remaining listeners
             // It's okay if there are no listeners - we handle that gracefully
             if let Some(tx) = state.broadcast_channels.read().get(&broadcaster_id) {
                 let offline_msg = RadioMessage::BroadcasterOffline {
                     broadcaster_id: broadcaster_id.clone(),
                 };
-                
+
                 match tx.send(offline_msg) {
                     Ok(listener_count) => {
                         tracing::info!(
@@ -1240,7 +1231,7 @@ async fn cleanup_stale_sessions(state: Arc<AppState>) {
                     }
                 }
             }
-            
+
             // Remove the broadcast channel itself
             {
                 let mut channels = state.broadcast_channels.write();
@@ -1267,7 +1258,6 @@ async fn init_player_state(music_folder: PathBuf) -> SharedState {
                         playlist.push(SongInfo {
                             filename: filename.to_string(),
                             size: metadata.len(),
-                            _duration_secs: None, // placeholder if you want to compute duration later
                         });
                     }
                 }
@@ -1307,7 +1297,6 @@ pub fn create_player_router(state: Arc<AppState>) -> impl std::future::Future<Ou
             .route("/player/radio", get(radio_websocket)) // Radio WebSocket
             .route("/player/controls", get(player_controls)) // Return current controls/status
             .with_state(state) // Attach shared state to all routes
-        // TODO: Add metrics route: .route("/player/metrics", get(metrics))
     }
 }
 
