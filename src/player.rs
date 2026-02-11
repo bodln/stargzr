@@ -21,10 +21,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::broadcast;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
@@ -51,7 +52,7 @@ struct BroadcastState {
     server_timestamp_ms: u128, // When this state was recorded
 }
 
-struct AppState {
+pub struct AppState {
     playlist: Arc<Vec<SongInfo>>,
     music_folder: Arc<PathBuf>,
 
@@ -62,10 +63,14 @@ struct AppState {
     /// Maps broadcaster_id -> their current state
     broadcast_states: RwLock<HashMap<String, BroadcastState>>,
 
-    
+    /// Global broadcast channel for system-wide announcements.
+    /// Used for BroadcasterOnline/Offline messages that all clients should see,
+    /// regardless of which broadcaster they're tuned to.
     global_broadcast_tx: broadcast::Sender<RadioMessage>,
-
-
+    
+    /// Per-broadcaster channels for targeted playback sync.
+    /// Each broadcaster has their own channel that only their listeners subscribe to.
+    /// Used for Sync and Heartbeat messages specific to that broadcaster.
     broadcast_channels: RwLock<HashMap<String, broadcast::Sender<RadioMessage>>>,
     // TODO: Add broadcaster_last_seen: RwLock<HashMap<String, std::time::Instant>>
     // This tracks when each broadcaster last sent a heartbeat/update
@@ -275,14 +280,6 @@ fn update_broadcast_index(state: &AppState, session_id: &str, new_index: usize) 
         broadcast.song_index = new_index;
         broadcast.playback_time = 0.0;
         broadcast.server_timestamp_ms = server_ts;
-
-        // NOTICE!!! THis is commented out to try and decrease the number of sync messages being received by the listener from 2 to 1 <---------------------------
-        // no avail < --------------------------------------------------------------------------------------------------------------------------------------------
-
-        // also theres 3 broadcasting update messages loggged on the frontend every seek/pause/start/next/prev <--------------------------------------------------
-
-        // also if broadcaster haold the mouse on exactly say 1:30, the listeners bar is holding at the same position but once released <-------------------------
-        // broadcaster goes from 1:30 but the listener jumps back 4 seconds... why
 
         // Push sync to all listeners
         // let _ = state.broadcast_tx.send(RadioMessage::Sync {
@@ -616,6 +613,8 @@ async fn radio_websocket(
 ) -> impl IntoResponse {
     let session_id_str = get_session_id(&headers);
 
+    // This is the session id first given to the user
+    // It is used so if someone tampers with their original session their calls are moot
     let validated_session_id = match SessionId::new(session_id_str) {
         Ok(id) => id,
         Err(e) => {
@@ -678,8 +677,9 @@ async fn handle_radio_connection(
         let mut current_rx: Option<broadcast::Receiver<RadioMessage>> = None;
 
         loop {
-            // Polls both channels simultaneously
+            // Polls all channels simultaneously
             tokio::select! {
+                // Global channel
                 Ok(msg) = global_broadcast_rx.recv() => {
                     let should_forward = should_forward_message(&msg).await;
 
@@ -691,6 +691,7 @@ async fn handle_radio_connection(
                     }
                 }
 
+                // Change the channel we are listening on in the case of change
                 Ok(()) = tune_rx.changed() => {
                     match tune_rx.borrow().clone() {
                         Some(broadcast_id) => {
@@ -700,7 +701,7 @@ async fn handle_radio_connection(
                             };
 
                             current_rx = tx.map(|t| t.subscribe());
-                            tracing::debug!("Tuned to {:?}", broadcast_id);
+                            tracing::debug!("Tuned in to {:?}", broadcast_id);
                         }
                         None => {
                             current_rx = None;
@@ -830,46 +831,20 @@ async fn send_message(
         .map_err(|e| PlayerError::WebSocketError(e.to_string()))
 }
 
-// TODO change these comments 
-/// Determines whether a given `RadioMessage` should be forwarded to the client
-/// based on which broadcaster the client is currently tuned to.
-///
-/// Only `Sync` and `Heartbeat` messages carry a `broadcaster_id`. This ID is
-/// validated as a `SessionId`. If valid, it is compared to the client's
-/// currently tuned broadcaster. Returns `true` if the IDs match, meaning
-/// the message should be forwarded to this client. Returns `false` otherwise.
-async fn should_forward_message(
-    msg: &RadioMessage,
-) -> bool {
-    // If it is a broadcaster online messaage it should be sent to everyone
-    // no matter to who or if they are tuned in
-    if matches!(msg, RadioMessage::BroadcasterOnline { .. }) {
-        return true;
-    }
-
-    // Extract the broadcaster ID from messages that contain it
-    let broadcaster_id = match msg {
-        RadioMessage::Sync { broadcaster_id, .. } => Some(broadcaster_id.as_str()),
-        RadioMessage::Heartbeat { broadcaster_id, .. } => Some(broadcaster_id.as_str()),
-        RadioMessage::BroadcasterOffline { broadcaster_id, .. } => Some(broadcaster_id.as_str()),
-        _ => None, // Other message types do not have a broadcaster ID or aren't meant to be sent, only received
-    };
-
-    if let Some(session_id_str) = broadcaster_id {
-        // Attempt to validate and parse the broadcaster ID as a SessionId
-        match SessionId::new(session_id_str.to_string()) {
-            Ok(_valid_id) => {
-                return true;
-            }
-            Err(e) => {
-                // If the broadcaster ID is invalid, log the error and do not forward
-                tracing::error!("Failed to parse broadcaster ID: {}", e);
-            }
-        }
-    }
-
-    // No broadcaster ID in message, or parsing failed, so do not forward
-    false
+/// Validates that the message is a broadcastable type.
+/// All messages that arrive here have already been filtered by subscription.
+async fn should_forward_message(msg: &RadioMessage) -> bool {
+    // We receive messages from two sources:
+    // 1. Global channel: Only BroadcasterOnline announcements
+    // 2. Specific broadcaster channel: Sync and Heartbeat for that broadcaster
+    // Both sources only send appropriate messages, so we just validate the type
+    matches!(
+        msg,
+        RadioMessage::BroadcasterOnline { .. }
+            | RadioMessage::BroadcasterOffline { .. }
+            | RadioMessage::Sync { .. }
+            | RadioMessage::Heartbeat { .. }
+    )
 }
 
 /// Handles an incoming `RadioMessage` from a client WebSocket.
@@ -1048,9 +1023,13 @@ async fn handle_client_message(
                 broadcaster_id: broadcaster_id.clone(),
             };
 
-            if let Some(tx) = state.broadcast_channels.read().get(&broadcaster_id) {
-                let _ = tx.send(offline_msg);
+            if let Err(e) = state.global_broadcast_tx.send(offline_msg) {
+                tracing::error!("Failed to send message through the global channel: {}", e);
             }
+
+            // if let Some(tx) = state.broadcast_channels.read().get(&broadcaster_id) {
+            //     let _ = tx.send(offline_msg);
+            // }
         }
 
         RadioMessage::StartBroadcasting {
@@ -1092,23 +1071,16 @@ async fn handle_client_message(
                 .insert(broadcaster_id.clone(), new_state);
 
             // Create the channel if it doesn't exist
-            let broadcast_tx = {
+            {
                 let mut channels = state.broadcast_channels.write();
+                channels.entry(broadcaster_id.clone()).or_insert_with(|| {
+                    let (tx, _rx) = broadcast::channel::<RadioMessage>(100);
+                    tracing::debug!("Created broadcast channel for session: {}", broadcaster_id);
+                    tx
+                });
+            }
 
-                channels
-                    .entry(broadcaster_id.clone())
-                    .or_insert_with(|| {
-                        let (tx, _rx) = broadcast::channel::<RadioMessage>(100);
-                        tracing::debug!(
-                            "Created broadcast channel for session: {}",
-                            broadcaster_id
-                        );
-                        tx
-                    })
-                    .clone()
-            };
-
-            // Now broadcast on THIS broadcaster's channel
+            // Send announcement through global channel, not the broadcaster's channel
             let broadcasting_msg = RadioMessage::BroadcasterOnline {
                 broadcaster_id: broadcaster_id.clone(),
             };
@@ -1117,15 +1089,6 @@ async fn handle_client_message(
                 .global_broadcast_tx
                 .send(broadcasting_msg)
                 .map_err(|_| PlayerError::BroadcastSendError)?;
-
-            // match broadcast_tx.send(broadcasting_msg) {
-            //     Ok(count) => {
-            //         tracing::debug!("BroadcasterOnline sent to {} listeners", count);
-            //     }
-            //     Err(_) => {
-            //         tracing::debug!("BroadcasterOnline sent but no listeners yet");
-            //     }
-            // }
         }
 
         _ => {
@@ -1166,6 +1129,129 @@ fn create_error_message(error: &PlayerError) -> RadioMessage {
     }
 }
 
+/// Periodically cleans up stale player sessions and broadcaster channels.
+/// 
+/// This function runs in a background task and performs two types of cleanup:
+/// 
+/// 1. **Player Sessions**: Removes sessions that haven't been active for over 1 hour.
+///    These are tracked by `last_activity` timestamp and represent private playback state.
+/// 
+/// 2. **Broadcaster Sessions**: Removes broadcasters that haven't sent updates for over 30 seconds.
+///    These are tracked by `server_timestamp_ms` and represent active radio broadcasts.
+///    When a broadcaster is cleaned up, we also notify any listeners that were tuned in.
+/// 
+/// The function runs every 60 seconds to balance responsiveness with CPU overhead.
+async fn cleanup_stale_sessions(state: Arc<AppState>) {
+    // Create an interval timer that fires every 60 seconds
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    
+    loop {
+        // Wait for the next tick (initially fires immediately, then every 60s)
+        interval.tick().await;
+        
+        let now = std::time::Instant::now();
+        let now_ms = now_ms();
+        
+        // === Cleanup Player Sessions ===
+        // These are private playback sessions for users not in radio mode
+        {
+            let mut sessions = state.sessions.write();
+            let before_count = sessions.len();
+            
+            // Remove sessions older than 1 hour (3600 seconds)
+            sessions.retain(|session_id, session| {
+                let age = now.duration_since(session.last_activity);
+                let should_keep = age.as_secs() < 3600;
+                
+                if !should_keep {
+                    tracing::info!(
+                        "Cleaning up stale player session: {} (age: {}s)",
+                        session_id,
+                        age.as_secs()
+                    );
+                }
+                
+                should_keep
+            });
+            
+            let removed = before_count - sessions.len();
+            if removed > 0 {
+                tracing::info!("Cleaned up {} stale player session(s)", removed);
+            }
+        }
+        
+        // === Cleanup Broadcaster Sessions ===
+        // These are active radio broadcasts that should be recent
+        let mut stale_broadcasters = Vec::new();
+        
+        {
+            let broadcasts = state.broadcast_states.read();
+            
+            // Find broadcasters that haven't updated in 30+ seconds
+            for (broadcaster_id, broadcast_state) in broadcasts.iter() {
+                let age_ms = now_ms.saturating_sub(broadcast_state.server_timestamp_ms);
+                let age_secs = age_ms / 1000;
+                
+                // 30 seconds is chosen because:
+                // - Heartbeats come every 2-3 seconds normally
+                // - 30 seconds allows for network hiccups and reconnects
+                // - But catches truly disconnected broadcasters quickly
+                if age_secs > 30 {
+                    tracing::info!(
+                        "Found stale broadcaster: {} (age: {}s)",
+                        broadcaster_id,
+                        age_secs
+                    );
+                    stale_broadcasters.push(broadcaster_id.clone());
+                }
+            }
+        }
+        
+        // Now remove the stale broadcasters and notify listeners
+        for broadcaster_id in stale_broadcasters {
+            // Remove from broadcast states
+            {
+                let mut broadcasts = state.broadcast_states.write();
+                if broadcasts.remove(&broadcaster_id).is_some() {
+                    tracing::info!("Removed stale broadcaster state: {}", broadcaster_id);
+                }
+            }
+            
+            // Send offline notification to any remaining listeners
+            // It's okay if there are no listeners - we handle that gracefully
+            if let Some(tx) = state.broadcast_channels.read().get(&broadcaster_id) {
+                let offline_msg = RadioMessage::BroadcasterOffline {
+                    broadcaster_id: broadcaster_id.clone(),
+                };
+                
+                match tx.send(offline_msg) {
+                    Ok(listener_count) => {
+                        tracing::info!(
+                            "Notified {} listener(s) that broadcaster {} went offline",
+                            listener_count,
+                            broadcaster_id
+                        );
+                    }
+                    Err(_) => {
+                        tracing::debug!(
+                            "No listeners to notify for offline broadcaster: {}",
+                            broadcaster_id
+                        );
+                    }
+                }
+            }
+            
+            // Remove the broadcast channel itself
+            {
+                let mut channels = state.broadcast_channels.write();
+                if channels.remove(&broadcaster_id).is_some() {
+                    tracing::info!("Removed broadcast channel: {}", broadcaster_id);
+                }
+            }
+        }
+    }
+}
+
 /// Initializes the shared player state by scanning the music folder,
 /// building a playlist, and setting up broadcast channels and session tracking.
 async fn init_player_state(music_folder: PathBuf) -> SharedState {
@@ -1203,17 +1289,14 @@ async fn init_player_state(music_folder: PathBuf) -> SharedState {
         sessions: RwLock::new(HashMap::new()), // tracks client sessions
         broadcast_states: RwLock::new(HashMap::new()), // tracks broadcaster states
         broadcast_channels: RwLock::new(HashMap::new()), // tracks broadcaster channels
-        global_broadcast_tx, // used to send Sync messages to listeners
+        global_broadcast_tx,                   // used to send Sync messages to listeners
     })
 }
 
 /// Creates an Axum router with all the player routes, using the given music folder.
 /// Returns a future because state initialization is async.
-pub fn create_player_router(music_folder: PathBuf) -> impl std::future::Future<Output = Router> {
+pub fn create_player_router(state: Arc<AppState>) -> impl std::future::Future<Output = Router> {
     async move {
-        // Initialize the shared state asynchronously
-        let state = init_player_state(music_folder).await;
-
         // Build the router with all routes
         Router::new()
             .route("/", get(player_page)) // Root page
@@ -1247,13 +1330,14 @@ pub async fn initialize(path_buf: PathBuf) {
         addr
     );
 
-    // Create the router with async initialization
-    let router = create_player_router(path_buf).await;
+    // Initialize the shared state asynchronously
+    let state = init_player_state(path_buf).await;
 
-    // TODO: Spawn cleanup tasks here:
-    // let state = init_player_state(path_buf.clone()).await;
-    // tokio::spawn(cleanup_stale_sessions(state.clone()));
-    // tokio::spawn(cleanup_stale_broadcasters(state.clone()));
+    // Create the router with async initialization
+    let router = create_player_router(state.clone()).await;
+
+    // Task for cleaning up old sessions both player and broadcast
+    tokio::spawn(cleanup_stale_sessions(state.clone()));
 
     // TODO: Add graceful shutdown handling:
     // Set up signal handler for Ctrl+C and shutdown_rx channel
