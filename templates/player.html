@@ -145,10 +145,180 @@
         max-height: 200px;
         overflow-y: auto;
       }
+
+      .analytics-container {
+        background: #f8f9fa;
+        padding: 15px;
+        border-radius: 8px;
+        margin-bottom: 20px;
+        border: 1px solid #dee2e6;
+      }
+
+      .analytics-container h3 {
+        margin: 0 0 10px 0;
+        font-size: 16px;
+        color: #495057;
+      }
+
+      #analytics-display {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 15px;
+      }
+
+      .stat {
+        background: white;
+        padding: 10px;
+        border-radius: 6px;
+        text-align: center;
+        border: 1px solid #e9ecef;
+      }
+
+      .stat-label {
+        display: block;
+        font-size: 12px;
+        color: #6c757d;
+        margin-bottom: 5px;
+      }
+
+      .stat-value {
+        display: block;
+        font-size: 24px;
+        font-weight: bold;
+        color: #007bff;
+      }
+
+      .broadcasters-container {
+        background: #f8f9fa;
+        padding: 15px;
+        border-radius: 8px;
+        margin-bottom: 20px;
+        border: 1px solid #dee2e6;
+      }
+
+      .broadcasters-container h3 {
+        margin: 0 0 15px 0;
+        font-size: 16px;
+        color: #495057;
+      }
+
+      #broadcasters-list {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .no-broadcasters {
+        text-align: center;
+        color: #6c757d;
+        padding: 20px;
+        font-style: italic;
+      }
+
+      .broadcaster-card {
+        background: white;
+        padding: 15px;
+        border-radius: 6px;
+        border: 1px solid #e9ecef;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        transition: box-shadow 0.2s;
+      }
+
+      .broadcaster-card:hover {
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+      }
+
+      .broadcaster-info {
+        flex: 1;
+      }
+
+      .broadcaster-id {
+        font-size: 12px;
+        color: #6c757d;
+        font-family: monospace;
+        margin-bottom: 5px;
+      }
+
+      .broadcaster-song {
+        font-size: 14px;
+        font-weight: 600;
+        color: #212529;
+        margin-bottom: 5px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .play-status {
+        font-size: 16px;
+      }
+
+      .broadcaster-time {
+        font-size: 12px;
+        color: #6c757d;
+      }
+
+      .tune-in-btn {
+        padding: 8px 16px;
+        font-size: 14px;
+        background: #007bff;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+
+      .tune-in-btn:hover {
+        background: #0056b3;
+      }
+
+      .tune-in-btn:disabled {
+        background: #6c757d;
+        cursor: not-allowed;
+      }
+
+      .currently-tuned {
+        background: #d4edda;
+        border-color: #c3e6cb;
+      }
+
+      .self-broadcasting {
+        background: #fff3cd;
+        border-color: #ffeaa7;
+      }
     </style>
   </head>
   <body>
     <h1>MP3 Player</h1>
+
+    <div class="analytics-container">
+      <h3>📊 Server Statistics (Live)</h3>
+      <div id="analytics-display">
+        <div class="stat">
+          <span class="stat-label">Active Connections:</span>
+          <span id="stat-connections" class="stat-value">0</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Broadcasting:</span>
+          <span id="stat-broadcasters" class="stat-value">0</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Listening:</span>
+          <span id="stat-listeners" class="stat-value">0</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Live Broadcasts -->
+    <div class="broadcasters-container">
+      <h3>📻 Live Broadcasts</h3>
+      <div id="broadcasters-list">
+        <div class="no-broadcasters">No one is broadcasting right now</div>
+      </div>
+    </div>
 
     <!-- Mode Indicator and Radio Controls -->
     <div class="mode-container">
@@ -482,6 +652,12 @@
 
           debugLog(`Handling message type: ${msg.type}, mode: ${this.mode}`);
 
+          // Handle analytics updates
+          if (msg.type === "Analytics") {
+            updateAnalyticsDisplay(msg);
+            return;
+          }
+
           // Handle error messages
           if (msg.type === "Error") {
             debugLog(`Server error: ${msg.message}`);
@@ -753,6 +929,100 @@
         isInRadioMode() {
           return this.mode === "radio";
         }
+      }
+
+      // Update analytics display with live data
+      function updateAnalyticsDisplay(analytics) {
+        // Update stats
+        document.getElementById("stat-connections").textContent =
+          analytics.active_connections;
+        document.getElementById("stat-broadcasters").textContent =
+          analytics.active_broadcasters;
+        document.getElementById("stat-listeners").textContent =
+          analytics.active_listeners;
+
+        // Update broadcasters list
+        const broadcastersList = document.getElementById("broadcasters-list");
+
+        if (analytics.broadcasters.length === 0) {
+          broadcastersList.innerHTML =
+            '<div class="no-broadcasters">No one is broadcasting right now</div>';
+          return;
+        }
+
+        // Build broadcaster cards
+        broadcastersList.innerHTML = analytics.broadcasters
+          .map((broadcaster) => {
+            const playIcon = broadcaster.is_playing ? "▶️" : "⏸️";
+            const minutes = Math.floor(broadcaster.playback_time / 60);
+            const seconds = Math.floor(broadcaster.playback_time % 60);
+            const timeStr = `${minutes}:${seconds.toString().padStart(2, "0")}`;
+
+            // Check if this is the current user
+            const isSelf = broadcaster.broadcaster_id === player.sessionId;
+
+            // Check if we're currently tuned to this broadcaster
+            const isTunedIn =
+              player.tunedBroadcaster === broadcaster.broadcaster_id;
+
+            // Determine card styling
+            let cardClass = "broadcaster-card";
+            if (isSelf) {
+              cardClass += " self-broadcasting";
+            } else if (isTunedIn) {
+              cardClass += " currently-tuned";
+            }
+
+            // Determine button state
+            let buttonHTML;
+            if (isSelf) {
+              buttonHTML = '<button class="tune-in-btn" disabled>You</button>';
+            } else if (isTunedIn) {
+              buttonHTML =
+                '<button class="tune-in-btn" disabled>Tuned In ✓</button>';
+            } else {
+              buttonHTML = `<button class="tune-in-btn" onclick="tuneInToBroadcaster('${broadcaster.broadcaster_id}')">Tune In 📻</button>`;
+            }
+
+            return `
+        <div class="${cardClass}">
+          <div class="broadcaster-info">
+            <div class="broadcaster-id">${broadcaster.broadcaster_id}</div>
+            <div class="broadcaster-song">
+              <span class="play-status">${playIcon}</span>
+              <span>${broadcaster.song_name}</span>
+            </div>
+            <div class="broadcaster-time">
+              Track ${broadcaster.song_index + 1} • ${timeStr}
+            </div>
+          </div>
+          ${buttonHTML}
+        </div>
+      `;
+          })
+          .join("");
+      }
+
+      // Helper function to tune in from broadcaster list
+      function tuneInToBroadcaster(broadcasterId) {
+        document.getElementById("broadcaster-input").value = broadcasterId;
+
+        player.tuneIn(broadcasterId);
+
+        modeDisplay.textContent = "Radio Mode";
+        modeDisplay.className = "mode-badge radio";
+        broadcasterName.textContent = broadcasterId;
+        broadcasterInfo.classList.remove("hidden");
+
+        tuneInBtn.classList.add("hidden");
+        tuneOutBtn.classList.remove("hidden");
+
+        prevBtn.disabled = true;
+        nextBtn.disabled = true;
+
+        debugLog(
+          `Tuned into broadcaster: ${broadcasterId} via broadcaster list`,
+        );
       }
 
       // Initialize

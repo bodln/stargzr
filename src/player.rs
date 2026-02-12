@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -47,6 +47,8 @@ struct PlayerSession {
 struct BroadcastState {
     broadcaster_id: String,
     song_index: usize,
+    // We add this field so we can return the song name in analytics
+    song_name: String,
     playback_time: f64, // Current position in seconds
     is_playing: bool,
     server_timestamp_ms: u128, // When this state was recorded
@@ -70,15 +72,10 @@ pub struct AppState {
     /// Each broadcaster has their own channel that only their listeners subscribe to.
     broadcast_channels: RwLock<HashMap<String, broadcast::Sender<RadioMessage>>>,
 
-    // TODO: Add broadcaster_last_seen: RwLock<HashMap<String, std::time::Instant>>
-    // This tracks when each broadcaster last sent a heartbeat/update
-    // Used for cleanup of stale broadcasters (prevents memory leak)
-
-    // TODO: Add metrics tracking:
-    // - total_connections: Arc<AtomicU64>
-    // - active_broadcasters: Arc<AtomicU64>
-    // - active_listeners: Arc<AtomicU64>
-    // For observability and monitoring
+    // Real-time analytics counters
+    active_connections: AtomicUsize,
+    active_broadcasters: AtomicUsize,
+    active_listeners: AtomicUsize,
 }
 
 /// Helper type for cleaner function signatures
@@ -145,6 +142,13 @@ enum RadioMessage {
     /// Notify listeners when their broadcaster disconnects
     BroadcasterOffline {
         broadcaster_id: String,
+    },
+
+    Analytics {
+        active_connections: usize,
+        active_broadcasters: usize,
+        active_listeners: usize,
+        broadcasters: Vec<BroadcastState>,
     },
 }
 
@@ -229,7 +233,7 @@ fn get_or_create_position(state: &AppState, session_id: &str) -> usize {
             return session.current_index;
         }
     }
-    
+
     let mut sessions = state.sessions.write();
 
     // Either returns a valid session or creates a new one,
@@ -547,23 +551,6 @@ async fn radio_websocket(
 }
 
 /// Manages the full lifecycle of a radio WebSocket connection.
-///
-/// This function is responsible for:
-/// - Splitting the socket into send and receive halves
-/// - Spawning independent send and receive tasks
-/// - Forwarding relevant broadcast messages to the client
-/// - Handling incoming client commands (tuning, heartbeat, broadcast)
-/// - Applying rate limiting and basic validation
-///
-/// Architecture:
-/// - **Receive task**: Parses client messages and mutates shared state
-/// - **Send task**: Pushes outbound messages to the client, sourced from:
-///   - The global broadcast channel
-///   - A private channel used for responses to this connection,
-///     which is used for when a listener tunes in and just needs a Sync back
-///
-/// The connection terminates when either task exits, at which point the
-/// remaining task is aborted and any per-connection state is cleaned up.
 async fn handle_radio_connection(
     socket: WebSocket,
     state: SharedState,
@@ -582,6 +569,15 @@ async fn handle_radio_connection(
 
     let heartbeat_limiter = Arc::new(RateLimiter::for_heartbeat());
     let broadcast_limiter = Arc::new(RateLimiter::for_broadcast());
+
+    state.active_connections.fetch_add(1, Relaxed);
+    broadcast_analytics(&state);
+
+    tracing::info!(
+        "Client connected: {} (total: {})",
+        &validated_session_id,
+        state.active_connections.load(Relaxed)
+    );
 
     // Send task
     let state_clone = state.clone();
@@ -631,11 +627,11 @@ async fn handle_radio_connection(
                     }
                 }
 
-                // Broadcast messages from other connections to the appropriate channel 
+                // Broadcast messages from other connections to the appropriate channel
                 Ok(msg) = async {
                     match &mut current_tuned_broadcaster_rx {
                         Some(rx) => rx.recv().await,
-                        // If current_tuned_broadcaster_rx is None, return a pending future 
+                        // If current_tuned_broadcaster_rx is None, return a pending future
                         // so this branch never becomes ready and never wins select!
                         None => std::future::pending().await,
                     }
@@ -659,6 +655,7 @@ async fn handle_radio_connection(
 
     // Receive task
     let state_clone = state.clone();
+    let validated_session_id_clone = validated_session_id.clone();
 
     let mut receive_task = tokio::spawn(async move {
         while let Some(msg_result) = receiver.next().await {
@@ -671,7 +668,7 @@ async fn handle_radio_connection(
                             if let Err(e) = handle_client_message(
                                 radio_msg,
                                 &state_clone,
-                                &validated_session_id,
+                                &validated_session_id_clone,
                                 &out_tx,
                                 &tuned_tx,
                                 &heartbeat_limiter,
@@ -717,7 +714,16 @@ async fn handle_radio_connection(
         }
     }
 
-    // TODO: Decrement connection counter here: state.total_connections.fetch_sub(1, Ordering::Relaxed)
+    if state.active_connections.load(Relaxed) > 0 {
+        state.active_connections.fetch_sub(1, Relaxed);
+        broadcast_analytics(&state);
+    }
+
+    tracing::info!(
+        "Client disconnected: {} (total: {})",
+        &validated_session_id,
+        state.active_connections.load(Relaxed)
+    );
 }
 
 /// Serializes a `RadioMessage` and sends it to the client over the WebSocket.
@@ -741,6 +747,7 @@ async fn should_forward_message(msg: &RadioMessage) -> bool {
             | RadioMessage::BroadcasterOffline { .. }
             | RadioMessage::Sync { .. }
             | RadioMessage::Heartbeat { .. }
+            | RadioMessage::Analytics { .. }
     )
 }
 
@@ -785,14 +792,17 @@ async fn handle_client_message(
                     server_timestamp_ms: now_ms(),
                 };
 
-                tuned_tx
-                    .send(Some(broadcaster_id.clone()))
-                    .map_err(|_| PlayerError::WebSocketError("Failed to send tune change".into()))?;
+                tuned_tx.send(Some(broadcaster_id.clone())).map_err(|_| {
+                    PlayerError::WebSocketError("Failed to send tune change".into())
+                })?;
 
                 out_tx
                     .send(sync_msg)
                     .await
                     .map_err(|_| PlayerError::WebSocketError("Failed to send sync".into()))?;
+
+                state.active_listeners.fetch_add(1, Relaxed);
+                broadcast_analytics(state);
             } else {
                 // No broadcaster found with this ID
                 return Err(PlayerError::BroadcasterNotFound(broadcaster_id));
@@ -805,6 +815,11 @@ async fn handle_client_message(
             tuned_tx
                 .send(None)
                 .map_err(|_| PlayerError::WebSocketError("Failed to tune out".into()))?;
+
+            if state.active_listeners.load(Relaxed) > 0 {
+                state.active_listeners.fetch_sub(1, Relaxed);
+                broadcast_analytics(state);
+            }
         }
 
         RadioMessage::BroadcastUpdate {
@@ -836,16 +851,22 @@ async fn handle_client_message(
 
             let server_ts = now_ms();
 
+            let song_name = state
+                .playlist
+                .get(song_index)
+                .map(|song| song.filename.clone())
+                .unwrap_or_else(|| format!("Unknown song #{}", song_index));
+
             // Update the server-side broadcast state
             let new_state = BroadcastState {
                 broadcaster_id: broadcaster_id.clone(),
                 song_index,
-                song_name: state.playlist[song_index].filename.clone(),
+                song_name,
                 playback_time,
                 is_playing,
                 server_timestamp_ms: server_ts,
             };
-            
+
             state
                 .broadcast_states
                 .write()
@@ -871,6 +892,8 @@ async fn handle_client_message(
                     }
                 }
             }
+
+            broadcast_analytics(state);
         }
 
         RadioMessage::Heartbeat {
@@ -921,6 +944,11 @@ async fn handle_client_message(
 
             // Clean up the broadcaster's channel
             state.broadcast_channels.write().remove(&broadcaster_id);
+
+            if state.active_broadcasters.load(Relaxed) > 0 {
+                state.active_broadcasters.fetch_sub(1, Relaxed);
+                broadcast_analytics(state);
+            }
         }
 
         RadioMessage::StartBroadcasting {
@@ -947,11 +975,17 @@ async fn handle_client_message(
 
             let server_ts = now_ms();
 
+            let song_name = state
+                .playlist
+                .get(song_index)
+                .map(|song| song.filename.clone())
+                .unwrap_or_else(|| format!("Unknown song #{}", song_index));
+
             // Update the server-side broadcast state
             let new_state = BroadcastState {
                 broadcaster_id: broadcaster_id.clone(),
                 song_index,
-                song_name: state.playlist[song_index].filename.clone(),
+                song_name,
                 playback_time,
                 is_playing,
                 server_timestamp_ms: server_ts,
@@ -981,6 +1015,9 @@ async fn handle_client_message(
                 .global_broadcast_tx
                 .send(broadcasting_msg)
                 .map_err(|_| PlayerError::BroadcastSendError)?;
+
+            state.active_broadcasters.fetch_add(1, Relaxed);
+            broadcast_analytics(state);
         }
 
         _ => {
@@ -1013,6 +1050,32 @@ fn ensure_same_session(expected: &str, actual: &str) -> Result<(), PlayerError> 
 fn create_error_message(error: &PlayerError) -> RadioMessage {
     RadioMessage::Error {
         message: error.to_string(),
+    }
+}
+
+/// Broadcasts current analytics to all connected clients via the global channel.
+/// Call this whenever any counter changes to keep all clients synchronized.
+fn broadcast_analytics(state: &SharedState) {
+    // Collect all broadcaster states
+    let broadcasters: Vec<BroadcastState> = {
+        let broadcasts = state.broadcast_states.read();
+        broadcasts.values().cloned().collect()
+    };
+
+    let analytics_msg = RadioMessage::Analytics {
+        active_connections: state.active_connections.load(Relaxed),
+        active_broadcasters: state.active_broadcasters.load(Relaxed),
+        active_listeners: state.active_listeners.load(Relaxed),
+        broadcasters,
+    };
+
+    match state.global_broadcast_tx.send(analytics_msg) {
+        Ok(count) => {
+            tracing::trace!("Analytics update sent to {} clients", count);
+        }
+        Err(_) => {
+            tracing::trace!("Analytics update sent but no clients connected");
+        }
     }
 }
 
