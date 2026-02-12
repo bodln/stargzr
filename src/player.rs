@@ -56,11 +56,9 @@ pub struct AppState {
     playlist: Arc<Vec<SongInfo>>,
     music_folder: Arc<PathBuf>,
 
-    /// Private mode sessions
     sessions: RwLock<HashMap<String, PlayerSession>>,
 
-    /// Radio mode state
-    /// Maps broadcaster_id -> their current state
+    /// Maps broadcaster_id(session id) -> their current state
     broadcast_states: RwLock<HashMap<String, BroadcastState>>,
 
     /// Global broadcast channel for system-wide announcements.
@@ -70,8 +68,8 @@ pub struct AppState {
 
     /// Per-broadcaster channels for targeted playback sync.
     /// Each broadcaster has their own channel that only their listeners subscribe to.
-    /// Used for Sync and Heartbeat messages specific to that broadcaster.
     broadcast_channels: RwLock<HashMap<String, broadcast::Sender<RadioMessage>>>,
+
     // TODO: Add broadcaster_last_seen: RwLock<HashMap<String, std::time::Instant>>
     // This tracks when each broadcaster last sent a heartbeat/update
     // Used for cleanup of stale broadcasters (prevents memory leak)
@@ -90,7 +88,7 @@ type SharedState = Arc<AppState>;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 enum RadioMessage {
-    /// Leader returns this when play/pause/seek/next/prev happens
+    /// Broadcaster distributes this when play/pause/seek/next/prev happens
     Sync {
         broadcaster_id: String,
         song_index: usize,
@@ -99,7 +97,7 @@ enum RadioMessage {
         server_timestamp_ms: u128,
     },
 
-    /// Leader sends this every 2-3 seconds
+    /// Broadcaster sends this every 2-3 seconds
     Heartbeat {
         broadcaster_id: String,
         playback_time: f64,
@@ -113,7 +111,7 @@ enum RadioMessage {
     /// Listener tune out
     TuneOut,
 
-    /// Leader sends this on play/pause/seek/next/prev, and server sends Sync to all
+    /// Broadcaster sends this on play/pause/seek/next/prev, and server sends Sync to all tuned in
     BroadcastUpdate {
         broadcaster_id: String,
         song_index: usize,
@@ -277,15 +275,6 @@ fn update_broadcast_index(state: &AppState, session_id: &str, new_index: usize) 
         broadcast.song_index = new_index;
         broadcast.playback_time = 0.0;
         broadcast.server_timestamp_ms = server_ts;
-
-        // Push sync to all listeners
-        // let _ = state.broadcast_tx.send(RadioMessage::Sync {
-        //     broadcaster_id: session_id.to_string(),
-        //     song_index: new_index,
-        //     playback_time: 0.0,
-        //     is_playing: broadcast.is_playing,
-        //     server_timestamp_ms: server_ts,
-        // });
     }
 }
 
@@ -298,15 +287,6 @@ fn now_ms() -> u128 {
 }
 
 /// Renders the main player page for the current user session.
-///
-/// This handler:
-/// - Extracts (or generates) a session ID from cookies
-/// - Retrieves or initializes the session's current playlist position
-/// - Resolves the currently selected song
-/// - Returns an HTML page rendered via `PlayerTemplate`
-///
-/// The session ID is embedded in the response cookie so subsequent
-/// requests (next/prev/stream) remain tied to the same private state.
 async fn player_page(State(state): State<SharedState>, headers: HeaderMap) -> PlayerTemplate {
     // Identify the user session (cookie-based, falls back to UUID)
     let session_id = get_session_id(&headers);
@@ -331,15 +311,6 @@ async fn player_page(State(state): State<SharedState>, headers: HeaderMap) -> Pl
 }
 
 /// Advances the current session to the next song in the playlist.
-///
-/// This handler:
-/// - Resolves the user's session via cookies
-/// - Computes the next playlist index (clamped to the playlist bounds)
-/// - Updates the private session state
-/// - If the session is broadcasting, updates the authoritative broadcast state
-/// - Returns a partial HTML fragment (`PlayerControlsTemplate`) for UI refresh
-///
-/// This endpoint is typically triggered by the "Next" button in the player UI.
 async fn next_song(State(state): State<SharedState>, headers: HeaderMap) -> PlayerControlsTemplate {
     // Identify the user session
     let session_id = get_session_id(&headers);
@@ -372,13 +343,6 @@ async fn next_song(State(state): State<SharedState>, headers: HeaderMap) -> Play
 }
 
 /// Moves the current session to the previous song in the playlist.
-///
-/// This handler mirrors `next_song` but moves backward instead:
-/// - The index is decremented using saturating arithmetic
-/// - Private and broadcast states are updated identically
-/// - A refreshed `PlayerControlsTemplate` is returned
-///
-/// This endpoint is typically triggered by the "Previous" button in the player UI.
 async fn prev_song(State(state): State<SharedState>, headers: HeaderMap) -> PlayerControlsTemplate {
     // Identify the user session
     let session_id = get_session_id(&headers);
@@ -414,10 +378,6 @@ async fn prev_song(State(state): State<SharedState>, headers: HeaderMap) -> Play
 ///
 /// This is primarily used by the radio client when it needs to
 /// re-render the control panel while tuned into a broadcaster.
-///
-/// - `broadcaster`:
-///   - `Some(session_id)` → radio mode (follow another user's playback)
-///   - `None` → private mode (local session playback)
 #[derive(Deserialize)]
 struct ControlsQuery {
     broadcaster: Option<String>,
@@ -427,16 +387,6 @@ struct ControlsQuery {
 ///
 /// This handler is designed to be HTMX-friendly:
 /// it returns only the inner player controls markup, not a full page.
-///
-/// Behavior depends on mode:
-/// - **Radio mode**: If a `broadcaster` query param is present and valid,
-///   the UI reflects the broadcaster's current song and index.
-/// - **Private mode**: Falls back to the caller's own session state.
-///
-/// This endpoint is triggered when:
-/// - A listener syncs to a broadcaster
-/// - The broadcaster changes tracks
-/// - The client reconnects and needs to rehydrate UI state
 async fn player_controls(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -482,20 +432,6 @@ async fn player_controls(
 }
 
 /// Streams an audio file to the client, with full support for HTTP byte-range requests.
-///
-/// This endpoint is used by the HTML5 `<audio>` element and must support
-/// `Range` requests to allow seeking, buffering, and partial playback.
-///
-/// Behavior:
-/// - If a valid `Range` header is present, responds with `206 Partial Content`
-///   and streams only the requested byte slice.
-/// - If no range is provided, streams the entire file with `200 OK`.
-///
-/// Notes:
-/// - The `index` path parameter selects a song from the in-memory playlist.
-/// - `Accept-Ranges: bytes` is always advertised so browsers know seeking is supported.
-/// - Long-lived cache headers are safe because audio files are immutable.
-///
 /// This handler is intentionally stateless: it does not modify playback state
 /// or session position, it only serves file data.
 async fn stream_audio(
@@ -582,14 +518,8 @@ async fn stream_audio(
 // Upgrade with WebRTC? to have p2p
 
 /// WebSocket entrypoint for the radio synchronization system.
-///
-/// This handler upgrades the incoming HTTP request to a WebSocket and
-/// immediately delegates all connection logic to `handle_radio_connection`.
 /// No state is modified here; it exists purely as a thin Axum integration
 /// layer for the radio protocol.
-///
-/// It also remembers the session id, which we then use to validate
-/// if some malcontent changed it.
 async fn radio_websocket(
     ws: WebSocketUpgrade,
     State(state): State<SharedState>,
@@ -645,7 +575,8 @@ async fn handle_radio_connection(
     // For when you receive soemthing and want to return it to yourself and only yourself
     let (out_tx, mut out_rx) = mpsc::channel::<RadioMessage>(32);
 
-    let (tune_tx, mut tune_rx) = tokio::sync::watch::channel::<Option<String>>(None);
+    // Channel used to communicate tuned broadcaster changes
+    let (tuned_tx, mut tuned_rx) = tokio::sync::watch::channel::<Option<String>>(None);
 
     let mut global_broadcast_rx = state.global_broadcast_tx.subscribe();
 
@@ -656,7 +587,7 @@ async fn handle_radio_connection(
     let state_clone = state.clone();
 
     let mut send_task = tokio::spawn(async move {
-        let mut current_rx: Option<broadcast::Receiver<RadioMessage>> = None;
+        let mut current_tuned_broadcaster_rx: Option<broadcast::Receiver<RadioMessage>> = None;
 
         loop {
             // Polls all channels simultaneously
@@ -674,19 +605,19 @@ async fn handle_radio_connection(
                 }
 
                 // Change the channel we are listening on in the case of change
-                Ok(()) = tune_rx.changed() => {
-                    match tune_rx.borrow().clone() {
+                Ok(()) = tuned_rx.changed() => {
+                    match tuned_rx.borrow().clone() {
                         Some(broadcast_id) => {
                             let tx = {
                                 let channels = state_clone.broadcast_channels.read();
                                 channels.get(&broadcast_id).cloned()
                             };
 
-                            current_rx = tx.map(|t| t.subscribe());
+                            current_tuned_broadcaster_rx = tx.map(|t| t.subscribe());
                             tracing::debug!("Tuned in to {:?}", broadcast_id);
                         }
                         None => {
-                            current_rx = None;
+                            current_tuned_broadcaster_rx = None;
                             tracing::debug!("Tuned out");
                         }
                     }
@@ -700,13 +631,16 @@ async fn handle_radio_connection(
                     }
                 }
 
-                // Broadcast messages from other connections
+                // Broadcast messages from other connections to the appropriate channel 
                 Ok(msg) = async {
-                    match &mut current_rx {
+                    match &mut current_tuned_broadcaster_rx {
                         Some(rx) => rx.recv().await,
+                        // If current_tuned_broadcaster_rx is None, return a pending future 
+                        // so this branch never becomes ready and never wins select!
                         None => std::future::pending().await,
                     }
                 } => {
+                    // This fires when current_tuned_broadcaster_rx is some and receives something
                     if should_forward_message(&msg).await {
                         if let Err(e) = send_message(&mut sender, &msg).await {
                             tracing::error!("Failed to forward broadcast: {}", e);
@@ -739,7 +673,7 @@ async fn handle_radio_connection(
                                 &state_clone,
                                 &validated_session_id,
                                 &out_tx,
-                                &tune_tx,
+                                &tuned_tx,
                                 &heartbeat_limiter,
                                 &broadcast_limiter,
                             )
@@ -759,13 +693,6 @@ async fn handle_radio_connection(
                 Ok(Message::Close(_)) => {
                     tracing::info!("Client closed connection");
                     break;
-                }
-                Ok(Message::Ping(_)) => {
-                    // Respond to ping with pong (handled automatically by axum)
-                    tracing::trace!("Received ping (auto-handled by axum)");
-                }
-                Ok(Message::Pong(_)) => {
-                    tracing::trace!("Received pong");
                 }
                 Err(e) => {
                     tracing::error!("WebSocket error: {}", e);
@@ -794,14 +721,6 @@ async fn handle_radio_connection(
 }
 
 /// Serializes a `RadioMessage` and sends it to the client over the WebSocket.
-///
-/// This helper centralizes outbound WebSocket message handling:
-/// - Converts the strongly-typed `RadioMessage` into JSON
-/// - Sends it as a text frame on the socket
-/// - Normalizes serialization and send errors into `PlayerError`
-///
-/// Keeping this logic in one place ensures consistent error handling
-/// and message formatting across all send paths.
 async fn send_message(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     msg: &RadioMessage,
@@ -816,10 +735,6 @@ async fn send_message(
 /// Validates that the message is a broadcastable type.
 /// All messages that arrive here have already been filtered by subscription.
 async fn should_forward_message(msg: &RadioMessage) -> bool {
-    // We receive messages from two sources:
-    // 1. Global channel: Only BroadcasterOnline announcements
-    // 2. Specific broadcaster channel: Sync and Heartbeat for that broadcaster
-    // Both sources only send appropriate messages, so we just validate the type
     matches!(
         msg,
         RadioMessage::BroadcasterOnline { .. }
@@ -830,28 +745,14 @@ async fn should_forward_message(msg: &RadioMessage) -> bool {
 }
 
 /// Handles an incoming `RadioMessage` from a client WebSocket.
-///
-/// This function performs the following tasks based on message type:
-/// - `TuneIn`: Validates the broadcaster session ID, updates the client's tuned broadcaster,
-///   and sends the current broadcaster state as a `Sync` message.
-/// - `TuneOut`: Clears the client's tuned broadcaster.
-/// - `BroadcastUpdate`: Validates session ID, enforces rate limits, validates song index,
-///   updates the server's broadcast state, and forwards a `Sync` message to all clients.
-/// - `Heartbeat`: Validates session ID, enforces rate limits, updates broadcaster's playback time.
-/// - Other messages are logged as unexpected.
-///
-/// Rate limiting is enforced using `RateLimiter`:
-/// - `heartbeat_limiter`: Typically allows 1 heartbeat every 2 seconds.
-/// - `broadcast_limiter`: Allows bursty updates but limits sustained rate.
-///
-/// # Errors
-/// Returns a `PlayerError` if validation fails, rate limits are exceeded, or sending fails.
 async fn handle_client_message(
     msg: RadioMessage,
     state: &SharedState,
     validated_session_id: &str,
+    // communication between receive and send tasks
     out_tx: &mpsc::Sender<RadioMessage>,
-    tune_tx: &tokio::sync::watch::Sender<Option<String>>,
+    // communication on wether the client changed who they are listening to
+    tuned_tx: &tokio::sync::watch::Sender<Option<String>>,
     heartbeat_limiter: &Arc<RateLimiter>,
     broadcast_limiter: &Arc<RateLimiter>,
 ) -> PlayerResult<()> {
@@ -884,9 +785,9 @@ async fn handle_client_message(
                     server_timestamp_ms: now_ms(),
                 };
 
-                tune_tx
+                tuned_tx
                     .send(Some(broadcaster_id.clone()))
-                    .map_err(|_| PlayerError::WebSocketError("Failed to tune".into()))?;
+                    .map_err(|_| PlayerError::WebSocketError("Failed to send tune change".into()))?;
 
                 out_tx
                     .send(sync_msg)
@@ -901,7 +802,7 @@ async fn handle_client_message(
         RadioMessage::TuneOut => {
             // Client wants to stop listening to any broadcaster
             tracing::info!("Client tuned out");
-            tune_tx
+            tuned_tx
                 .send(None)
                 .map_err(|_| PlayerError::WebSocketError("Failed to tune out".into()))?;
         }
@@ -939,10 +840,12 @@ async fn handle_client_message(
             let new_state = BroadcastState {
                 broadcaster_id: broadcaster_id.clone(),
                 song_index,
+                song_name: state.playlist[song_index].filename.clone(),
                 playback_time,
                 is_playing,
                 server_timestamp_ms: server_ts,
             };
+            
             state
                 .broadcast_states
                 .write()
@@ -1006,6 +909,7 @@ async fn handle_client_message(
                 broadcaster_id: broadcaster_id.clone(),
             };
 
+            // A return value of Err does not mean that future calls to send will fail
             match state.global_broadcast_tx.send(offline_msg) {
                 Ok(count) => {
                     tracing::debug!("BroadcasterOffline sent to {} clients", count);
@@ -1017,10 +921,6 @@ async fn handle_client_message(
 
             // Clean up the broadcaster's channel
             state.broadcast_channels.write().remove(&broadcaster_id);
-
-            // if let Some(tx) = state.broadcast_channels.read().get(&broadcaster_id) {
-            //     let _ = tx.send(offline_msg);
-            // }
         }
 
         RadioMessage::StartBroadcasting {
@@ -1051,6 +951,7 @@ async fn handle_client_message(
             let new_state = BroadcastState {
                 broadcaster_id: broadcaster_id.clone(),
                 song_index,
+                song_name: state.playlist[song_index].filename.clone(),
                 playback_time,
                 is_playing,
                 server_timestamp_ms: server_ts,
@@ -1093,13 +994,8 @@ async fn handle_client_message(
 
 /// Verifies that the provided identifier matches the session identifier
 /// recorded when the WebSocket connection was first established.
-///
 /// This is used to ensure that a client cannot act or broadcast as another
 /// session by supplying a different ID after the connection is open.
-///
-/// # Errors
-/// Returns `PlayerError::BroadcastUnauthorized` if the provided ID does not
-/// match the validated session ID associated with the connection.
 fn ensure_same_session(expected: &str, actual: &str) -> Result<(), PlayerError> {
     (expected == actual).then_some(()).ok_or_else(|| {
         tracing::warn!(
@@ -1121,17 +1017,6 @@ fn create_error_message(error: &PlayerError) -> RadioMessage {
 }
 
 /// Periodically cleans up stale player sessions and broadcaster channels.
-///
-/// This function runs in a background task and performs two types of cleanup:
-///
-/// 1. **Player Sessions**: Removes sessions that haven't been active for over 1 hour.
-///    These are tracked by `last_activity` timestamp and represent private playback state.
-///
-/// 2. **Broadcaster Sessions**: Removes broadcasters that haven't sent updates for over 30 seconds.
-///    These are tracked by `server_timestamp_ms` and represent active radio broadcasts.
-///    When a broadcaster is cleaned up, we also notify any listeners that were tuned in.
-///
-/// The function runs every 60 seconds to balance responsiveness with CPU overhead.
 async fn cleanup_stale_sessions(state: Arc<AppState>) {
     // Create an interval timer that fires every 60 seconds
     let mut interval = tokio::time::interval(Duration::from_secs(60));
@@ -1280,6 +1165,9 @@ async fn init_player_state(music_folder: PathBuf) -> SharedState {
         broadcast_states: RwLock::new(HashMap::new()), // tracks broadcaster states
         broadcast_channels: RwLock::new(HashMap::new()), // tracks broadcaster channels
         global_broadcast_tx,                   // used to send Sync messages to listeners
+        active_connections: AtomicUsize::new(0),
+        active_broadcasters: AtomicUsize::new(0),
+        active_listeners: AtomicUsize::new(0),
     })
 }
 
