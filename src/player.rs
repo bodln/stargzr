@@ -714,6 +714,8 @@ async fn handle_radio_connection(
         }
     }
 
+    delete_broadcasting_session(&state, &validated_session_id);
+
     if state.active_connections.load(Relaxed) > 0 {
         state.active_connections.fetch_sub(1, Relaxed);
         broadcast_analytics(&state);
@@ -928,6 +930,10 @@ async fn handle_client_message(
             broadcasts.remove(&broadcaster_id);
             drop(broadcasts);
 
+            let mut broadcast_channel = state.broadcast_channels.write();
+            broadcast_channel.remove(&broadcaster_id);
+            drop(broadcast_channel);
+
             let offline_msg = RadioMessage::BroadcasterOffline {
                 broadcaster_id: broadcaster_id.clone(),
             };
@@ -942,13 +948,11 @@ async fn handle_client_message(
                 }
             }
 
-            // Clean up the broadcaster's channel
-            state.broadcast_channels.write().remove(&broadcaster_id);
-
             if state.active_broadcasters.load(Relaxed) > 0 {
                 state.active_broadcasters.fetch_sub(1, Relaxed);
-                broadcast_analytics(state);
             }
+
+            broadcast_analytics(state);
         }
 
         RadioMessage::StartBroadcasting {
@@ -964,6 +968,25 @@ async fn handle_client_message(
 
             // Ensure the requested song index exists in the playlist
             validate_song_index(song_index, state.playlist.len())?;
+
+            let was_already_broadcasting = {
+                let broadcasts = state.broadcast_states.read();
+
+                broadcasts.contains_key(&broadcaster_id)
+            };
+
+            if was_already_broadcasting {
+                tracing::debug!(
+                    "Broadcaster {} already registered - updating state only (NOT incrementing counter)",
+                    broadcaster_id
+                );
+            } else {
+                tracing::debug!(
+                    "New broadcaster {} starting (incrementing counter)",
+                    broadcaster_id
+                );
+                state.active_broadcasters.fetch_add(1, Relaxed);
+            }
 
             tracing::debug!(
                 "Starting broadcast from {}: song={}, time={:.2}, playing={}",
@@ -1007,16 +1030,19 @@ async fn handle_client_message(
             }
 
             // Send announcement through global channel, not the broadcaster's channel
-            let broadcasting_msg = RadioMessage::BroadcasterOnline {
-                broadcaster_id: broadcaster_id.clone(),
-            };
+            if !was_already_broadcasting {
+                let broadcasting_msg = RadioMessage::BroadcasterOnline {
+                    broadcaster_id: broadcaster_id.clone(),
+                };
 
-            state
-                .global_broadcast_tx
-                .send(broadcasting_msg)
-                .map_err(|_| PlayerError::BroadcastSendError)?;
+                state
+                    .global_broadcast_tx
+                    .send(broadcasting_msg)
+                    .map_err(|_| PlayerError::BroadcastSendError)?;
 
-            state.active_broadcasters.fetch_add(1, Relaxed);
+                tracing::info!("Broadcaster {} came online", broadcaster_id);
+            }
+
             broadcast_analytics(state);
         }
 
@@ -1045,6 +1071,62 @@ fn ensure_same_session(expected: &str, actual: &str) -> Result<(), PlayerError> 
     })
 }
 
+fn delete_broadcasting_session(state: &SharedState, broadcaster_id: &str) {
+    let broadcaster_id_to_cleanup = {
+        let broadcasts = state.broadcast_states.read();
+        if broadcasts.contains_key(broadcaster_id) {
+            Some(broadcaster_id)
+        } else {
+            None
+        }
+    };
+
+    if let Some(broadcaster_id) = broadcaster_id_to_cleanup {
+        tracing::info!(
+            "Auto-cleanup: Disconnected broadcaster {} - removing state",
+            broadcaster_id
+        );
+
+        {
+            let mut broadcasts = state.broadcast_states.write();
+            broadcasts.remove(broadcaster_id);
+        }
+
+        if state.active_broadcasters.load(Relaxed) > 0 {
+            state.active_broadcasters.fetch_sub(1, Relaxed);
+            tracing::debug!("Decremented active_broadcasters for {}", broadcaster_id);
+        }
+
+        let broadcaster_msg_id = broadcaster_id;
+
+        let offline_msg = RadioMessage::BroadcasterOffline {
+            broadcaster_id: broadcaster_msg_id.to_string(),
+        };
+
+        match state.global_broadcast_tx.send(offline_msg) {
+            Ok(listener_count) => {
+                tracing::info!(
+                    "Notified {} listener(s) that {} went offline",
+                    listener_count,
+                    broadcaster_id
+                );
+            }
+            Err(_) => {
+                tracing::debug!("No listeners to notify for {}", broadcaster_id);
+            }
+        }
+
+        {
+            let mut channels = state.broadcast_channels.write();
+            if channels.remove(broadcaster_id).is_some() {
+                tracing::debug!("Removed broadcast channel for {}", broadcaster_id);
+            }
+        }
+
+        broadcast_analytics(&state);
+    }
+}
+
 /// Creates a RadioMessage::Error from a PlayerError
 /// This is used to send error messages back to the client over WebSocket.
 fn create_error_message(error: &PlayerError) -> RadioMessage {
@@ -1052,6 +1134,8 @@ fn create_error_message(error: &PlayerError) -> RadioMessage {
         message: error.to_string(),
     }
 }
+
+// TODO this current analytics of sending broadcast state is too expensive
 
 /// Broadcasts current analytics to all connected clients via the global channel.
 /// Call this whenever any counter changes to keep all clients synchronized.
@@ -1064,7 +1148,7 @@ fn broadcast_analytics(state: &SharedState) {
 
     let analytics_msg = RadioMessage::Analytics {
         active_connections: state.active_connections.load(Relaxed),
-        active_broadcasters: state.active_broadcasters.load(Relaxed),
+        active_broadcasters: state.broadcast_channels.read().len(),
         active_listeners: state.active_listeners.load(Relaxed),
         broadcasters,
     };
@@ -1156,6 +1240,9 @@ async fn cleanup_stale_sessions(state: Arc<AppState>) {
                 }
             }
 
+            // Decrement the broadcaster count for analytics
+            state.active_broadcasters.fetch_sub(1, Relaxed);
+
             // Send offline notification to any remaining listeners
             // It's okay if there are no listeners - we handle that gracefully
             if let Some(tx) = state.broadcast_channels.read().get(&broadcaster_id) {
@@ -1188,6 +1275,8 @@ async fn cleanup_stale_sessions(state: Arc<AppState>) {
                 }
             }
         }
+
+        broadcast_analytics(&state);
     }
 }
 
