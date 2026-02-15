@@ -150,6 +150,18 @@ enum RadioMessage {
         active_listeners: usize,
         broadcasters: Vec<BroadcastState>,
     },
+
+    /// Client queries if they're currently broadcasting
+    QueryBroadcastState {
+        session_id: String,
+    },
+
+    /// Server responds with broadcast state
+    BroadcastStateResponse {
+        session_id: String,
+        is_broadcasting: bool,
+        current_state: Option<BroadcastState>,
+    },
 }
 
 #[derive(Template)]
@@ -750,6 +762,7 @@ async fn should_forward_message(msg: &RadioMessage) -> bool {
             | RadioMessage::Sync { .. }
             | RadioMessage::Heartbeat { .. }
             | RadioMessage::Analytics { .. }
+            | RadioMessage::BroadcastStateResponse { .. }
     )
 }
 
@@ -1046,6 +1059,35 @@ async fn handle_client_message(
             broadcast_analytics(state);
         }
 
+        RadioMessage::QueryBroadcastState { session_id } => {
+            ensure_same_session(&session_id, validated_session_id)?;
+            
+            // Check if this session is currently broadcasting
+            let (is_broadcasting, current_state) = {
+                let broadcasts = state.broadcast_states.read();
+                let is_broadcasting = broadcasts.contains_key(&session_id);
+                let current_state = broadcasts.get(&session_id).cloned();
+                (is_broadcasting, current_state)
+            };
+            
+            tracing::debug!(
+                "Query broadcast state for {}: {}",
+                session_id,
+                is_broadcasting
+            );
+            
+            let response = RadioMessage::BroadcastStateResponse {
+                session_id: session_id.clone(),
+                is_broadcasting,
+                current_state,
+            };
+            
+            out_tx
+                .send(response)
+                .await
+                .map_err(|_| PlayerError::WebSocketError("Failed to send state response".into()))?;
+        }
+
         _ => {
             // Any unexpected messages are logged but ignored
             tracing::warn!("Received unexpected message type");
@@ -1165,7 +1207,6 @@ fn broadcast_analytics(state: &SharedState) {
 
 /// Periodically cleans up stale player sessions and broadcaster channels.
 async fn cleanup_stale_sessions(state: Arc<AppState>) {
-    // Create an interval timer that fires every 60 seconds
     let mut interval = tokio::time::interval(Duration::from_secs(60));
 
     loop {
@@ -1232,7 +1273,6 @@ async fn cleanup_stale_sessions(state: Arc<AppState>) {
 
         // Now remove the stale broadcasters and notify listeners
         for broadcaster_id in stale_broadcasters {
-            // Remove from broadcast states
             {
                 let mut broadcasts = state.broadcast_states.write();
                 if broadcasts.remove(&broadcaster_id).is_some() {
