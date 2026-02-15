@@ -230,7 +230,7 @@
         box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
       }
 
-      .broadcaster-info {
+      .broadcaster-info-card {
         flex: 1;
       }
 
@@ -289,6 +289,30 @@
         background: #fff3cd;
         border-color: #ffeaa7;
       }
+
+      .mobile-warning {
+        background: #fff3cd;
+        border: 1px solid #ffc107;
+        padding: 10px;
+        border-radius: 4px;
+        margin-bottom: 10px;
+        font-size: 14px;
+      }
+
+      .connection-status {
+        background: #fff;
+        padding: 8px 12px;
+        border-radius: 4px;
+        margin-top: 10px;
+        font-size: 13px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      #connection-text {
+        font-weight: 500;
+      }
     </style>
   </head>
   <body>
@@ -320,6 +344,12 @@
       </div>
     </div>
 
+    <!-- Mobile Warning -->
+    <div id="mobile-warning" class="mobile-warning hidden">
+      ⚠️ Broadcasting on mobile may stop when the screen locks or you switch apps. 
+      Keep this tab active for best results.
+    </div>
+
     <!-- Mode Indicator and Radio Controls -->
     <div class="mode-container">
       <div class="mode-indicator">
@@ -327,6 +357,11 @@
         <span id="broadcast-status" class="mode-badge broadcasting hidden"
           >Broadcasting</span
         >
+      </div>
+
+      <div class="connection-status">
+        <span id="connection-indicator">🟡</span>
+        <span id="connection-text">Connecting...</span>
       </div>
 
       <div class="session-id-display">
@@ -418,7 +453,7 @@
       function copySessionId() {
         const sessionId = document.getElementById("my-session-id").textContent;
         navigator.clipboard.writeText(sessionId);
-        //alert("Session ID copied!");
+        debugLog("Session ID copied to clipboard");
       }
 
       // Radio Player Class
@@ -432,6 +467,8 @@
           this.heartbeatInterval = null;
           this.targetTime = 0;
           this.isBroadcasting = false;
+          this.isStartingBroadcast = false;
+          this.wakeLock = null;
 
           // Reconnection state
           this.reconnectAttempts = 0;
@@ -442,16 +479,130 @@
           this.isIntentionalDisconnect = false;
 
           // Event listener tracking for cleanup
-          this.boundHandlers = new Map(); // WebSocket handlers
-          this.audioEventHandlers = new Map(); // Audio event handlers
+          this.boundHandlers = new Map();
+          this.audioEventHandlers = new Map();
 
           // Connection state for UI
-          this.connectionState = "disconnected"; // 'disconnected', 'connecting', 'connected', 'error'
+          this.connectionState = "disconnected";
 
           debugLog(`Initialized with session ID: ${sessionId}`);
+          
+          // Setup page visibility handling
+          this.setupPageVisibilityHandling();
         }
 
-        // Calculate exponential backoff with jitter
+        isMobile() {
+          return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+            navigator.userAgent
+          );
+        }
+
+        setupPageVisibilityHandling() {
+          let visibilityProp = 'hidden';
+          let visibilityEvent = 'visibilitychange';
+          
+          if (typeof document.hidden !== 'undefined') {
+            visibilityProp = 'hidden';
+            visibilityEvent = 'visibilitychange';
+          } else if (typeof document.webkitHidden !== 'undefined') {
+            visibilityProp = 'webkitHidden';
+            visibilityEvent = 'webkitvisibilitychange';
+          }
+          
+          document.addEventListener(visibilityEvent, () => {
+            if (document[visibilityProp]) {
+              debugLog("📱 Page hidden - broadcasting may be affected on mobile");
+              this.onPageHidden();
+            } else {
+              debugLog("👁️ Page visible again");
+              this.onPageVisible();
+            }
+          });
+        }
+
+        onPageHidden() {
+          if (this.isBroadcasting) {
+            if (this.isMobile()) {
+              debugLog("⚠️ Mobile device may kill broadcasting in background");
+            }
+            
+            // Speed up heartbeats right before going background
+            if (this.heartbeatInterval) {
+              clearInterval(this.heartbeatInterval);
+              this.heartbeatInterval = setInterval(() => this.sendHeartbeat(), 1000);
+              debugLog("Increased heartbeat frequency before backgrounding");
+            }
+            
+            this.releaseWakeLock();
+          }
+        }
+
+        onPageVisible() {
+          // Return to normal heartbeat rate
+          if (this.isBroadcasting && this.heartbeatInterval) {
+            clearInterval(this.heartbeatInterval);
+            this.heartbeatInterval = setInterval(() => this.sendHeartbeat(), 2000);
+            debugLog("Restored normal heartbeat frequency");
+          }
+          
+          // Verify state with server
+          if (this.isBroadcasting) {
+            this.verifyBroadcastState();
+          }
+          
+          // Reconnect if needed
+          if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            this.connectWebSocket();
+          }
+          
+          // Re-acquire wake lock
+          if (this.isBroadcasting) {
+            this.requestWakeLock();
+          }
+        }
+
+        async requestWakeLock() {
+          if (!('wakeLock' in navigator)) {
+            debugLog("Wake Lock API not supported");
+            return;
+          }
+          
+          try {
+            this.wakeLock = await navigator.wakeLock.request('screen');
+            debugLog("✓ Wake lock acquired - screen will stay on");
+            
+            this.wakeLock.addEventListener('release', () => {
+              debugLog("Wake lock released");
+            });
+          } catch (err) {
+            debugLog(`Wake lock error: ${err.message}`);
+          }
+        }
+
+        async releaseWakeLock() {
+          if (this.wakeLock) {
+            try {
+              await this.wakeLock.release();
+              this.wakeLock = null;
+              debugLog("Wake lock released");
+            } catch (err) {
+              debugLog(`Wake lock release error: ${err.message}`);
+            }
+          }
+        }
+
+        async verifyBroadcastState() {
+          if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+          
+          const msg = {
+            type: "QueryBroadcastState",
+            session_id: this.sessionId
+          };
+          
+          debugLog("→ Querying broadcast state from server");
+          this.ws.send(JSON.stringify(msg));
+        }
+
         getReconnectDelay() {
           const exponential =
             this.baseReconnectDelay * Math.pow(2, this.reconnectAttempts);
@@ -469,6 +620,21 @@
         }
 
         notifyConnectionChange(state) {
+          const indicator = document.getElementById('connection-indicator');
+          const text = document.getElementById('connection-text');
+          
+          const states = {
+            connected: { icon: '🟢', text: 'Connected', color: '#28a745' },
+            connecting: { icon: '🟡', text: 'Connecting...', color: '#ffc107' },
+            disconnected: { icon: '⚪', text: 'Disconnected', color: '#6c757d' },
+            error: { icon: '🔴', text: 'Connection Error', color: '#dc3545' }
+          };
+          
+          const config = states[state] || states.disconnected;
+          indicator.textContent = config.icon;
+          text.textContent = config.text;
+          text.style.color = config.color;
+          
           const event = new CustomEvent("connectionStateChange", {
             detail: {
               state,
@@ -480,7 +646,6 @@
         }
 
         connectWebSocket() {
-          // Don't reconnect if already connected or connecting
           if (
             this.ws &&
             (this.ws.readyState === WebSocket.OPEN ||
@@ -492,7 +657,6 @@
             return;
           }
 
-          // Clear any pending reconnection timer
           if (this.reconnectTimer) {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;
@@ -516,19 +680,17 @@
             return;
           }
 
-          // Store bound handlers so we can remove them later
           const onOpen = () => {
             debugLog("✓ WebSocket connected");
-            this.reconnectAttempts = 0; // Reset on successful connection
+            this.reconnectAttempts = 0;
             this.updateConnectionState("connected");
 
-            // If we were broadcasting before disconnect, resume
+            // DON'T auto-resume broadcasting - verify first
             if (this.isBroadcasting) {
-              debugLog("Resuming broadcast after reconnection");
-              this.startBroadcasting();
+              debugLog("Client thinks it's broadcasting - verifying with server");
+              this.verifyBroadcastState();
             }
 
-            // If we were tuned in, re-tune
             if (this.tunedBroadcaster) {
               debugLog(
                 `Re-tuning to ${this.tunedBroadcaster} after reconnection`,
@@ -558,10 +720,8 @@
             );
             this.updateConnectionState("disconnected");
 
-            // Clean up existing handlers
             this.removeWebSocketHandlers();
 
-            // Only attempt reconnection if it wasn't intentional
             if (!this.isIntentionalDisconnect) {
               this.scheduleReconnect();
             } else {
@@ -570,13 +730,11 @@
             }
           };
 
-          // Store handlers for cleanup
           this.boundHandlers.set("open", onOpen);
           this.boundHandlers.set("message", onMessage);
           this.boundHandlers.set("error", onError);
           this.boundHandlers.set("close", onClose);
 
-          // Attach handlers
           this.ws.addEventListener("open", onOpen);
           this.ws.addEventListener("message", onMessage);
           this.ws.addEventListener("error", onError);
@@ -618,18 +776,15 @@
         disconnect() {
           this.isIntentionalDisconnect = true;
 
-          // Clear reconnection timer
           if (this.reconnectTimer) {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;
           }
 
-          // Stop broadcasting if active
           if (this.isBroadcasting) {
             this.stopBroadcasting();
           }
 
-          // Close WebSocket
           if (this.ws) {
             this.removeWebSocketHandlers();
             if (
@@ -647,21 +802,50 @@
 
         handleRadioMessage(msg) {
           if (msg.type === "Sync" && msg.broadcaster_id === this.sessionId) {
-            return; // ignore own sync
+            return;
           }
 
           debugLog(`Handling message type: ${msg.type}, mode: ${this.mode}`);
 
-          // Handle analytics updates
           if (msg.type === "Analytics") {
             updateAnalyticsDisplay(msg);
             return;
           }
 
-          // Handle error messages
+          if (msg.type === "BroadcastStateResponse") {
+            debugLog(`Server says broadcasting: ${msg.is_broadcasting}, client thinks: ${this.isBroadcasting}`);
+            
+            if (msg.is_broadcasting !== this.isBroadcasting) {
+              debugLog(`⚠️ State mismatch detected! Syncing to server state.`);
+              
+              if (msg.is_broadcasting && !this.isBroadcasting) {
+                this.isBroadcasting = true;
+                this.updateBroadcastingUI(true);
+                if (this.isMobile()) {
+                  document.getElementById('mobile-warning').classList.remove('hidden');
+                }
+              } else if (!msg.is_broadcasting && this.isBroadcasting) {
+                this.stopBroadcasting();
+                alert("Your broadcast session was ended by the server (possibly due to timeout or disconnection).");
+              }
+            }
+            return;
+          }
+
           if (msg.type === "Error") {
             debugLog(`Server error: ${msg.message}`);
-            alert(`Error: ${msg.message}`);
+            
+            if (msg.message.includes("BroadcasterNotFound") || 
+                msg.message.includes("not broadcasting")) {
+              
+              if (this.isBroadcasting) {
+                debugLog("Server rejected broadcast - stopping");
+                this.stopBroadcasting();
+                alert("Your broadcast session ended. Please start broadcasting again if needed.");
+              }
+            } else {
+              alert(`Error: ${msg.message}`);
+            }
             return;
           }
 
@@ -680,7 +864,6 @@
             if (this.tunedBroadcaster === msg.broadcaster_id) {
               debugLog(`User ${msg.broadcaster_id} is now broadcasting`);
             }
-
             return;
           }
 
@@ -703,7 +886,6 @@
           const now = Date.now();
           const elapsed = (now - server_timestamp_ms) / 1000;
 
-          // Account for time dilation between request and response
           this.targetTime = is_playing
             ? playback_time + elapsed
             : playback_time;
@@ -755,6 +937,16 @@
             return;
           }
 
+          if (
+            this.tunedBroadcaster &&
+            this.tunedBroadcaster !== broadcasterId
+          ) {
+            debugLog(
+              `Switching from ${this.tunedBroadcaster} to ${broadcasterId}`,
+            );
+            this.ws.send(JSON.stringify({ type: "TuneOut" }));
+          }
+
           this.mode = "radio";
           this.tunedBroadcaster = broadcasterId;
 
@@ -777,7 +969,6 @@
           this.mode = "private";
           this.tunedBroadcaster = null;
 
-          // UI reset
           modeDisplay.textContent = "Private Mode";
           modeDisplay.className = "mode-badge private";
           broadcasterInfo.classList.add("hidden");
@@ -789,113 +980,115 @@
           nextBtn.disabled = false;
         }
 
+        removeAudioBroadcastListeners() {
+          this.audioEventHandlers.forEach((handler, event) => {
+            this.audio.removeEventListener(event, handler);
+          });
+          this.audioEventHandlers.clear();
+        }
+
+        sendHeartbeat() {
+          if (!this.isBroadcasting) return;
+          if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+          
+          const msg = {
+            type: "Heartbeat",
+            broadcaster_id: this.sessionId,
+            playback_time: this.audio.currentTime,
+          };
+          
+          debugLog(
+            `→ Heartbeat: song ${this.getCurrentSongIndex()}, time ${msg.playback_time.toFixed(2)}s`,
+          );
+          this.ws.send(JSON.stringify(msg));
+        }
+
         startBroadcasting() {
+          if (this.isStartingBroadcast) {
+            debugLog("Already starting broadcast, ignoring duplicate request");
+            return;
+          }
+          
+          this.isStartingBroadcast = true;
+          
           if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
             debugLog("WebSocket not ready for broadcasting, connecting...");
+            this.isStartingBroadcast = false;
             this.connectWebSocket();
             setTimeout(() => this.startBroadcasting(), 500);
             return;
           }
 
-          // Clean up any existing broadcast FIRST
-          this.stopBroadcasting();
+          if (this.isBroadcasting) {
+            debugLog("Already broadcasting, cleaning up first");
+            this.stopBroadcasting();
+          }
+
+          // Remove any existing listeners first
+          this.removeAudioBroadcastListeners();
 
           this.isBroadcasting = true;
           debugLog(`Broadcasting as: ${this.sessionId}`);
 
-          const initBroadcast = () => {
-            if (
-              this.isBroadcasting &&
-              this.ws &&
-              this.ws.readyState === WebSocket.OPEN
-            ) {
-              const msg = {
-                type: "StartBroadcasting",
-                broadcaster_id: this.sessionId,
-                song_index: this.getCurrentSongIndex(),
-                playback_time: this.audio.currentTime,
-                is_playing: !this.audio.paused,
-              };
-              debugLog(
-                `→ Broadcasting: song ${msg.song_index}, time ${msg.playback_time.toFixed(2)}s`,
-              );
-              this.ws.send(JSON.stringify(msg));
-            }
-          };
+          // Show mobile warning if applicable
+          if (this.isMobile()) {
+            document.getElementById('mobile-warning').classList.remove('hidden');
+          }
+
+          // Request wake lock to prevent screen from sleeping
+          this.requestWakeLock();
 
           const sendUpdate = () => {
-            if (
-              this.isBroadcasting &&
-              this.ws &&
-              this.ws.readyState === WebSocket.OPEN
-            ) {
-              const msg = {
-                type: "BroadcastUpdate",
-                broadcaster_id: this.sessionId,
-                song_index: this.getCurrentSongIndex(),
-                playback_time: this.audio.currentTime,
-                is_playing: !this.audio.paused,
-              };
-              debugLog(
-                `→ Broadcasting: song ${msg.song_index}, time ${msg.playback_time.toFixed(2)}s`,
-              );
-              this.ws.send(JSON.stringify(msg));
-            }
+            if (!this.isBroadcasting) return;
+            if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+            
+            const msg = {
+              type: "BroadcastUpdate",
+              broadcaster_id: this.sessionId,
+              song_index: this.getCurrentSongIndex(),
+              playback_time: this.audio.currentTime,
+              is_playing: !this.audio.paused,
+            };
+            debugLog(
+              `→ Broadcasting: song ${msg.song_index}, time ${msg.playback_time.toFixed(2)}s`,
+            );
+            this.ws.send(JSON.stringify(msg));
           };
 
-          const sendHeartbeat = () => {
-            if (
-              this.isBroadcasting &&
-              this.ws &&
-              this.ws.readyState === WebSocket.OPEN
-            ) {
-              const msg = {
-                type: "Heartbeat",
-                broadcaster_id: this.sessionId,
-                playback_time: this.audio.currentTime,
-              };
-              debugLog(
-                `→ Heartbeat: song ${this.getCurrentSongIndex()}, time ${msg.playback_time.toFixed(2)}s`,
-              );
-              this.ws.send(JSON.stringify(msg));
-            }
-          };
-
-          // Store audio event handlers in separate map
+          // Store handlers for cleanup
           this.audioEventHandlers.set("play", sendUpdate);
           this.audioEventHandlers.set("pause", sendUpdate);
           this.audioEventHandlers.set("seeked", sendUpdate);
 
-          // Attach ONLY these three events
           this.audio.addEventListener("play", sendUpdate);
           this.audio.addEventListener("pause", sendUpdate);
           this.audio.addEventListener("seeked", sendUpdate);
 
-          audio.addEventListener("ended", () => {
-            // Don't auto-skip if we're listening to a broadcaster
-            if (player.isInRadioMode()) {
-              debugLog(
-                "Track ended, but in radio mode — waiting for broadcaster",
-              );
-              return;
-            }
+          this.heartbeatInterval = setInterval(() => this.sendHeartbeat(), 2000);
 
-            debugLog("Track ended — moving to next track");
-
-            // Trigger the same logic as clicking "Next"
-            htmx.ajax("POST", "/player/next", {
-              target: "#player-controls",
-              swap: "innerHTML",
-            });
-          });
-
-          this.heartbeatInterval = setInterval(sendHeartbeat, 2000);
-
-          // Send initial state immediately
-          initBroadcast();
+          // Send initial state
+          const initMsg = {
+            type: "StartBroadcasting",
+            broadcaster_id: this.sessionId,
+            song_index: this.getCurrentSongIndex(),
+            playback_time: this.audio.currentTime,
+            is_playing: !this.audio.paused,
+          };
+          debugLog(
+            `→ Starting broadcast: song ${initMsg.song_index}, time ${initMsg.playback_time.toFixed(2)}s`,
+          );
+          this.ws.send(JSON.stringify(initMsg));
+          
+          this.updateBroadcastingUI(true);
+          this.isStartingBroadcast = false;
         }
 
         stopBroadcasting() {
+          if (!this.isBroadcasting) {
+            debugLog("Not broadcasting, nothing to stop");
+            return;
+          }
+          
           this.isBroadcasting = false;
 
           if (this.heartbeatInterval) {
@@ -903,11 +1096,13 @@
             this.heartbeatInterval = null;
           }
 
-          // Remove ONLY the audio listeners we attached
-          this.audioEventHandlers.forEach((handler, event) => {
-            this.audio.removeEventListener(event, handler);
-          });
-          this.audioEventHandlers.clear();
+          this.removeAudioBroadcastListeners();
+          
+          // Release wake lock
+          this.releaseWakeLock();
+          
+          // Hide mobile warning
+          document.getElementById('mobile-warning').classList.add('hidden');
 
           if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             this.ws.send(
@@ -918,7 +1113,24 @@
             );
           }
 
+          this.updateBroadcastingUI(false);
           debugLog("Broadcasting stopped");
+        }
+
+        updateBroadcastingUI(isBroadcasting) {
+          const broadcastStatus = document.getElementById("broadcast-status");
+          const broadcastBtn = document.getElementById("broadcast-btn");
+          const stopBroadcastBtn = document.getElementById("stop-broadcast-btn");
+          
+          if (isBroadcasting) {
+            broadcastStatus.classList.remove("hidden");
+            broadcastBtn.classList.add("hidden");
+            stopBroadcastBtn.classList.remove("hidden");
+          } else {
+            broadcastStatus.classList.add("hidden");
+            stopBroadcastBtn.classList.add("hidden");
+            broadcastBtn.classList.remove("hidden");
+          }
         }
 
         getCurrentSongIndex() {
@@ -933,7 +1145,6 @@
 
       // Update analytics display with live data
       function updateAnalyticsDisplay(analytics) {
-        // Update stats
         document.getElementById("stat-connections").textContent =
           analytics.active_connections;
         document.getElementById("stat-broadcasters").textContent =
@@ -941,7 +1152,6 @@
         document.getElementById("stat-listeners").textContent =
           analytics.active_listeners;
 
-        // Update broadcasters list
         const broadcastersList = document.getElementById("broadcasters-list");
 
         if (analytics.broadcasters.length === 0) {
@@ -950,7 +1160,6 @@
           return;
         }
 
-        // Build broadcaster cards
         broadcastersList.innerHTML = analytics.broadcasters
           .map((broadcaster) => {
             const playIcon = broadcaster.is_playing ? "▶️" : "⏸️";
@@ -958,14 +1167,10 @@
             const seconds = Math.floor(broadcaster.playback_time % 60);
             const timeStr = `${minutes}:${seconds.toString().padStart(2, "0")}`;
 
-            // Check if this is the current user
             const isSelf = broadcaster.broadcaster_id === player.sessionId;
-
-            // Check if we're currently tuned to this broadcaster
             const isTunedIn =
               player.tunedBroadcaster === broadcaster.broadcaster_id;
 
-            // Determine card styling
             let cardClass = "broadcaster-card";
             if (isSelf) {
               cardClass += " self-broadcasting";
@@ -973,7 +1178,6 @@
               cardClass += " currently-tuned";
             }
 
-            // Determine button state
             let buttonHTML;
             if (isSelf) {
               buttonHTML = '<button class="tune-in-btn" disabled>You</button>';
@@ -986,7 +1190,7 @@
 
             return `
         <div class="${cardClass}">
-          <div class="broadcaster-info">
+          <div class="broadcaster-info-card">
             <div class="broadcaster-id">${broadcaster.broadcaster_id}</div>
             <div class="broadcaster-song">
               <span class="play-status">${playIcon}</span>
@@ -1003,7 +1207,6 @@
           .join("");
       }
 
-      // Helper function to tune in from broadcaster list
       function tuneInToBroadcaster(broadcasterId) {
         document.getElementById("broadcaster-input").value = broadcasterId;
 
@@ -1030,7 +1233,6 @@
       const sessionId = "{{ session_id }}";
       const player = new RadioPlayer(audio, sessionId);
 
-      // Connect WebSocket
       player.connectWebSocket();
 
       // UI Elements
@@ -1046,7 +1248,6 @@
       const prevBtn = document.getElementById("prev-btn");
       const nextBtn = document.getElementById("next-btn");
 
-      // Tune In
       tuneInBtn.addEventListener("click", () => {
         const broadcasterId = broadcasterInput.value.trim();
         if (!broadcasterId) {
@@ -1069,30 +1270,18 @@
         nextBtn.disabled = true;
       });
 
-      // Tune Out
       tuneOutBtn.addEventListener("click", () => {
         player.tuneOut();
       });
 
-      // Start Broadcasting
       broadcastBtn.addEventListener("click", () => {
         player.startBroadcasting();
-
-        broadcastStatus.classList.remove("hidden");
-        broadcastBtn.classList.add("hidden");
-        stopBroadcastBtn.classList.remove("hidden");
       });
 
-      // Stop Broadcasting
       stopBroadcastBtn.addEventListener("click", () => {
         player.stopBroadcasting();
-
-        broadcastStatus.classList.add("hidden");
-        stopBroadcastBtn.classList.add("hidden");
-        broadcastBtn.classList.remove("hidden");
       });
 
-      // HTMX afterSwap handler (existing functionality)
       document.body.addEventListener("htmx:afterSwap", function (event) {
         if (player.isInRadioMode()) return;
 
@@ -1107,7 +1296,6 @@
         }
       });
 
-      // Prevent controls in radio mode
       document.body.addEventListener("htmx:beforeRequest", function (event) {
         if (
           player.isInRadioMode() &&
@@ -1119,44 +1307,40 @@
         }
       });
 
-      // Connection state indicator
-      document.addEventListener("connectionStateChange", (event) => {
-        const { state, attempt, maxAttempts } = event.detail;
-
-        let statusText = "";
-        let statusColor = "";
-
-        switch (state) {
-          case "connected":
-            statusText = "🟢 Connected";
-            statusColor = "#28a745";
-            break;
-          case "connecting":
-            statusText = `🟡 Connecting${attempt > 0 ? ` (${attempt}/${maxAttempts})` : ""}...`;
-            statusColor = "#ffc107";
-            break;
-          case "disconnected":
-            statusText = "⚪ Disconnected";
-            statusColor = "#6c757d";
-            break;
-          case "error":
-            statusText = "🔴 Connection Error";
-            statusColor = "#dc3545";
-            break;
+      audio.addEventListener("ended", () => {
+        if (player.isInRadioMode()) {
+          debugLog(
+            "Track ended, but in radio mode — waiting for broadcaster",
+          );
+          return;
         }
 
-        debugLog(`Connection state: ${statusText}`);
+        debugLog("Track ended — moving to next track");
 
-        // You can update UI here with connection status
-        // For example, add a status indicator element
+        htmx.ajax("POST", "/player/next", {
+          target: "#player-controls",
+          swap: "innerHTML",
+        });
       });
 
-      // Clean up on page unload
       window.addEventListener("beforeunload", () => {
         if (window.player) {
           window.player.disconnect();
         }
       });
+
+      window.addEventListener("pagehide", () => {
+        if (window.player) {
+          debugLog("Page hide detected - cleaning up");
+          if (window.player.isBroadcasting) {
+            window.player.stopBroadcasting();
+          }
+          window.player.disconnect();
+        }
+      });
+
+      // Make player globally accessible
+      window.player = player;
     </script>
   </body>
 </html>
