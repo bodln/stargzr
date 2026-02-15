@@ -469,6 +469,7 @@
           this.isBroadcasting = false;
           this.isStartingBroadcast = false;
           this.wakeLock = null;
+          this.pageHiddenAt = null;
 
           // Reconnection state
           this.reconnectAttempts = 0;
@@ -521,43 +522,45 @@
         }
 
         onPageHidden() {
+          this.pageHiddenAt = Date.now();
+          
           if (this.isBroadcasting) {
-            if (this.isMobile()) {
-              debugLog("⚠️ Mobile device may kill broadcasting in background");
-            }
-            
-            // Speed up heartbeats right before going background
-            if (this.heartbeatInterval) {
-              clearInterval(this.heartbeatInterval);
-              this.heartbeatInterval = setInterval(() => this.sendHeartbeat(), 1000);
-              debugLog("Increased heartbeat frequency before backgrounding");
-            }
-            
+            debugLog("📱 Page backgrounded - JavaScript will be throttled");
+            // DON'T speed up heartbeats - browser throttles anyway, it's pointless
             this.releaseWakeLock();
           }
         }
 
         onPageVisible() {
-          // Return to normal heartbeat rate
-          if (this.isBroadcasting && this.heartbeatInterval) {
-            clearInterval(this.heartbeatInterval);
-            this.heartbeatInterval = setInterval(() => this.sendHeartbeat(), 2000);
-            debugLog("Restored normal heartbeat frequency");
-          }
+          const hiddenDuration = this.pageHiddenAt ? (Date.now() - this.pageHiddenAt) / 1000 : 0;
+          this.pageHiddenAt = null;
           
-          // Verify state with server
-          if (this.isBroadcasting) {
-            this.verifyBroadcastState();
-          }
+          debugLog(`👁️ Page visible again (was hidden for ${hiddenDuration.toFixed(1)}s)`);
           
           // Reconnect if needed
           if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            debugLog("WebSocket disconnected, reconnecting...");
             this.connectWebSocket();
           }
           
-          // Re-acquire wake lock
           if (this.isBroadcasting) {
-            this.requestWakeLock();
+            // If we were hidden for less than 40 seconds, just resume broadcasting
+            // The server's timeout is 45s, so if we were hidden < 40s, we should still be valid
+            if (hiddenDuration < 40) {
+              debugLog("✓ Resuming broadcast (short background duration)");
+              
+              // Re-acquire wake lock
+              this.requestWakeLock();
+              
+              // Send an immediate heartbeat to tell server we're still here
+              if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                this.sendHeartbeat();
+              }
+            } else {
+              // We were backgrounded for a long time, server probably cleaned us up
+              debugLog("⚠️ Long background duration - verifying broadcast state");
+              this.verifyBroadcastState();
+            }
           }
         }
 
@@ -816,17 +819,41 @@
             debugLog(`Server says broadcasting: ${msg.is_broadcasting}, client thinks: ${this.isBroadcasting}`);
             
             if (msg.is_broadcasting !== this.isBroadcasting) {
-              debugLog(`⚠️ State mismatch detected! Syncing to server state.`);
+              debugLog(`⚠️ State mismatch detected!`);
               
               if (msg.is_broadcasting && !this.isBroadcasting) {
+                // Server thinks we're broadcasting but we're not - sync to server
                 this.isBroadcasting = true;
                 this.updateBroadcastingUI(true);
                 if (this.isMobile()) {
                   document.getElementById('mobile-warning').classList.remove('hidden');
                 }
               } else if (!msg.is_broadcasting && this.isBroadcasting) {
-                this.stopBroadcasting();
-                alert("Your broadcast session was ended by the server (possibly due to timeout or disconnection).");
+                // Server says we're not broadcasting, but we think we are
+                // This likely happened due to tab backgrounding - just resume broadcasting
+                debugLog("🔄 Server lost our session - resuming broadcast automatically");
+                
+                // Re-start broadcasting (will send StartBroadcasting message)
+                const wasPlaying = !this.audio.paused;
+                const currentTime = this.audio.currentTime;
+                const currentIndex = this.getCurrentSongIndex();
+                
+                // Send StartBroadcasting to re-register with server
+                const initMsg = {
+                  type: "StartBroadcasting",
+                  broadcaster_id: this.sessionId,
+                  song_index: currentIndex,
+                  playback_time: currentTime,
+                  is_playing: wasPlaying,
+                };
+                
+                debugLog(`→ Resuming broadcast: song ${initMsg.song_index}, time ${initMsg.playback_time.toFixed(2)}s`);
+                
+                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                  this.ws.send(JSON.stringify(initMsg));
+                }
+                
+                // Don't show error alert - just seamlessly resume
               }
             }
             return;
@@ -957,6 +984,8 @@
 
           debugLog(`→ Sending TuneIn: ${JSON.stringify(msg)}`);
           this.ws.send(JSON.stringify(msg));
+
+          audio.controls = false;
         }
 
         tuneOut(reason = "manual") {
@@ -978,6 +1007,7 @@
 
           prevBtn.disabled = false;
           nextBtn.disabled = false;
+          audio.controls = true;
         }
 
         removeAudioBroadcastListeners() {
