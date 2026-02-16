@@ -18,7 +18,7 @@ use futures_util::{SinkExt, StreamExt};
 use hyper::StatusCode;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
@@ -30,8 +30,9 @@ use tokio::sync::mpsc;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct SongInfo {
+    id: String,
     filename: String,
     size: u64,
 }
@@ -52,6 +53,7 @@ struct BroadcastState {
     playback_time: f64, // Current position in seconds
     is_playing: bool,
     server_timestamp_ms: u128, // When this state was recorded
+    listener_count: usize,
 }
 
 pub struct AppState {
@@ -71,6 +73,9 @@ pub struct AppState {
     /// Per-broadcaster channels for targeted playback sync.
     /// Each broadcaster has their own channel that only their listeners subscribe to.
     broadcast_channels: RwLock<HashMap<String, broadcast::Sender<RadioMessage>>>,
+
+    /// Per broadcaster listener count
+    broadcaster_listeners: RwLock<HashMap<String, HashSet<String>>>,
 
     // Real-time analytics counters
     active_connections: AtomicUsize,
@@ -447,16 +452,40 @@ async fn player_controls(
     }
 }
 
-/// Streams an audio file to the client, with full support for HTTP byte-range requests.
-/// This handler is intentionally stateless: it does not modify playback state
-/// or session position, it only serves file data.
-async fn stream_audio(
+/// Stream audio by song ID instead of index
+async fn stream_audio_by_id(
+    State(state): State<SharedState>,
+    Path(song_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    let song = state
+        .playlist
+        .iter()
+        .find(|s| s.id == song_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    stream_audio_internal(&state, song, &headers).await
+}
+
+/// Stream audio by song index
+async fn stream_audio_by_index(
     State(state): State<SharedState>,
     Path(index): Path<usize>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    // Get song info
     let song = state.playlist.get(index).ok_or(StatusCode::NOT_FOUND)?;
+
+    stream_audio_internal(&state, song, &headers).await
+}
+
+/// Streams an audio file to the client, with full support for HTTP byte-range requests.
+/// This handler is intentionally stateless: it does not modify playback state
+/// or session position, it only serves file data.
+async fn stream_audio_internal(
+    state: &SharedState,
+    song: &SongInfo,
+    headers: &HeaderMap,
+) -> Result<Response, StatusCode> {
     let file_path = state.music_folder.join(&song.filename);
     let file_size = song.size;
 
@@ -783,7 +812,28 @@ async fn handle_client_message(
             // Validate the incoming broadcaster ID as a proper SessionId (UUID)
             let session_id = SessionId::new(broadcaster_id.clone())?;
 
+            {
+                let mut broadcasts = state.broadcast_states.write();
+                if let Some(broadcast) = broadcasts.get_mut(&broadcaster_id) {
+                    let count = state
+                        .broadcaster_listeners
+                        .read()
+                        .get(&broadcaster_id)
+                        .map(|set| set.len())
+                        .unwrap_or(0);
+                    broadcast.listener_count = count;
+                }
+            }
+
             tracing::info!("Client tuning into: {}", session_id);
+
+            {
+                let mut listeners_map = state.broadcaster_listeners.write();
+                listeners_map
+                    .entry(broadcaster_id.clone())
+                    .or_insert_with(HashSet::new)
+                    .insert(validated_session_id.to_string());
+            }
 
             // Retrieve current broadcast state if it exists
             let maybe_state = {
@@ -825,8 +875,30 @@ async fn handle_client_message(
         }
 
         RadioMessage::TuneOut => {
-            // Client wants to stop listening to any broadcaster
             tracing::info!("Client tuned out");
+
+            // Remove from broadcaster's listener set and update count
+            let maybe_broadcaster_id = {
+                let mut listeners_map = state.broadcaster_listeners.write();
+                let mut found_broadcaster = None;
+
+                for (broadcaster_id, listeners) in listeners_map.iter_mut() {
+                    if listeners.remove(validated_session_id) {
+                        found_broadcaster = Some((broadcaster_id.clone(), listeners.len()));
+                        break;
+                    }
+                }
+                found_broadcaster
+            };
+
+            // Update the broadcast state with the new count
+            if let Some((broadcaster_id, count)) = maybe_broadcaster_id {
+                let mut broadcasts = state.broadcast_states.write();
+                if let Some(broadcast) = broadcasts.get_mut(&broadcaster_id) {
+                    broadcast.listener_count = count;
+                }
+            }
+
             tuned_tx
                 .send(None)
                 .map_err(|_| PlayerError::WebSocketError("Failed to tune out".into()))?;
@@ -864,6 +936,13 @@ async fn handle_client_message(
                 return Err(PlayerError::BroadcasterNotFound(broadcaster_id));
             }
 
+            let listener_count = state
+                .broadcaster_listeners
+                .read()
+                .get(&broadcaster_id)
+                .map(|set| set.len())
+                .unwrap_or(0);
+
             let server_ts = now_ms();
 
             let song_name = state
@@ -880,6 +959,7 @@ async fn handle_client_message(
                 playback_time,
                 is_playing,
                 server_timestamp_ms: server_ts,
+                listener_count: listener_count,
             };
 
             state
@@ -1025,6 +1105,7 @@ async fn handle_client_message(
                 playback_time,
                 is_playing,
                 server_timestamp_ms: server_ts,
+                listener_count: 0,
             };
 
             state
@@ -1061,7 +1142,7 @@ async fn handle_client_message(
 
         RadioMessage::QueryBroadcastState { session_id } => {
             ensure_same_session(&session_id, validated_session_id)?;
-            
+
             // Check if this session is currently broadcasting
             let (is_broadcasting, current_state) = {
                 let broadcasts = state.broadcast_states.read();
@@ -1069,19 +1150,19 @@ async fn handle_client_message(
                 let current_state = broadcasts.get(&session_id).cloned();
                 (is_broadcasting, current_state)
             };
-            
+
             tracing::debug!(
                 "Query broadcast state for {}: {}",
                 session_id,
                 is_broadcasting
             );
-            
+
             let response = RadioMessage::BroadcastStateResponse {
                 session_id: session_id.clone(),
                 is_broadcasting,
                 current_state,
             };
-            
+
             out_tx
                 .send(response)
                 .await
@@ -1320,6 +1401,12 @@ async fn cleanup_stale_sessions(state: Arc<AppState>) {
     }
 }
 
+/// Returns the full playlist with song IDs for client-side management
+async fn get_playlist(State(state): State<SharedState>) -> impl IntoResponse {
+    let playlist: Vec<SongInfo> = state.playlist.iter().cloned().collect();
+    axum::Json(playlist)
+}
+
 /// Initializes the shared player state by scanning the music folder,
 /// building a playlist, and setting up broadcast channels and session tracking.
 async fn init_player_state(music_folder: PathBuf) -> SharedState {
@@ -1333,6 +1420,7 @@ async fn init_player_state(music_folder: PathBuf) -> SharedState {
                 if filename.ends_with(".mp3") {
                     if let Ok(metadata) = entry.metadata().await {
                         playlist.push(SongInfo {
+                            id: Uuid::new_v4().to_string(),
                             filename: filename.to_string(),
                             size: metadata.len(),
                         });
@@ -1356,7 +1444,8 @@ async fn init_player_state(music_folder: PathBuf) -> SharedState {
         sessions: RwLock::new(HashMap::new()), // tracks client sessions
         broadcast_states: RwLock::new(HashMap::new()), // tracks broadcaster states
         broadcast_channels: RwLock::new(HashMap::new()), // tracks broadcaster channels
-        global_broadcast_tx,                   // used to send Sync messages to listeners
+        broadcaster_listeners: RwLock::new(HashMap::new()),
+        global_broadcast_tx, // used to send Sync messages to listeners
         active_connections: AtomicUsize::new(0),
         active_broadcasters: AtomicUsize::new(0),
         active_listeners: AtomicUsize::new(0),
@@ -1373,9 +1462,11 @@ pub fn create_player_router(state: Arc<AppState>) -> impl std::future::Future<Ou
             .route("/player", get(player_page)) // Player main page
             .route("/player/next", post(next_song)) // Next song action
             .route("/player/prev", post(prev_song)) // Previous song action
-            .route("/player/stream/{index}", get(stream_audio)) // Audio streaming route
+            .route("/player/stream/{index}", get(stream_audio_by_index)) // Audio streaming route
+            .route("/player/stream/id/{song_id}", get(stream_audio_by_id))
             .route("/player/radio", get(radio_websocket)) // Radio WebSocket
             .route("/player/controls", get(player_controls)) // Return current controls/status
+            .route("/player/playlist", get(get_playlist))
             .with_state(state) // Attach shared state to all routes
     }
 }
