@@ -313,6 +313,110 @@
       #connection-text {
         font-weight: 500;
       }
+
+      /* Playlist Styles */
+      .playlist-container {
+        background: #f8f9fa;
+        padding: 15px;
+        border-radius: 8px;
+        margin-top: 20px;
+        margin-bottom: 20px;
+        border: 1px solid #dee2e6;
+      }
+
+      .playlist-container h3 {
+        margin: 0 0 10px 0;
+        font-size: 16px;
+        color: #495057;
+      }
+
+      .playlist-controls {
+        margin-bottom: 10px;
+      }
+
+      /* Scrollable playlist container */
+      #playlist-display {
+        max-height: 400px;
+        overflow-y: auto;
+        overflow-x: hidden;
+      }
+
+      .playlist-item {
+        background: white;
+        padding: 12px;
+        margin-bottom: 8px;
+        border-radius: 4px;
+        border: 1px solid #e9ecef;
+        cursor: move;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        transition: all 0.2s;
+      }
+
+      .playlist-item:hover {
+        background: #f8f9fa;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+      }
+
+      .playlist-item.dragging {
+        opacity: 0.5;
+      }
+
+      .playlist-item.current-playing {
+        background: #e7f3ff;
+        border-color: #007bff;
+        font-weight: 600;
+      }
+
+      .drag-handle {
+        font-size: 18px;
+        cursor: grab;
+        color: #6c757d;
+      }
+
+      .drag-handle:active {
+        cursor: grabbing;
+      }
+
+      .song-number {
+        font-weight: bold;
+        color: #6c757d;
+        min-width: 30px;
+        font-size: 14px;
+      }
+
+      .song-name {
+        flex: 1;
+        font-size: 14px;
+        color: #212529;
+      }
+
+      .play-song-btn {
+        padding: 6px 12px;
+        font-size: 12px;
+        background: #28a745;
+        border: none;
+        color: white;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+
+      .play-song-btn:hover {
+        background: #218838;
+      }
+
+      .play-song-btn:disabled {
+        background: #6c757d;
+        cursor: not-allowed;
+      }
+
+      .loading {
+        text-align: center;
+        color: #6c757d;
+        padding: 20px;
+        font-style: italic;
+      }
     </style>
   </head>
   <body>
@@ -418,23 +522,21 @@
 
     <!-- Playback Controls -->
     <div class="controls">
-      <button
-        id="prev-btn"
-        hx-post="/player/prev"
-        hx-target="#player-controls"
-        hx-swap="innerHTML"
-      >
-        ⏮️ Previous
-      </button>
-
-      <button
-        id="next-btn"
-        hx-post="/player/next"
-        hx-target="#player-controls"
-        hx-swap="innerHTML"
-      >
-        Next ⏭️
-      </button>
+      <button id="prev-btn">⏮️ Previous</button>
+      <button id="next-btn">Next ⏭️</button>
+    </div>
+    
+    <!-- Playlist Display -->
+    <div class="playlist-container">
+      <h3>📜 Your Playlist</h3>
+      <div class="playlist-controls">
+        <button onclick="resetPlaylistOrder()" style="font-size: 14px; padding: 8px 12px;">
+          🔄 Reset to Default Order
+        </button>
+      </div>
+      <div id="playlist-display">
+        <div class="loading">Loading playlist...</div>
+      </div>
     </div>
 
     <!-- Debug Log -->
@@ -454,6 +556,261 @@
         const sessionId = document.getElementById("my-session-id").textContent;
         navigator.clipboard.writeText(sessionId);
         debugLog("Session ID copied to clipboard");
+      }
+
+      // Playlist Management Class
+      class PlaylistManager {
+        constructor(sessionId) {
+          this.sessionId = sessionId;
+          this.songs = [];
+          this.currentSongId = null;
+          this.storageKey = `playlist_order_${sessionId}`;
+        }
+
+        async loadPlaylist() {
+          try {
+            debugLog("Fetching playlist from server...");
+            const response = await fetch('/player/playlist');
+            this.songs = await response.json();
+            debugLog(`Loaded ${this.songs.length} songs`);
+
+            // Load custom order from localStorage
+            this.loadCustomOrder();
+            
+            // Display the playlist
+            this.render();
+          } catch (err) {
+            debugLog(`Failed to load playlist: ${err.message}`);
+          }
+        }
+
+        loadCustomOrder() {
+          const savedOrder = localStorage.getItem(this.storageKey);
+          if (!savedOrder) {
+            debugLog("No custom playlist order found, using default");
+            return;
+          }
+
+          try {
+            const orderIds = JSON.parse(savedOrder);
+            
+            // Validate that all IDs still exist
+            const validIds = orderIds.filter(id => 
+              this.songs.some(song => song.id === id)
+            );
+
+            // Reorder songs array based on saved order
+            const orderedSongs = [];
+            validIds.forEach(id => {
+              const song = this.songs.find(s => s.id === id);
+              if (song) orderedSongs.push(song);
+            });
+
+            // Add any new songs that weren't in the saved order
+            this.songs.forEach(song => {
+              if (!validIds.includes(song.id)) {
+                orderedSongs.push(song);
+              }
+            });
+
+            this.songs = orderedSongs;
+            debugLog("Loaded custom playlist order from localStorage");
+          } catch (err) {
+            debugLog(`Failed to parse saved order: ${err.message}`);
+          }
+        }
+
+        saveCustomOrder() {
+          const orderIds = this.songs.map(song => song.id);
+          localStorage.setItem(this.storageKey, JSON.stringify(orderIds));
+          debugLog("Saved custom playlist order to localStorage");
+        }
+
+        resetToDefaultOrder() {
+          localStorage.removeItem(this.storageKey);
+          debugLog("Reset to default playlist order");
+          this.loadPlaylist();
+        }
+
+        render() {
+          const container = document.getElementById('playlist-display');
+          
+          if (this.songs.length === 0) {
+            container.innerHTML = '<div class="loading">No songs found</div>';
+            return;
+          }
+
+          container.innerHTML = this.songs.map((song, index) => {
+            const isPlaying = song.id === this.currentSongId;
+            const playingClass = isPlaying ? 'current-playing' : '';
+            const playBtnText = isPlaying ? '⏸️ Playing' : '▶️ Play';
+            
+            return `
+              <div class="playlist-item ${playingClass}" 
+                   draggable="true" 
+                   data-song-id="${song.id}"
+                   data-index="${index}">
+                <span class="drag-handle">⋮⋮</span>
+                <span class="song-number">${index + 1}.</span>
+                <span class="song-name">${song.filename}</span>
+                <button class="play-song-btn" 
+                        onclick="playlistManager.playSong('${song.id}')"
+                        ${player.isInRadioMode() ? 'disabled' : ''}>
+                  ${playBtnText}
+                </button>
+              </div>
+            `;
+          }).join('');
+
+          this.setupDragAndDrop();
+        }
+
+        setupDragAndDrop() {
+          const items = document.querySelectorAll('.playlist-item');
+          
+          items.forEach(item => {
+            item.addEventListener('dragstart', this.handleDragStart.bind(this));
+            item.addEventListener('dragover', this.handleDragOver.bind(this));
+            item.addEventListener('drop', this.handleDrop.bind(this));
+            item.addEventListener('dragend', this.handleDragEnd.bind(this));
+          });
+        }
+
+        handleDragStart(e) {
+          this.draggedElement = e.currentTarget;
+          e.currentTarget.classList.add('dragging');
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/html', e.currentTarget.innerHTML);
+        }
+
+        handleDragOver(e) {
+          if (e.preventDefault) {
+            e.preventDefault();
+          }
+          e.dataTransfer.dropEffect = 'move';
+          return false;
+        }
+
+        handleDrop(e) {
+          if (e.stopPropagation) {
+            e.stopPropagation();
+          }
+
+          const draggedIndex = parseInt(this.draggedElement.dataset.index);
+          const targetIndex = parseInt(e.currentTarget.dataset.index);
+
+          if (draggedIndex !== targetIndex) {
+            // Reorder the songs array
+            const draggedSong = this.songs[draggedIndex];
+            this.songs.splice(draggedIndex, 1);
+            this.songs.splice(targetIndex, 0, draggedSong);
+
+            // Save and re-render
+            this.saveCustomOrder();
+            this.render();
+            
+            debugLog(`Moved song from position ${draggedIndex + 1} to ${targetIndex + 1}`);
+          }
+
+          return false;
+        }
+
+        handleDragEnd(e) {
+          e.currentTarget.classList.remove('dragging');
+          this.draggedElement = null;
+        }
+
+        playSong(songId) {
+          if (player.isInRadioMode()) {
+            alert('Cannot change songs while in radio mode');
+            return;
+          }
+
+          this.currentSongId = songId;
+          const song = this.songs.find(s => s.id === songId);
+          
+          audio.src = `/player/stream/id/${songId}`;
+          audio.load();
+          audio.play();
+          
+          // Update the player controls display
+          if (song) {
+            const songIndex = this.songs.findIndex(s => s.id === songId);
+            document.querySelector('#player-controls .song-info strong').nextSibling.textContent = ' ' + song.filename;
+            document.querySelector('#player-controls div:last-child').textContent = `Track ${songIndex + 1} of ${this.songs.length}`;
+          }
+          
+          this.render();
+          debugLog(`Playing: ${song ? song.filename : songId}`);
+        }
+
+        getSongById(songId) {
+          return this.songs.find(s => s.id === songId);
+        }
+
+        getCurrentIndex() {
+          if (!this.currentSongId) return 0;
+          return this.songs.findIndex(s => s.id === this.currentSongId);
+        }
+
+        getNextSong() {
+          const currentIndex = this.getCurrentIndex();
+          const nextIndex = (currentIndex + 1) % this.songs.length;
+          return this.songs[nextIndex];
+        }
+
+        getPrevSong() {
+          const currentIndex = this.getCurrentIndex();
+          const prevIndex = currentIndex === 0 ? this.songs.length - 1 : currentIndex - 1;
+          return this.songs[prevIndex];
+        }
+
+        playNext() {
+          if (player.isInRadioMode()) return;
+          const nextSong = this.getNextSong();
+          if (nextSong) {
+            this.playSong(nextSong.id);
+          }
+        }
+
+        playPrev() {
+          if (player.isInRadioMode()) return;
+          const prevSong = this.getPrevSong();
+          if (prevSong) {
+            this.playSong(prevSong.id);
+          }
+        }
+
+        updateCurrentFromAudioSrc() {
+          // Extract song ID from current audio src
+          const idMatch = audio.src.match(/\/stream\/id\/([^/?]+)/);
+          const indexMatch = audio.src.match(/\/stream\/(\d+)(?:\?|$)/);
+          
+          if (idMatch) {
+            this.currentSongId = idMatch[1];
+            this.render();
+          } else if (indexMatch) {
+            // Convert index to song ID using the original playlist order
+            const index = parseInt(indexMatch[1]);
+            // When loading from server index, we need to find by original server order
+            // The server uses the original unordered playlist
+            fetch('/player/playlist')
+              .then(res => res.json())
+              .then(originalPlaylist => {
+                if (originalPlaylist[index]) {
+                  this.currentSongId = originalPlaylist[index].id;
+                  this.render();
+                }
+              });
+          }
+        }
+      }
+
+      // Helper function for reset button
+      function resetPlaylistOrder() {
+        if (confirm('Reset playlist to default order?')) {
+          playlistManager.resetToDefaultOrder();
+        }
       }
 
       // Radio Player Class
@@ -986,6 +1343,11 @@
           this.ws.send(JSON.stringify(msg));
 
           audio.controls = false;
+          
+          // Re-render playlist to disable controls in radio mode
+          if (window.playlistManager) {
+            window.playlistManager.render();
+          }
         }
 
         tuneOut(reason = "manual") {
@@ -1008,6 +1370,11 @@
           prevBtn.disabled = false;
           nextBtn.disabled = false;
           audio.controls = true;
+          
+          // Re-render playlist to enable controls in private mode
+          if (window.playlistManager) {
+            window.playlistManager.render();
+          }
         }
 
         removeAudioBroadcastListeners() {
@@ -1227,7 +1594,8 @@
               <span>${broadcaster.song_name}</span>
             </div>
             <div class="broadcaster-time">
-              Track ${broadcaster.song_index + 1} • ${timeStr}
+              Track ${broadcaster.song_index + 1} • ${timeStr} • 
+              <strong>${broadcaster.listener_count || 0} 👥</strong>
             </div>
           </div>
           ${buttonHTML}
@@ -1312,31 +1680,24 @@
         player.stopBroadcasting();
       });
 
-      document.body.addEventListener("htmx:afterSwap", function (event) {
-        if (player.isInRadioMode()) return;
-
-        if (event.detail.target.id === "player-controls") {
-          const match = event.detail.target.textContent.match(/Track (\d+)/);
-          if (!match) return;
-
-          const newIndex = parseInt(match[1]) - 1;
-          audio.src = `/player/stream/${newIndex}`;
-          audio.load();
-          audio.play();
-        }
-      });
-
-      document.body.addEventListener("htmx:beforeRequest", function (event) {
-        if (
-          player.isInRadioMode() &&
-          (event.detail.target.id === "prev-btn" ||
-            event.detail.target.id === "next-btn")
-        ) {
-          event.preventDefault();
+      // Override next/prev buttons to use playlist manager instead of HTMX
+      prevBtn.addEventListener("click", (e) => {
+        if (player.isInRadioMode()) {
           alert("Controls disabled while tuned into a radio");
+          return;
         }
+        playlistManager.playPrev();
       });
 
+      nextBtn.addEventListener("click", (e) => {
+        if (player.isInRadioMode()) {
+          alert("Controls disabled while tuned into a radio");
+          return;
+        }
+        playlistManager.playNext();
+      });
+
+      // Audio ended handler uses playlist manager
       audio.addEventListener("ended", () => {
         if (player.isInRadioMode()) {
           debugLog(
@@ -1346,11 +1707,7 @@
         }
 
         debugLog("Track ended — moving to next track");
-
-        htmx.ajax("POST", "/player/next", {
-          target: "#player-controls",
-          swap: "innerHTML",
-        });
+        playlistManager.playNext();
       });
 
       window.addEventListener("beforeunload", () => {
@@ -1369,8 +1726,20 @@
         }
       });
 
-      // Make player globally accessible
+      // Initialize playlist manager
+      const playlistManager = new PlaylistManager(sessionId);
+      playlistManager.loadPlaylist();
+
+      // Track current song when audio src changes
+      audio.addEventListener('loadstart', () => {
+        playlistManager.updateCurrentFromAudioSrc();
+      });
+
+      // Make globally accessible
       window.player = player;
+      window.playlistManager = playlistManager;
     </script>
   </body>
 </html>
+
+// TODO when broadcasting the one who tuned in only ever hears the first song from the default playlist regardless if the broadcaster changed song 
