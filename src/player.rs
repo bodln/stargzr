@@ -1388,7 +1388,7 @@ pub async fn initialize(path_buf: PathBuf) {
     tracing::info!("Starting MP3 Player server");
 
     // Bind TCP listener to localhost:8083
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:8083")
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:8083")
         .await
         .expect("Failed to bind to port 8083");
 
