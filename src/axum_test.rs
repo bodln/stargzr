@@ -92,7 +92,7 @@ async fn increment(State(state): State<ArcToo<AppStateTest>>) -> CounterPartial 
 }
 
 async fn _hello() -> Html<&'static str> {
-    Html(include_str!("../templates/index.html"))
+    Html(include_str!("player/templates/index.html"))
 }
 
 pub async fn initilaze() {

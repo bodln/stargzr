@@ -1,7 +1,7 @@
-use network_tests::validation::SessionId;
-use network_tests::validation::validate_song_index;
-use network_tests::rate_limit::RateLimiter;
-use network_tests::reconnect::ReconnectionStrategy;
+use network_tests::player::validation::SessionId;
+use network_tests::player::validation::validate_song_index;
+use network_tests::player::rate_limit::RateLimiter;
+use network_tests::player::reconnect::ReconnectionStrategy;
 
 use std::time::Duration;
 

@@ -1,4 +1,4 @@
-use crate::error::{PlayerError, PlayerResult};
+use super::error::{PlayerError, PlayerResult};
 use regex::Regex;
 use once_cell::sync::Lazy;
 

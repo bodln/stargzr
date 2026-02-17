@@ -2,8 +2,3 @@ pub mod primitives;
 pub mod middlewares;
 pub mod axum_test;
 pub mod player;
-pub mod error;
-pub mod validation;
-pub mod logging;
-pub mod rate_limit;
-pub mod reconnect;
