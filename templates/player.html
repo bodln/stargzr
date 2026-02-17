@@ -352,6 +352,7 @@
         align-items: center;
         gap: 10px;
         transition: all 0.2s;
+        touch-action: none; /* prevent scroll hijack during touch drag on mobile */
       }
 
       .playlist-item:hover {
@@ -725,14 +726,21 @@
 
         setupDragAndDrop() {
           const items = document.querySelectorAll('.playlist-item');
-          
           items.forEach(item => {
+            // Desktop: HTML5 drag events
             item.addEventListener('dragstart', this.handleDragStart.bind(this));
             item.addEventListener('dragover', this.handleDragOver.bind(this));
             item.addEventListener('drop', this.handleDrop.bind(this));
             item.addEventListener('dragend', this.handleDragEnd.bind(this));
+
+            // Mobile: touch events
+            item.addEventListener('touchstart', this.handleTouchStart.bind(this), { passive: true });
+            item.addEventListener('touchmove', this.handleTouchMove.bind(this), { passive: false });
+            item.addEventListener('touchend', this.handleTouchEnd.bind(this), { passive: true });
           });
         }
+
+        // ── Desktop drag handlers ──────────────────────────────────────────
 
         handleDragStart(e) {
           this.draggedElement = e.currentTarget;
@@ -742,40 +750,143 @@
         }
 
         handleDragOver(e) {
-          if (e.preventDefault) {
-            e.preventDefault();
-          }
+          e.preventDefault();
           e.dataTransfer.dropEffect = 'move';
           return false;
         }
 
         handleDrop(e) {
-          if (e.stopPropagation) {
-            e.stopPropagation();
-          }
-
+          e.stopPropagation();
           const draggedIndex = parseInt(this.draggedElement.dataset.index);
           const targetIndex = parseInt(e.currentTarget.dataset.index);
-
           if (draggedIndex !== targetIndex) {
-            // Reorder the songs array
             const draggedSong = this.songs[draggedIndex];
             this.songs.splice(draggedIndex, 1);
             this.songs.splice(targetIndex, 0, draggedSong);
-
-            // Save and re-render
             this.saveCustomOrder();
             this.render();
-            
             debugLog(`Moved song from position ${draggedIndex + 1} to ${targetIndex + 1}`);
           }
-
           return false;
         }
 
         handleDragEnd(e) {
           e.currentTarget.classList.remove('dragging');
           this.draggedElement = null;
+        }
+
+        // ── Mobile touch handlers ──────────────────────────────────────────
+
+        handleTouchStart(e) {
+          this.touchDragElement = e.currentTarget;
+          this.touchDragStartIndex = parseInt(e.currentTarget.dataset.index);
+          this.touchDragCurrentIndex = this.touchDragStartIndex;
+
+          const touch = e.touches[0];
+          this.touchLastY = touch.clientY;
+
+          // Create a floating clone so the user sees what they're dragging
+          const rect = e.currentTarget.getBoundingClientRect();
+          this.touchClone = e.currentTarget.cloneNode(true);
+          this.touchClone.style.cssText = `
+            position: fixed;
+            left: ${rect.left}px;
+            top: ${rect.top}px;
+            width: ${rect.width}px;
+            opacity: 0.85;
+            pointer-events: none;
+            z-index: 9999;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+            border-radius: 4px;
+            background: #e7f3ff;
+            border: 1px solid #007bff;
+          `;
+          document.body.appendChild(this.touchClone);
+
+          e.currentTarget.classList.add('dragging');
+          this.touchDragActive = true;
+        }
+
+        handleTouchMove(e) {
+          if (!this.touchDragActive) return;
+          e.preventDefault(); // stop page scroll while dragging
+
+          const touch = e.touches[0];
+          const dy = touch.clientY - this.touchLastY;
+          this.touchLastY = touch.clientY;
+
+          // Move the clone with the finger
+          const cloneTop = parseFloat(this.touchClone.style.top) + dy;
+          this.touchClone.style.top = `${cloneTop}px`;
+
+          // Find which playlist item the finger is currently over
+          this.touchClone.style.display = 'none'; // hide clone so elementFromPoint works
+          const target = document.elementFromPoint(touch.clientX, touch.clientY);
+          this.touchClone.style.display = '';
+
+          const targetItem = target?.closest('.playlist-item');
+          if (!targetItem) return;
+
+          const targetIndex = parseInt(targetItem.dataset.index);
+          if (isNaN(targetIndex) || targetIndex === this.touchDragCurrentIndex) return;
+
+          // Reorder data array live for immediate visual feedback
+          const draggedSong = this.songs[this.touchDragCurrentIndex];
+          this.songs.splice(this.touchDragCurrentIndex, 1);
+          this.songs.splice(targetIndex, 0, draggedSong);
+          this.touchDragCurrentIndex = targetIndex;
+
+          // Lightweight re-render that keeps drag state intact
+          this.renderForDrag(targetIndex);
+        }
+
+        handleTouchEnd(e) {
+          if (!this.touchDragActive) return;
+          this.touchDragActive = false;
+
+          if (this.touchClone) {
+            this.touchClone.remove();
+            this.touchClone = null;
+          }
+
+          document.querySelectorAll('.playlist-item.dragging').forEach(el => {
+            el.classList.remove('dragging');
+          });
+
+          if (this.touchDragCurrentIndex !== this.touchDragStartIndex) {
+            this.saveCustomOrder();
+            debugLog(`Moved song from position ${this.touchDragStartIndex + 1} to ${this.touchDragCurrentIndex + 1}`);
+          }
+
+          this.render();
+        }
+
+        // Mid-drag re-render: rebuilds DOM order and data-index values while
+        // preserving the dragging class on the active item
+        renderForDrag(activeDragIndex) {
+          const container = document.getElementById('playlist-display');
+          container.innerHTML = this.songs.map((song, index) => {
+            const isPlaying = song.id === this.currentSongId;
+            const playingClass = isPlaying ? 'current-playing' : '';
+            const isDragging = index === activeDragIndex ? 'dragging' : '';
+            const playBtnText = isPlaying ? '⏸️ Playing' : '▶️ Play';
+            return `
+              <div class="playlist-item ${playingClass} ${isDragging}"
+                   draggable="true"
+                   data-song-id="${song.id}"
+                   data-index="${index}">
+                <span class="drag-handle">⋮⋮</span>
+                <span class="song-number">${index + 1}.</span>
+                <span class="song-name">${song.filename}</span>
+                <button class="play-song-btn"
+                        onclick="playlistManager.playSong('${song.id}')"
+                        ${player.isInRadioMode() ? 'disabled' : ''}>
+                  ${playBtnText}
+                </button>
+              </div>
+            `;
+          }).join('');
+          this.setupDragAndDrop();
         }
 
         playSong(songId) {
