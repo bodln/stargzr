@@ -411,8 +411,14 @@
       }
 
       @keyframes song-marquee {
-        0%, 15%  { transform: translateX(0); }
-        85%, 100% { transform: translateX(var(--scroll-dist, 0px)); }
+        0%,
+        15% {
+          transform: translateX(0);
+        }
+        85%,
+        100% {
+          transform: translateX(var(--scroll-dist, 0px));
+        }
       }
 
       .play-song-btn {
@@ -473,8 +479,8 @@
 
     <!-- Mobile Warning -->
     <div id="mobile-warning" class="mobile-warning hidden">
-      ⚠️ Broadcasting on mobile may stop when the screen locks or you switch apps. 
-      Keep this tab active for best results.
+      ⚠️ Broadcasting on mobile may stop when the screen locks or you switch
+      apps. Keep this tab active for best results.
     </div>
 
     <!-- Mode Indicator and Radio Controls -->
@@ -548,12 +554,15 @@
       <button id="prev-btn">⏮️ Previous</button>
       <button id="next-btn">Next ⏭️</button>
     </div>
-    
+
     <!-- Playlist Display -->
     <div class="playlist-container">
       <h3>📜 Your Playlist</h3>
       <div class="playlist-controls">
-        <button onclick="resetPlaylistOrder()" style="font-size: 14px; padding: 8px 12px;">
+        <button
+          onclick="resetPlaylistOrder()"
+          style="font-size: 14px; padding: 8px 12px"
+        >
           🔄 Reset to Default Order
         </button>
       </div>
@@ -597,7 +606,7 @@
         async loadPlaylist() {
           try {
             debugLog("Fetching playlist from server...");
-            const response = await fetch('/player/playlist');
+            const response = await fetch("/player/playlist");
             const serverSongs = await response.json();
             // Store original server order before any custom reordering
             this.originalSongs = serverSongs;
@@ -627,23 +636,28 @@
           // audio.currentSrc is what the browser actually resolved, but may also
           // be "" before the user interacts. Reading the <source> attribute
           // directly is the reliable fallback for the initial render.
-          const srcToCheck = audio.currentSrc
-            || audio.src
-            || audio.querySelector('source')?.getAttribute('src')
-            || '';
+          const srcToCheck =
+            audio.currentSrc ||
+            audio.src ||
+            audio.querySelector("source")?.getAttribute("src") ||
+            "";
 
           const idMatch = srcToCheck.match(/\/stream\/id\/([^/?]+)/);
           const indexMatch = srcToCheck.match(/\/stream\/(\d+)(?:[^/]|$)/);
 
           if (idMatch) {
             this.currentSongId = idMatch[1];
-            debugLog(`Synced current song from audio src (id): ${this.currentSongId}`);
+            debugLog(
+              `Synced current song from audio src (id): ${this.currentSongId}`,
+            );
           } else if (indexMatch) {
             const index = parseInt(indexMatch[1]);
             const song = this.originalSongs[index];
             if (song) {
               this.currentSongId = song.id;
-              debugLog(`Synced current song from audio src (index ${index}): ${song.filename}`);
+              debugLog(
+                `Synced current song from audio src (index ${index}): ${song.filename}`,
+              );
             }
           }
         }
@@ -657,21 +671,21 @@
 
           try {
             const orderIds = JSON.parse(savedOrder);
-            
+
             // Validate that all IDs still exist
-            const validIds = orderIds.filter(id => 
-              this.songs.some(song => song.id === id)
+            const validIds = orderIds.filter((id) =>
+              this.songs.some((song) => song.id === id),
             );
 
             // Reorder songs array based on saved order
             const orderedSongs = [];
-            validIds.forEach(id => {
-              const song = this.songs.find(s => s.id === id);
+            validIds.forEach((id) => {
+              const song = this.songs.find((s) => s.id === id);
               if (song) orderedSongs.push(song);
             });
 
             // Add any new songs that weren't in the saved order
-            this.songs.forEach(song => {
+            this.songs.forEach((song) => {
               if (!validIds.includes(song.id)) {
                 orderedSongs.push(song);
               }
@@ -685,7 +699,7 @@
         }
 
         saveCustomOrder() {
-          const orderIds = this.songs.map(song => song.id);
+          const orderIds = this.songs.map((song) => song.id);
           localStorage.setItem(this.storageKey, JSON.stringify(orderIds));
           debugLog("Saved custom playlist order to localStorage");
         }
@@ -700,7 +714,7 @@
         // This is what the broadcast protocol uses — it must match the
         // original unshuffled server order, not the user's custom order.
         getServerIndexById(songId) {
-          const index = this.originalSongs.findIndex(s => s.id === songId);
+          const index = this.originalSongs.findIndex((s) => s.id === songId);
           // Fall back to 0 if not found to avoid sending garbage
           return index >= 0 ? index : 0;
         }
@@ -714,19 +728,20 @@
         }
 
         render(skipScroll = false) {
-          const container = document.getElementById('playlist-display');
-          
+          const container = document.getElementById("playlist-display");
+
           if (this.songs.length === 0) {
             container.innerHTML = '<div class="loading">No songs found</div>';
             return;
           }
 
-          container.innerHTML = this.songs.map((song, index) => {
-            const isPlaying = song.id === this.currentSongId;
-            const playingClass = isPlaying ? 'current-playing' : '';
-            const playBtnText = isPlaying ? '⏸️ Playing' : '▶️ Play';
-            
-            return `
+          container.innerHTML = this.songs
+            .map((song, index) => {
+              const isPlaying = song.id === this.currentSongId;
+              const playingClass = isPlaying ? "current-playing" : "";
+              const playBtnText = isPlaying ? "⏸️ Playing" : "▶️ Play";
+
+              return `
               <div class="playlist-item ${playingClass}" 
                    draggable="true" 
                    data-song-id="${song.id}"
@@ -736,54 +751,71 @@
                 <span class="song-name"><span class="song-text">${song.filename}</span></span>
                 <button class="play-song-btn" 
                         onclick="playlistManager.playSong('${song.id}')"
-                        ${player.isInRadioMode() ? 'disabled' : ''}>
+                        ${player.isInRadioMode() ? "disabled" : ""}>
                   ${playBtnText}
                 </button>
               </div>
             `;
-          }).join('');
+            })
+            .join("");
 
           this.setupDragAndDrop();
           if (!skipScroll) this.scrollToCurrentSong();
         }
 
         setupDragAndDrop() {
-          const items = document.querySelectorAll('.playlist-item');
-          items.forEach(item => {
+          const items = document.querySelectorAll(".playlist-item");
+          items.forEach((item) => {
             // Desktop: HTML5 drag events on the whole row (unchanged)
-            item.addEventListener('dragstart', this.handleDragStart.bind(this));
-            item.addEventListener('dragover', this.handleDragOver.bind(this));
-            item.addEventListener('drop', this.handleDrop.bind(this));
-            item.addEventListener('dragend', this.handleDragEnd.bind(this));
+            item.addEventListener("dragstart", this.handleDragStart.bind(this));
+            item.addEventListener("dragover", this.handleDragOver.bind(this));
+            item.addEventListener("drop", this.handleDrop.bind(this));
+            item.addEventListener("dragend", this.handleDragEnd.bind(this));
           });
 
           // Marquee: scroll overflowing song names on hover so full title is readable.
           // Measures actual overflow so the animation travels exactly the right distance.
-          document.querySelectorAll('.song-name').forEach(el => {
-            const span = el.querySelector('.song-text');
+          document.querySelectorAll(".song-name").forEach((el) => {
+            const span = el.querySelector(".song-text");
             if (!span) return;
-            el.addEventListener('mouseenter', () => {
+            el.addEventListener("mouseenter", () => {
               const overflow = span.scrollWidth - el.clientWidth;
               if (overflow <= 0) return; // text fits — nothing to scroll
               const duration = Math.max(2, overflow / 40); // ~40px/s feels natural
-              span.style.setProperty('--scroll-dist', `-${overflow}px`);
+              span.style.setProperty("--scroll-dist", `-${overflow}px`);
               span.style.animation = `song-marquee ${duration}s ease-in-out infinite`;
             });
-            el.addEventListener('mouseleave', () => {
-              span.style.animation = '';
-              span.style.transform = '';
+            el.addEventListener("mouseleave", () => {
+              span.style.animation = "";
+              span.style.transform = "";
             });
           });
 
           // Mobile: touch events only on the ⋮⋮ handle so the rest of the
           // row remains scrollable on phones
-          document.querySelectorAll('.drag-handle').forEach(handle => {
-            handle.addEventListener('touchstart', this.handleTouchStart.bind(this), { passive: false });
-            handle.addEventListener('touchmove', this.handleTouchMove.bind(this), { passive: false });
-            handle.addEventListener('touchend', this.handleTouchEnd.bind(this), { passive: true });
+          document.querySelectorAll(".drag-handle").forEach((handle) => {
+            handle.addEventListener(
+              "touchstart",
+              this.handleTouchStart.bind(this),
+              { passive: false },
+            );
+            handle.addEventListener(
+              "touchmove",
+              this.handleTouchMove.bind(this),
+              { passive: false },
+            );
+            handle.addEventListener(
+              "touchend",
+              this.handleTouchEnd.bind(this),
+              { passive: true },
+            );
             // touchcancel fires when the browser interrupts the gesture (incoming
             // call, scroll takeover, etc.) — without this the clone stays on screen
-            handle.addEventListener('touchcancel', this.handleTouchCancel.bind(this), { passive: true });
+            handle.addEventListener(
+              "touchcancel",
+              this.handleTouchCancel.bind(this),
+              { passive: true },
+            );
           });
         }
 
@@ -791,14 +823,14 @@
 
         handleDragStart(e) {
           this.draggedElement = e.currentTarget;
-          e.currentTarget.classList.add('dragging');
-          e.dataTransfer.effectAllowed = 'move';
-          e.dataTransfer.setData('text/html', e.currentTarget.innerHTML);
+          e.currentTarget.classList.add("dragging");
+          e.dataTransfer.effectAllowed = "move";
+          e.dataTransfer.setData("text/html", e.currentTarget.innerHTML);
         }
 
         handleDragOver(e) {
           e.preventDefault();
-          e.dataTransfer.dropEffect = 'move';
+          e.dataTransfer.dropEffect = "move";
           return false;
         }
 
@@ -812,13 +844,15 @@
             this.songs.splice(targetIndex, 0, draggedSong);
             this.saveCustomOrder();
             this.render(true); // don't scroll — user is looking at the drag target area
-            debugLog(`Moved song from position ${draggedIndex + 1} to ${targetIndex + 1}`);
+            debugLog(
+              `Moved song from position ${draggedIndex + 1} to ${targetIndex + 1}`,
+            );
           }
           return false;
         }
 
         handleDragEnd(e) {
-          e.currentTarget.classList.remove('dragging');
+          e.currentTarget.classList.remove("dragging");
           this.draggedElement = null;
         }
 
@@ -826,7 +860,7 @@
 
         handleTouchStart(e) {
           // e.currentTarget is the ⋮⋮ handle — walk up to the row
-          const row = e.currentTarget.closest('.playlist-item');
+          const row = e.currentTarget.closest(".playlist-item");
           if (!row) return;
 
           e.preventDefault(); // prevent scroll starting from the handle
@@ -860,7 +894,7 @@
           `;
           document.body.appendChild(this.touchClone);
 
-          row.classList.add('dragging');
+          row.classList.add("dragging");
           this.touchDragActive = true;
 
           // Haptic feedback on grab (supported on Android Chrome)
@@ -878,7 +912,7 @@
           this.touchClone.style.top = `${touch.clientY - this.touchGrabOffsetY}px`;
 
           // Auto-scroll the playlist container when the finger is near its edges.
-          const container = document.getElementById('playlist-display');
+          const container = document.getElementById("playlist-display");
           const cRect = container.getBoundingClientRect();
           const edgeZone = 60; // px from top/bottom edge that triggers scroll
           const scrollSpeed = 8; // px scrolled per touchmove tick
@@ -889,15 +923,19 @@
           }
 
           // Find which playlist item the finger is currently over
-          this.touchClone.style.display = 'none'; // hide clone so elementFromPoint works
-          const target = document.elementFromPoint(touch.clientX, touch.clientY);
-          this.touchClone.style.display = '';
+          this.touchClone.style.display = "none"; // hide clone so elementFromPoint works
+          const target = document.elementFromPoint(
+            touch.clientX,
+            touch.clientY,
+          );
+          this.touchClone.style.display = "";
 
-          const targetItem = target?.closest('.playlist-item');
+          const targetItem = target?.closest(".playlist-item");
           if (!targetItem) return;
 
           const targetIndex = parseInt(targetItem.dataset.index);
-          if (isNaN(targetIndex) || targetIndex === this.touchDragCurrentIndex) return;
+          if (isNaN(targetIndex) || targetIndex === this.touchDragCurrentIndex)
+            return;
 
           // Midpoint guard: only swap once the clone's leading edge has crossed
           // past the midpoint of the target row, preventing jittery back-and-forth
@@ -930,13 +968,15 @@
             this.touchClone = null;
           }
 
-          document.querySelectorAll('.playlist-item.dragging').forEach(el => {
-            el.classList.remove('dragging');
+          document.querySelectorAll(".playlist-item.dragging").forEach((el) => {
+            el.classList.remove("dragging");
           });
 
           if (this.touchDragCurrentIndex !== this.touchDragStartIndex) {
             this.saveCustomOrder();
-            debugLog(`Moved song from position ${this.touchDragStartIndex + 1} to ${this.touchDragCurrentIndex + 1}`);
+            debugLog(
+              `Moved song from position ${this.touchDragStartIndex + 1} to ${this.touchDragCurrentIndex + 1}`,
+            );
           }
 
           this.render(true); // don't scroll — user is looking at the drag target area
@@ -954,21 +994,21 @@
             this.touchClone = null;
           }
 
-          document.querySelectorAll('.playlist-item.dragging').forEach(el => {
-            el.classList.remove('dragging');
+          document.querySelectorAll(".playlist-item.dragging").forEach((el) => {
+            el.classList.remove("dragging");
           });
 
           // Revert the in-progress reorder back to the last saved state
           this.render(true); // don't scroll — cancelled drag, leave list where it is
-          debugLog('Touch drag cancelled by browser');
+          debugLog("Touch drag cancelled by browser");
         }
 
         // Scrolls #playlist-display only if the playing item isn't already
         // fully visible. Uses getBoundingClientRect so the position is always
         // relative to the visible viewport of the container, not a DOM ancestor.
         scrollToCurrentSong() {
-          const container = document.getElementById('playlist-display');
-          const activeItem = container.querySelector('.current-playing');
+          const container = document.getElementById("playlist-display");
+          const activeItem = container.querySelector(".current-playing");
           if (!activeItem) return;
 
           const cRect = container.getBoundingClientRect();
@@ -978,20 +1018,25 @@
           if (iRect.top >= cRect.top && iRect.bottom <= cRect.bottom) return;
 
           // Scroll the minimum needed so the item sits 16px from the top edge
-          const targetScrollTop = container.scrollTop + (iRect.top - cRect.top) - 16;
-          container.scrollTo({ top: Math.max(0, targetScrollTop), behavior: 'smooth' });
+          const targetScrollTop =
+            container.scrollTop + (iRect.top - cRect.top) - 16;
+          container.scrollTo({
+            top: Math.max(0, targetScrollTop),
+            behavior: "smooth",
+          });
         }
 
         // Mid-drag re-render: rebuilds DOM order and data-index values while
         // preserving the dragging class on the active item
         renderForDrag(activeDragIndex) {
-          const container = document.getElementById('playlist-display');
-          container.innerHTML = this.songs.map((song, index) => {
-            const isPlaying = song.id === this.currentSongId;
-            const playingClass = isPlaying ? 'current-playing' : '';
-            const isDragging = index === activeDragIndex ? 'dragging' : '';
-            const playBtnText = isPlaying ? '⏸️ Playing' : '▶️ Play';
-            return `
+          const container = document.getElementById("playlist-display");
+          container.innerHTML = this.songs
+            .map((song, index) => {
+              const isPlaying = song.id === this.currentSongId;
+              const playingClass = isPlaying ? "current-playing" : "";
+              const isDragging = index === activeDragIndex ? "dragging" : "";
+              const playBtnText = isPlaying ? "⏸️ Playing" : "▶️ Play";
+              return `
               <div class="playlist-item ${playingClass} ${isDragging}"
                    draggable="true"
                    data-song-id="${song.id}"
@@ -1001,46 +1046,51 @@
                 <span class="song-name"><span class="song-text">${song.filename}</span></span>
                 <button class="play-song-btn"
                         onclick="playlistManager.playSong('${song.id}')"
-                        ${player.isInRadioMode() ? 'disabled' : ''}>
+                        ${player.isInRadioMode() ? "disabled" : ""}>
                   ${playBtnText}
                 </button>
               </div>
             `;
-          }).join('');
+            })
+            .join("");
           this.setupDragAndDrop();
         }
 
         playSong(songId) {
           if (player.isInRadioMode()) {
-            alert('Cannot change songs while in radio mode');
+            alert("Cannot change songs while in radio mode");
             return;
           }
 
           this.currentSongId = songId;
-          const song = this.songs.find(s => s.id === songId);
-          
+          const song = this.songs.find((s) => s.id === songId);
+
           audio.src = `/player/stream/id/${songId}`;
           audio.load();
           audio.play();
-          
+
           // Update the player controls display
           if (song) {
-            const songIndex = this.songs.findIndex(s => s.id === songId);
-            document.querySelector('#player-controls .song-info strong').nextSibling.textContent = ' ' + song.filename;
-            document.querySelector('#player-controls div:last-child').textContent = `Track ${songIndex + 1} of ${this.songs.length}`;
+            const songIndex = this.songs.findIndex((s) => s.id === songId);
+            document.querySelector(
+              "#player-controls .song-info strong",
+            ).nextSibling.textContent = " " + song.filename;
+            document.querySelector(
+              "#player-controls div:last-child",
+            ).textContent = `Track ${songIndex + 1} of ${this.songs.length}`;
           }
-          
+
           this.render();
           debugLog(`Playing: ${song ? song.filename : songId}`);
         }
 
         getSongById(songId) {
-          return this.songs.find(s => s.id === songId);
+          return this.songs.find((s) => s.id === songId);
         }
 
         getCurrentIndex() {
           if (!this.currentSongId) return 0;
-          return this.songs.findIndex(s => s.id === this.currentSongId);
+          return this.songs.findIndex((s) => s.id === this.currentSongId);
         }
 
         getNextSong() {
@@ -1051,7 +1101,8 @@
 
         getPrevSong() {
           const currentIndex = this.getCurrentIndex();
-          const prevIndex = currentIndex === 0 ? this.songs.length - 1 : currentIndex - 1;
+          const prevIndex =
+            currentIndex === 0 ? this.songs.length - 1 : currentIndex - 1;
           return this.songs[prevIndex];
         }
 
@@ -1076,7 +1127,7 @@
           const idMatch = audio.src.match(/\/stream\/id\/([^/?]+)/);
           // Extract numeric index from /stream/{index}
           const indexMatch = audio.src.match(/\/stream\/(\d+)(?:\?|$)/);
-          
+
           if (idMatch) {
             this.currentSongId = idMatch[1];
             this.render();
@@ -1094,7 +1145,7 @@
 
       // Helper function for reset button
       function resetPlaylistOrder() {
-        if (confirm('Reset playlist to default order?')) {
+        if (confirm("Reset playlist to default order?")) {
           playlistManager.resetToDefaultOrder();
         }
       }
@@ -1130,32 +1181,34 @@
           this.connectionState = "disconnected";
 
           debugLog(`Initialized with session ID: ${sessionId}`);
-          
+
           // Setup page visibility handling
           this.setupPageVisibilityHandling();
         }
 
         isMobile() {
           return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
-            navigator.userAgent
+            navigator.userAgent,
           );
         }
 
         setupPageVisibilityHandling() {
-          let visibilityProp = 'hidden';
-          let visibilityEvent = 'visibilitychange';
-          
-          if (typeof document.hidden !== 'undefined') {
-            visibilityProp = 'hidden';
-            visibilityEvent = 'visibilitychange';
-          } else if (typeof document.webkitHidden !== 'undefined') {
-            visibilityProp = 'webkitHidden';
-            visibilityEvent = 'webkitvisibilitychange';
+          let visibilityProp = "hidden";
+          let visibilityEvent = "visibilitychange";
+
+          if (typeof document.hidden !== "undefined") {
+            visibilityProp = "hidden";
+            visibilityEvent = "visibilitychange";
+          } else if (typeof document.webkitHidden !== "undefined") {
+            visibilityProp = "webkitHidden";
+            visibilityEvent = "webkitvisibilitychange";
           }
-          
+
           document.addEventListener(visibilityEvent, () => {
             if (document[visibilityProp]) {
-              debugLog("📱 Page hidden - broadcasting may be affected on mobile");
+              debugLog(
+                "📱 Page hidden - broadcasting may be affected on mobile",
+              );
               this.onPageHidden();
             } else {
               debugLog("👁️ Page visible again");
@@ -1166,7 +1219,7 @@
 
         onPageHidden() {
           this.pageHiddenAt = Date.now();
-          
+
           if (this.isBroadcasting) {
             debugLog("📱 Page backgrounded - JavaScript will be throttled");
             // DON'T speed up heartbeats - browser throttles anyway, it's pointless
@@ -1175,49 +1228,55 @@
         }
 
         onPageVisible() {
-          const hiddenDuration = this.pageHiddenAt ? (Date.now() - this.pageHiddenAt) / 1000 : 0;
+          const hiddenDuration = this.pageHiddenAt
+            ? (Date.now() - this.pageHiddenAt) / 1000
+            : 0;
           this.pageHiddenAt = null;
-          
-          debugLog(`👁️ Page visible again (was hidden for ${hiddenDuration.toFixed(1)}s)`);
-          
+
+          debugLog(
+            `👁️ Page visible again (was hidden for ${hiddenDuration.toFixed(1)}s)`,
+          );
+
           // Reconnect if needed
           if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
             debugLog("WebSocket disconnected, reconnecting...");
             this.connectWebSocket();
           }
-          
+
           if (this.isBroadcasting) {
             // If we were hidden for less than 40 seconds, just resume broadcasting
             // The server's timeout is 45s, so if we were hidden < 40s, we should still be valid
             if (hiddenDuration < 40) {
               debugLog("✓ Resuming broadcast (short background duration)");
-              
+
               // Re-acquire wake lock
               this.requestWakeLock();
-              
+
               // Send an immediate heartbeat to tell server we're still here
               if (this.ws && this.ws.readyState === WebSocket.OPEN) {
                 this.sendHeartbeat();
               }
             } else {
               // We were backgrounded for a long time, server probably cleaned us up
-              debugLog("⚠️ Long background duration - verifying broadcast state");
+              debugLog(
+                "⚠️ Long background duration - verifying broadcast state",
+              );
               this.verifyBroadcastState();
             }
           }
         }
 
         async requestWakeLock() {
-          if (!('wakeLock' in navigator)) {
+          if (!("wakeLock" in navigator)) {
             debugLog("Wake Lock API not supported");
             return;
           }
-          
+
           try {
-            this.wakeLock = await navigator.wakeLock.request('screen');
+            this.wakeLock = await navigator.wakeLock.request("screen");
             debugLog("✓ Wake lock acquired - screen will stay on");
-            
-            this.wakeLock.addEventListener('release', () => {
+
+            this.wakeLock.addEventListener("release", () => {
               debugLog("Wake lock released");
             });
           } catch (err) {
@@ -1239,12 +1298,12 @@
 
         async verifyBroadcastState() {
           if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-          
+
           const msg = {
             type: "QueryBroadcastState",
-            session_id: this.sessionId
+            session_id: this.sessionId,
           };
-          
+
           debugLog("→ Querying broadcast state from server");
           this.ws.send(JSON.stringify(msg));
         }
@@ -1266,21 +1325,25 @@
         }
 
         notifyConnectionChange(state) {
-          const indicator = document.getElementById('connection-indicator');
-          const text = document.getElementById('connection-text');
-          
+          const indicator = document.getElementById("connection-indicator");
+          const text = document.getElementById("connection-text");
+
           const states = {
-            connected: { icon: '🟢', text: 'Connected', color: '#28a745' },
-            connecting: { icon: '🟡', text: 'Connecting...', color: '#ffc107' },
-            disconnected: { icon: '⚪', text: 'Disconnected', color: '#6c757d' },
-            error: { icon: '🔴', text: 'Connection Error', color: '#dc3545' }
+            connected: { icon: "🟢", text: "Connected", color: "#28a745" },
+            connecting: { icon: "🟡", text: "Connecting...", color: "#ffc107" },
+            disconnected: {
+              icon: "⚪",
+              text: "Disconnected",
+              color: "#6c757d",
+            },
+            error: { icon: "🔴", text: "Connection Error", color: "#dc3545" },
           };
-          
+
           const config = states[state] || states.disconnected;
           indicator.textContent = config.icon;
           text.textContent = config.text;
           text.style.color = config.color;
-          
+
           const event = new CustomEvent("connectionStateChange", {
             detail: {
               state,
@@ -1333,7 +1396,9 @@
 
             // DON'T auto-resume broadcasting - verify first
             if (this.isBroadcasting) {
-              debugLog("Client thinks it's broadcasting - verifying with server");
+              debugLog(
+                "Client thinks it's broadcasting - verifying with server",
+              );
               this.verifyBroadcastState();
             }
 
@@ -1459,27 +1524,33 @@
           }
 
           if (msg.type === "BroadcastStateResponse") {
-            debugLog(`Server says broadcasting: ${msg.is_broadcasting}, client thinks: ${this.isBroadcasting}`);
-            
+            debugLog(
+              `Server says broadcasting: ${msg.is_broadcasting}, client thinks: ${this.isBroadcasting}`,
+            );
+
             if (msg.is_broadcasting !== this.isBroadcasting) {
               debugLog(`⚠️ State mismatch detected!`);
-              
+
               if (msg.is_broadcasting && !this.isBroadcasting) {
                 // Server thinks we're broadcasting but we're not - sync to server
                 this.isBroadcasting = true;
                 this.updateBroadcastingUI(true);
                 if (this.isMobile()) {
-                  document.getElementById('mobile-warning').classList.remove('hidden');
+                  document
+                    .getElementById("mobile-warning")
+                    .classList.remove("hidden");
                 }
               } else if (!msg.is_broadcasting && this.isBroadcasting) {
                 // Server says we're not broadcasting, but we think we are
                 // This likely happened due to tab backgrounding - just resume broadcasting
-                debugLog("🔄 Server lost our session - resuming broadcast automatically");
-                
+                debugLog(
+                  "🔄 Server lost our session - resuming broadcast automatically",
+                );
+
                 const wasPlaying = !this.audio.paused;
                 const currentTime = this.audio.currentTime;
                 const currentIndex = this.getCurrentSongIndex();
-                
+
                 const initMsg = {
                   type: "StartBroadcasting",
                   broadcaster_id: this.sessionId,
@@ -1487,9 +1558,11 @@
                   playback_time: currentTime,
                   is_playing: wasPlaying,
                 };
-                
-                debugLog(`→ Resuming broadcast: song ${initMsg.song_index}, time ${initMsg.playback_time.toFixed(2)}s`);
-                
+
+                debugLog(
+                  `→ Resuming broadcast: song ${initMsg.song_index}, time ${initMsg.playback_time.toFixed(2)}s`,
+                );
+
                 if (this.ws && this.ws.readyState === WebSocket.OPEN) {
                   this.ws.send(JSON.stringify(initMsg));
                 }
@@ -1500,14 +1573,17 @@
 
           if (msg.type === "Error") {
             debugLog(`Server error: ${msg.message}`);
-            
-            if (msg.message.includes("BroadcasterNotFound") || 
-                msg.message.includes("not broadcasting")) {
-              
+
+            if (
+              msg.message.includes("BroadcasterNotFound") ||
+              msg.message.includes("not broadcasting")
+            ) {
               if (this.isBroadcasting) {
                 debugLog("Server rejected broadcast - stopping");
                 this.stopBroadcasting();
-                alert("Your broadcast session ended. Please start broadcasting again if needed.");
+                alert(
+                  "Your broadcast session ended. Please start broadcasting again if needed.",
+                );
               }
             } else {
               alert(`Error: ${msg.message}`);
@@ -1556,7 +1632,9 @@
             // Load the new track and defer the seek until canplay fires —
             // seeking before the browser has buffered any data causes the
             // half-second skip at the start of every song change.
-            debugLog(`Switching from song ${currentIndex} to song ${song_index}`);
+            debugLog(
+              `Switching from song ${currentIndex} to song ${song_index}`,
+            );
 
             const songId = window.playlistManager
               ? window.playlistManager.getSongIdByServerIndex(song_index)
@@ -1576,20 +1654,26 @@
             // Exception: if the broadcaster's playback_time is near 0, the song
             // just started — adding latency compensation would skip the opening
             // notes, so we just seek to 0 instead.
-            this.audio.addEventListener('canplay', () => {
-              let seekTo;
-              if (playback_time < 1.0) {
-                // Song just started on broadcaster side — begin from the top
-                seekTo = 0;
-              } else {
-                const freshElapsed = (Date.now() - server_timestamp_ms) / 1000;
-                seekTo = Math.max(0, playback_time + freshElapsed);
-              }
-              debugLog(`canplay — seeking to ${seekTo.toFixed(2)}s (broadcaster at ${playback_time.toFixed(2)}s)`);
-              this.audio.currentTime = seekTo;
-              if (is_playing) this.audio.play();
-            }, { once: true });
-
+            this.audio.addEventListener(
+              "canplay",
+              () => {
+                let seekTo;
+                if (playback_time < 1.0) {
+                  // Song just started on broadcaster side — begin from the top
+                  seekTo = 0;
+                } else {
+                  const freshElapsed =
+                    (Date.now() - server_timestamp_ms) / 1000;
+                  seekTo = Math.max(0, playback_time + freshElapsed);
+                }
+                debugLog(
+                  `canplay — seeking to ${seekTo.toFixed(2)}s (broadcaster at ${playback_time.toFixed(2)}s)`,
+                );
+                this.audio.currentTime = seekTo;
+                if (is_playing) this.audio.play();
+              },
+              { once: true },
+            );
           } else {
             // Same song — sync position and play state directly, no load needed
             const now = Date.now();
@@ -1644,14 +1728,17 @@
           // switching between broadcasters).
           if (this.mode !== "radio") {
             this.preRadioSnapshot = {
-              src: this.audio.src
-                || this.audio.querySelector?.('source')?.getAttribute('src')
-                || null,
+              src:
+                this.audio.src ||
+                this.audio.querySelector?.("source")?.getAttribute("src") ||
+                null,
               currentTime: this.audio.currentTime,
               paused: this.audio.paused,
               songId: window.playlistManager?.currentSongId ?? null,
             };
-            debugLog(`📸 Saved pre-radio state: ${this.preRadioSnapshot.src} @ ${this.preRadioSnapshot.currentTime.toFixed(2)}s`);
+            debugLog(
+              `📸 Saved pre-radio state: ${this.preRadioSnapshot.src} @ ${this.preRadioSnapshot.currentTime.toFixed(2)}s`,
+            );
           }
 
           this.mode = "radio";
@@ -1666,7 +1753,7 @@
           this.ws.send(JSON.stringify(msg));
 
           audio.controls = false;
-          
+
           // Re-render playlist to disable controls in radio mode
           if (window.playlistManager) {
             window.playlistManager.render();
@@ -1700,17 +1787,23 @@
             this.preRadioSnapshot = null;
 
             if (snap.src) {
-              debugLog(`↩️ Restoring pre-radio state: ${snap.src} @ ${snap.currentTime.toFixed(2)}s`);
+              debugLog(
+                `↩️ Restoring pre-radio state: ${snap.src} @ ${snap.currentTime.toFixed(2)}s`,
+              );
               this.audio.src = snap.src;
               this.audio.load();
 
               // Restore position and play state once the browser is ready
-              this.audio.addEventListener('canplay', () => {
-                this.audio.currentTime = snap.currentTime;
-                if (!snap.paused) {
-                  this.audio.play();
-                }
-              }, { once: true });
+              this.audio.addEventListener(
+                "canplay",
+                () => {
+                  this.audio.currentTime = snap.currentTime;
+                  if (!snap.paused) {
+                    this.audio.play();
+                  }
+                },
+                { once: true },
+              );
             }
 
             // Restore the playlist manager's current song so next/prev still work
@@ -1735,13 +1828,13 @@
         sendHeartbeat() {
           if (!this.isBroadcasting) return;
           if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-          
+
           const msg = {
             type: "Heartbeat",
             broadcaster_id: this.sessionId,
             playback_time: this.audio.currentTime,
           };
-          
+
           debugLog(
             `→ Heartbeat: song ${this.getCurrentSongIndex()}, time ${msg.playback_time.toFixed(2)}s`,
           );
@@ -1753,9 +1846,9 @@
             debugLog("Already starting broadcast, ignoring duplicate request");
             return;
           }
-          
+
           this.isStartingBroadcast = true;
-          
+
           if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
             debugLog("WebSocket not ready for broadcasting, connecting...");
             this.isStartingBroadcast = false;
@@ -1777,27 +1870,35 @@
 
           // Show mobile warning if applicable
           if (this.isMobile()) {
-            document.getElementById('mobile-warning').classList.remove('hidden');
+            document
+              .getElementById("mobile-warning")
+              .classList.remove("hidden");
           }
 
           // Request wake lock to prevent screen from sleeping
           this.requestWakeLock();
 
+          let updateDebounceTimer = null;
           const sendUpdate = () => {
             if (!this.isBroadcasting) return;
             if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-            
-            const msg = {
-              type: "BroadcastUpdate",
-              broadcaster_id: this.sessionId,
-              song_index: this.getCurrentSongIndex(),
-              playback_time: this.audio.currentTime,
-              is_playing: !this.audio.paused,
-            };
-            debugLog(
-              `→ Broadcasting: song ${msg.song_index}, time ${msg.playback_time.toFixed(2)}s`,
-            );
-            this.ws.send(JSON.stringify(msg));
+
+            clearTimeout(updateDebounceTimer);
+            updateDebounceTimer = setTimeout(() => {
+              if (!this.isBroadcasting) return;
+
+              const msg = {
+                type: "BroadcastUpdate",
+                broadcaster_id: this.sessionId,
+                song_index: this.getCurrentSongIndex(),
+                playback_time: this.audio.currentTime,
+                is_playing: !this.audio.paused,
+              };
+              debugLog(
+                `→ Broadcasting: song ${msg.song_index}, time ${msg.playback_time.toFixed(2)}s`,
+              );
+              this.ws.send(JSON.stringify(msg));
+            }, 150); // 150ms collapses burst events into one
           };
 
           // Store handlers for cleanup
@@ -1809,7 +1910,10 @@
           this.audio.addEventListener("pause", sendUpdate);
           this.audio.addEventListener("seeked", sendUpdate);
 
-          this.heartbeatInterval = setInterval(() => this.sendHeartbeat(), 2000);
+          this.heartbeatInterval = setInterval(
+            () => this.sendHeartbeat(),
+            2000,
+          );
 
           // Send initial state
           const initMsg = {
@@ -1823,7 +1927,7 @@
             `→ Starting broadcast: song ${initMsg.song_index}, time ${initMsg.playback_time.toFixed(2)}s`,
           );
           this.ws.send(JSON.stringify(initMsg));
-          
+
           this.updateBroadcastingUI(true);
           this.isStartingBroadcast = false;
         }
@@ -1833,7 +1937,7 @@
             debugLog("Not broadcasting, nothing to stop");
             return;
           }
-          
+
           this.isBroadcasting = false;
 
           if (this.heartbeatInterval) {
@@ -1842,12 +1946,12 @@
           }
 
           this.removeAudioBroadcastListeners();
-          
+
           // Release wake lock
           this.releaseWakeLock();
-          
+
           // Hide mobile warning
-          document.getElementById('mobile-warning').classList.add('hidden');
+          document.getElementById("mobile-warning").classList.add("hidden");
 
           if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             this.ws.send(
@@ -1865,8 +1969,9 @@
         updateBroadcastingUI(isBroadcasting) {
           const broadcastStatus = document.getElementById("broadcast-status");
           const broadcastBtn = document.getElementById("broadcast-btn");
-          const stopBroadcastBtn = document.getElementById("stop-broadcast-btn");
-          
+          const stopBroadcastBtn =
+            document.getElementById("stop-broadcast-btn");
+
           if (isBroadcasting) {
             broadcastStatus.classList.remove("hidden");
             broadcastBtn.classList.add("hidden");
@@ -2059,9 +2164,7 @@
       // Audio ended handler uses playlist manager
       audio.addEventListener("ended", () => {
         if (player.isInRadioMode()) {
-          debugLog(
-            "Track ended, but in radio mode — waiting for broadcaster",
-          );
+          debugLog("Track ended, but in radio mode — waiting for broadcaster");
           return;
         }
 
@@ -2092,7 +2195,7 @@
       playlistManager.loadPlaylist();
 
       // Track current song whenever the audio src changes mid-session
-      audio.addEventListener('loadstart', () => {
+      audio.addEventListener("loadstart", () => {
         playlistManager.updateCurrentFromAudioSrc();
       });
 
