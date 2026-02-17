@@ -1898,7 +1898,7 @@
                 `→ Broadcasting: song ${msg.song_index}, time ${msg.playback_time.toFixed(2)}s`,
               );
               this.ws.send(JSON.stringify(msg));
-            }, 150); // 150ms collapses burst events into one
+            }, 800); // 800ms collapses burst events into one
           };
 
           // Store handlers for cleanup
