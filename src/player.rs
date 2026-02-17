@@ -14,11 +14,11 @@ use axum::{
     response::Response,
     routing::get,
 };
+use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
 use hyper::StatusCode;
-use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,14 +55,17 @@ struct BroadcastState {
     listener_count: usize,
 }
 
+// DashMap shards the map across multiple independent RwLocks (one per shard, ~4× cpu count),
+// so concurrent operations on different keys never block each other — unlike a single
+// RwLock<HashMap> where every heartbeat, TuneIn, and BroadcastUpdate serialises globally.
 pub struct AppState {
     playlist: Arc<Vec<SongInfo>>,
     music_folder: Arc<PathBuf>,
 
-    sessions: RwLock<HashMap<String, PlayerSession>>,
+    sessions: DashMap<String, PlayerSession>,
 
     /// Maps broadcaster_id(session id) -> their current state
-    broadcast_states: RwLock<HashMap<String, BroadcastState>>,
+    broadcast_states: DashMap<String, BroadcastState>,
 
     /// Global broadcast channel for system-wide announcements.
     /// Used for BroadcasterOnline/Offline messages that all clients should see,
@@ -71,10 +74,10 @@ pub struct AppState {
 
     /// Per-broadcaster channels for targeted playback sync.
     /// Each broadcaster has their own channel that only their listeners subscribe to.
-    broadcast_channels: RwLock<HashMap<String, broadcast::Sender<RadioMessage>>>,
+    broadcast_channels: DashMap<String, broadcast::Sender<RadioMessage>>,
 
     /// Per broadcaster listener count
-    broadcaster_listeners: RwLock<HashMap<String, HashSet<String>>>,
+    broadcaster_listeners: DashMap<String, HashSet<String>>,
 }
 
 /// Helper type for cleaner function signatures
@@ -238,33 +241,26 @@ fn get_or_create_position(state: &AppState, session_id: &str) -> usize {
     let now = std::time::Instant::now();
 
     // First try with cheap read lock
-    {
-        let sessions = state.sessions.read();
-        if let Some(session) = sessions.get(session_id) {
-            return session.current_index;
-        }
+    if let Some(session) = state.sessions.get(session_id) {
+        return session.current_index;
     }
 
-    let mut sessions = state.sessions.write();
-
-    // Either returns a valid session or creates a new one,
-    // in the case of there not being one or it having expired
-    let session = sessions
+    let mut session = state.sessions
         .entry(session_id.to_string())
         .or_insert(PlayerSession {
             current_index: 0,
             last_activity: now,
         });
 
+    // Either returns a valid session or creates a new one,
+    // in the case of there not being one or it having expired
     session.last_activity = now;
     session.current_index
 }
 
 /// Changes the playlist position for the session id
 fn update_session_index(state: &AppState, session_id: &str, new_index: usize) {
-    let mut sessions = state.sessions.write();
-
-    if let Some(session) = sessions.get_mut(session_id) {
+    if let Some(mut session) = state.sessions.get_mut(session_id) {
         session.current_index = new_index;
         session.last_activity = std::time::Instant::now();
     }
@@ -273,19 +269,15 @@ fn update_session_index(state: &AppState, session_id: &str, new_index: usize) {
 /// Changes the playlist position for the broadcaster by session id
 fn update_broadcast_index(state: &AppState, session_id: &str, new_index: usize) {
     // Check if this session is broadcasting ( with a cheap read lock)
-    {
-        let broadcasts = state.broadcast_states.read();
-        if !broadcasts.contains_key(session_id) {
-            // Not a broadcaster, skip entirely
-            return;
-        }
+    if !state.broadcast_states.contains_key(session_id) {
+        // Not a broadcaster, skip entirely
+        return;
     }
 
-    // Only acquire write lock if we know they're broadcasting
-    let mut broadcasts = state.broadcast_states.write();
     let server_ts = now_ms();
 
-    if let Some(broadcast) = broadcasts.get_mut(session_id) {
+    // Only acquire write lock if we know they're broadcasting
+    if let Some(mut broadcast) = state.broadcast_states.get_mut(session_id) {
         // Update authoritative state
         broadcast.song_index = new_index;
         broadcast.playback_time = 0.0;
@@ -410,7 +402,7 @@ async fn player_controls(
     // If a broadcaster ID is provided, attempt to mirror its playback state
     if let Some(broadcaster_id) = query.broadcaster {
         // Broadcast state is shared, read-only, and authoritative for listeners
-        if let Some(broadcast) = state.broadcast_states.read().get(&broadcaster_id) {
+        if let Some(broadcast) = state.broadcast_states.get(&broadcaster_id) {
             let index = broadcast.song_index;
 
             let song = state
@@ -637,10 +629,9 @@ async fn handle_radio_connection(
                 Ok(()) = tuned_rx.changed() => {
                     match tuned_rx.borrow().clone() {
                         Some(broadcast_id) => {
-                            let tx = {
-                                let channels = state_clone.broadcast_channels.read();
-                                channels.get(&broadcast_id).cloned()
-                            };
+                            let tx = state_clone.broadcast_channels
+                                .get(&broadcast_id)
+                                .map(|r| r.clone());
 
                             current_tuned_broadcaster_rx = tx.map(|t| t.subscribe());
                             tracing::debug!("Tuned in to {:?}", broadcast_id);
@@ -749,8 +740,7 @@ async fn handle_radio_connection(
 
     delete_broadcasting_session(&state, &validated_session_id);
 
-        broadcast_analytics(&state);
-    
+    broadcast_analytics(&state);
 
     tracing::info!(
         "Client disconnected: {}",
@@ -803,32 +793,21 @@ async fn handle_client_message(
 
             tracing::info!("Client tuning into: {}", session_id);
 
-            {
-                let mut listeners_map = state.broadcaster_listeners.write();
-                listeners_map
-                    .entry(broadcaster_id.clone())
-                    .or_insert_with(HashSet::new)
-                    .insert(validated_session_id.to_string());
-            }
+            state.broadcaster_listeners
+                .entry(broadcaster_id.clone())
+                .or_insert_with(HashSet::new)
+                .insert(validated_session_id.to_string());
 
-            {
-                let mut broadcasts = state.broadcast_states.write();
-                if let Some(broadcast) = broadcasts.get_mut(&broadcaster_id) {
-                    let count = state
-                        .broadcaster_listeners
-                        .read()
-                        .get(&broadcaster_id)
-                        .map(|set| set.len())
-                        .unwrap_or(0);
-                    broadcast.listener_count = count;
-                }
+            if let Some(mut broadcast) = state.broadcast_states.get_mut(&broadcaster_id) {
+                let count = state.broadcaster_listeners
+                    .get(&broadcaster_id)
+                    .map(|set| set.len())
+                    .unwrap_or(0);
+                broadcast.listener_count = count;
             }
 
             // Retrieve current broadcast state if it exists
-            let maybe_state = {
-                let broadcasts = state.broadcast_states.read();
-                broadcasts.get(&broadcaster_id).cloned()
-            };
+            let maybe_state = state.broadcast_states.get(&broadcaster_id).map(|b| b.clone());
 
             if let Some(b_state) = maybe_state {
                 // Send a Sync message with the current state to the newly tuned client
@@ -867,12 +846,11 @@ async fn handle_client_message(
 
             // Remove from broadcaster's listener set and update count
             let maybe_broadcaster_id = {
-                let mut listeners_map = state.broadcaster_listeners.write();
                 let mut found_broadcaster = None;
 
-                for (broadcaster_id, listeners) in listeners_map.iter_mut() {
-                    if listeners.remove(validated_session_id) {
-                        found_broadcaster = Some((broadcaster_id.clone(), listeners.len()));
+                for mut entry in state.broadcaster_listeners.iter_mut() {
+                    if entry.value_mut().remove(validated_session_id) {
+                        found_broadcaster = Some((entry.key().clone(), entry.value().len()));
                         break;
                     }
                 }
@@ -881,8 +859,7 @@ async fn handle_client_message(
 
             // Update the broadcast state with the new count
             if let Some((broadcaster_id, count)) = maybe_broadcaster_id {
-                let mut broadcasts = state.broadcast_states.write();
-                if let Some(broadcast) = broadcasts.get_mut(&broadcaster_id) {
+                if let Some(mut broadcast) = state.broadcast_states.get_mut(&broadcaster_id) {
                     broadcast.listener_count = count;
                 }
             }
@@ -890,7 +867,6 @@ async fn handle_client_message(
             tuned_tx
                 .send(None)
                 .map_err(|_| PlayerError::WebSocketError("Failed to tune out".into()))?;
-
 
             broadcast_analytics(state);
         }
@@ -918,13 +894,12 @@ async fn handle_client_message(
             );
 
             // If the session isn't broadcasting don't update
-            if !state.broadcast_states.read().contains_key(&broadcaster_id) {
+            if !state.broadcast_states.contains_key(&broadcaster_id) {
                 return Err(PlayerError::BroadcasterNotFound(broadcaster_id));
             }
 
             let listener_count = state
                 .broadcaster_listeners
-                .read()
                 .get(&broadcaster_id)
                 .map(|set| set.len())
                 .unwrap_or(0);
@@ -948,10 +923,7 @@ async fn handle_client_message(
                 listener_count: listener_count,
             };
 
-            state
-                .broadcast_states
-                .write()
-                .insert(broadcaster_id.clone(), new_state);
+            state.broadcast_states.insert(broadcaster_id.clone(), new_state);
 
             // Forward the update to all subscribed clients via Sync message
             let sync_msg = RadioMessage::Sync {
@@ -963,7 +935,7 @@ async fn handle_client_message(
             };
 
             // A return value of Err does not mean that future calls to send will fail
-            if let Some(tx) = state.broadcast_channels.read().get(&broadcaster_id) {
+            if let Some(tx) = state.broadcast_channels.get(&broadcaster_id) {
                 match tx.send(sync_msg) {
                     Ok(count) => {
                         tracing::trace!("Sync sent to {} listeners", count);
@@ -992,8 +964,7 @@ async fn handle_client_message(
             let server_ts = now_ms();
 
             // Update playback time for the broadcaster
-            let mut broadcasts = state.broadcast_states.write();
-            if let Some(broadcast) = broadcasts.get_mut(&broadcaster_id) {
+            if let Some(mut broadcast) = state.broadcast_states.get_mut(&broadcaster_id) {
                 broadcast.playback_time = playback_time;
                 broadcast.server_timestamp_ms = server_ts;
 
@@ -1005,13 +976,8 @@ async fn handle_client_message(
             // Validate broadcaster session ID
             ensure_same_session(&broadcaster_id, validated_session_id)?;
 
-            let mut broadcasts = state.broadcast_states.write();
-            broadcasts.remove(&broadcaster_id);
-            drop(broadcasts);
-
-            let mut broadcast_channel = state.broadcast_channels.write();
-            broadcast_channel.remove(&broadcaster_id);
-            drop(broadcast_channel);
+            state.broadcast_states.remove(&broadcaster_id);
+            state.broadcast_channels.remove(&broadcaster_id);
 
             let offline_msg = RadioMessage::BroadcasterOffline {
                 broadcaster_id: broadcaster_id.clone(),
@@ -1044,11 +1010,7 @@ async fn handle_client_message(
             // Ensure the requested song index exists in the playlist
             validate_song_index(song_index, state.playlist.len())?;
 
-            let was_already_broadcasting = {
-                let broadcasts = state.broadcast_states.read();
-
-                broadcasts.contains_key(&broadcaster_id)
-            };
+            let was_already_broadcasting = state.broadcast_states.contains_key(&broadcaster_id);
 
             if was_already_broadcasting {
                 tracing::debug!(
@@ -1089,20 +1051,14 @@ async fn handle_client_message(
                 listener_count: 0,
             };
 
-            state
-                .broadcast_states
-                .write()
-                .insert(broadcaster_id.clone(), new_state);
+            state.broadcast_states.insert(broadcaster_id.clone(), new_state);
 
             // Create the channel if it doesn't exist
-            {
-                let mut channels = state.broadcast_channels.write();
-                channels.entry(broadcaster_id.clone()).or_insert_with(|| {
-                    let (tx, _rx) = broadcast::channel::<RadioMessage>(100);
-                    tracing::debug!("Created broadcast channel for session: {}", broadcaster_id);
-                    tx
-                });
-            }
+            state.broadcast_channels.entry(broadcaster_id.clone()).or_insert_with(|| {
+                let (tx, _rx) = broadcast::channel::<RadioMessage>(100);
+                tracing::debug!("Created broadcast channel for session: {}", broadcaster_id);
+                tx
+            });
 
             // Send announcement through global channel, not the broadcaster's channel
             if !was_already_broadcasting {
@@ -1125,12 +1081,8 @@ async fn handle_client_message(
             ensure_same_session(&session_id, validated_session_id)?;
 
             // Check if this session is currently broadcasting
-            let (is_broadcasting, current_state) = {
-                let broadcasts = state.broadcast_states.read();
-                let is_broadcasting = broadcasts.contains_key(&session_id);
-                let current_state = broadcasts.get(&session_id).cloned();
-                (is_broadcasting, current_state)
-            };
+            let is_broadcasting = state.broadcast_states.contains_key(&session_id);
+            let current_state = state.broadcast_states.get(&session_id).map(|b| b.clone());
 
             tracing::debug!(
                 "Query broadcast state for {}: {}",
@@ -1176,54 +1128,39 @@ fn ensure_same_session(expected: &str, actual: &str) -> Result<(), PlayerError> 
 }
 
 fn delete_broadcasting_session(state: &SharedState, broadcaster_id: &str) {
-    let broadcaster_id_to_cleanup = {
-        let broadcasts = state.broadcast_states.read();
-        if broadcasts.contains_key(broadcaster_id) {
-            Some(broadcaster_id)
-        } else {
-            None
-        }
+    if !state.broadcast_states.contains_key(broadcaster_id) {
+        return;
+    }
+
+    tracing::info!(
+        "Auto-cleanup: Disconnected broadcaster {} - removing state",
+        broadcaster_id
+    );
+
+    state.broadcast_states.remove(broadcaster_id);
+
+    let offline_msg = RadioMessage::BroadcasterOffline {
+        broadcaster_id: broadcaster_id.to_string(),
     };
 
-    if let Some(broadcaster_id) = broadcaster_id_to_cleanup {
-        tracing::info!(
-            "Auto-cleanup: Disconnected broadcaster {} - removing state",
-            broadcaster_id
-        );
-
-        {
-            let mut broadcasts = state.broadcast_states.write();
-            broadcasts.remove(broadcaster_id);
+    match state.global_broadcast_tx.send(offline_msg) {
+        Ok(listener_count) => {
+            tracing::info!(
+                "Notified {} listener(s) that {} went offline",
+                listener_count,
+                broadcaster_id
+            );
         }
-
-        let broadcaster_msg_id = broadcaster_id;
-
-        let offline_msg = RadioMessage::BroadcasterOffline {
-            broadcaster_id: broadcaster_msg_id.to_string(),
-        };
-
-        match state.global_broadcast_tx.send(offline_msg) {
-            Ok(listener_count) => {
-                tracing::info!(
-                    "Notified {} listener(s) that {} went offline",
-                    listener_count,
-                    broadcaster_id
-                );
-            }
-            Err(_) => {
-                tracing::debug!("No listeners to notify for {}", broadcaster_id);
-            }
+        Err(_) => {
+            tracing::debug!("No listeners to notify for {}", broadcaster_id);
         }
-
-        {
-            let mut channels = state.broadcast_channels.write();
-            if channels.remove(broadcaster_id).is_some() {
-                tracing::debug!("Removed broadcast channel for {}", broadcaster_id);
-            }
-        }
-
-        broadcast_analytics(&state);
     }
+
+    if state.broadcast_channels.remove(broadcaster_id).is_some() {
+        tracing::debug!("Removed broadcast channel for {}", broadcaster_id);
+    }
+
+    broadcast_analytics(&state);
 }
 
 /// Creates a RadioMessage::Error from a PlayerError
@@ -1241,29 +1178,25 @@ fn create_error_message(error: &PlayerError) -> RadioMessage {
 fn broadcast_analytics(state: &SharedState) {
     // Compute active_listeners as the total number of strings across all
     // per-broadcaster listener sets — single read lock, no atomic to drift
-    let active_listeners = {
-        let map = state.broadcaster_listeners.read();
-        map.values().map(|set| set.len()).sum::<usize>()
-    };
+    let active_listeners = state.broadcaster_listeners
+        .iter()
+        .map(|entry| entry.value().len())
+        .sum::<usize>();
 
-    let active_connections = state.sessions.read().len();
+    let active_connections = state.sessions.len();
 
-    let active_broadcasters = state.broadcast_channels.read().len();
+    let active_broadcasters = state.broadcast_channels.len();
 
     // Collect broadcaster states, injecting fresh listener counts so the UI
     // is always accurate regardless of whether TuneIn/TuneOut updated it
-    let broadcasters: Vec<BroadcastState> = {
-        let broadcasts = state.broadcast_states.read();
-        let listeners_map = state.broadcaster_listeners.read();
-        broadcasts.values().map(|b| {
-            let mut b = b.clone();
-            b.listener_count = listeners_map
-                .get(&b.broadcaster_id)
-                .map(|s| s.len())
-                .unwrap_or(0);
-            b
-        }).collect()
-    };
+    let broadcasters: Vec<BroadcastState> = state.broadcast_states.iter().map(|entry| {
+        let mut b = entry.value().clone();
+        b.listener_count = state.broadcaster_listeners
+            .get(&b.broadcaster_id)
+            .map(|s| s.len())
+            .unwrap_or(0);
+        b
+    }).collect();
 
     let analytics_msg = RadioMessage::Analytics {
         active_connections,
@@ -1292,11 +1225,10 @@ async fn cleanup_stale_sessions(state: Arc<AppState>) {
         // Cleanup Player Sessions
         // These are private playback sessions for users not in radio mode
         {
-            let mut sessions = state.sessions.write();
-            let before_count = sessions.len();
+            let before_count = state.sessions.len();
 
             // Remove sessions older than 1 hour
-            sessions.retain(|session_id, session| {
+            state.sessions.retain(|session_id, session| {
                 let age = now.duration_since(session.last_activity);
                 let should_keep = age.as_secs() < 3600;
 
@@ -1311,7 +1243,7 @@ async fn cleanup_stale_sessions(state: Arc<AppState>) {
                 should_keep
             });
 
-            let removed = before_count - sessions.len();
+            let removed = before_count - state.sessions.len();
             if removed > 0 {
                 tracing::info!("Cleaned up {} stale player session(s)", removed);
             }
@@ -1322,11 +1254,9 @@ async fn cleanup_stale_sessions(state: Arc<AppState>) {
         let mut stale_broadcasters = Vec::new();
 
         {
-            let broadcasts = state.broadcast_states.read();
-
             // Find broadcasters that haven't updated in 30+ seconds
-            for (broadcaster_id, broadcast_state) in broadcasts.iter() {
-                let age_ms = now_ms.saturating_sub(broadcast_state.server_timestamp_ms);
+            for entry in state.broadcast_states.iter() {
+                let age_ms = now_ms.saturating_sub(entry.value().server_timestamp_ms);
                 let age_secs = age_ms / 1000;
 
                 // 30 seconds is chosen because:
@@ -1336,26 +1266,24 @@ async fn cleanup_stale_sessions(state: Arc<AppState>) {
                 if age_secs > 30 {
                     tracing::info!(
                         "Found stale broadcaster: {} (age: {}s)",
-                        broadcaster_id,
+                        entry.key(),
                         age_secs
                     );
-                    stale_broadcasters.push(broadcaster_id.clone());
+                    stale_broadcasters.push(entry.key().clone());
                 }
             }
         }
 
         // Now remove the stale broadcasters and notify listeners
         for broadcaster_id in stale_broadcasters {
-            {
-                let mut broadcasts = state.broadcast_states.write();
-                if broadcasts.remove(&broadcaster_id).is_some() {
-                    tracing::info!("Removed stale broadcaster state: {}", broadcaster_id);
-                }
+            if state.broadcast_states.remove(&broadcaster_id).is_some() {
+                tracing::info!("Removed stale broadcaster state: {}", broadcaster_id);
             }
 
             // Send offline notification to any remaining listeners
             // It's okay if there are no listeners - we handle that gracefully
-            if let Some(tx) = state.broadcast_channels.read().get(&broadcaster_id) {
+            let maybe_tx = state.broadcast_channels.get(&broadcaster_id).map(|r| r.clone());
+            if let Some(tx) = maybe_tx {
                 let offline_msg = RadioMessage::BroadcasterOffline {
                     broadcaster_id: broadcaster_id.clone(),
                 };
@@ -1378,11 +1306,8 @@ async fn cleanup_stale_sessions(state: Arc<AppState>) {
             }
 
             // Remove the broadcast channel itself
-            {
-                let mut channels = state.broadcast_channels.write();
-                if channels.remove(&broadcaster_id).is_some() {
-                    tracing::info!("Removed broadcast channel: {}", broadcaster_id);
-                }
+            if state.broadcast_channels.remove(&broadcaster_id).is_some() {
+                tracing::info!("Removed broadcast channel: {}", broadcaster_id);
             }
         }
 
@@ -1430,10 +1355,10 @@ async fn init_player_state(music_folder: PathBuf) -> SharedState {
     Arc::new(AppState {
         playlist: Arc::new(playlist),
         music_folder: Arc::new(music_folder),
-        sessions: RwLock::new(HashMap::new()), // tracks client sessions
-        broadcast_states: RwLock::new(HashMap::new()), // tracks broadcaster states
-        broadcast_channels: RwLock::new(HashMap::new()), // tracks broadcaster channels
-        broadcaster_listeners: RwLock::new(HashMap::new()),
+        sessions: DashMap::new(), // tracks client sessions
+        broadcast_states: DashMap::new(), // tracks broadcaster states
+        broadcast_channels: DashMap::new(), // tracks broadcaster channels
+        broadcaster_listeners: DashMap::new(),
         global_broadcast_tx, // used to send Sync messages to listeners
     })
 }
