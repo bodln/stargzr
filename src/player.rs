@@ -812,6 +812,16 @@ async fn handle_client_message(
             // Validate the incoming broadcaster ID as a proper SessionId (UUID)
             let session_id = SessionId::new(broadcaster_id.clone())?;
 
+            tracing::info!("Client tuning into: {}", session_id);
+
+            {
+                let mut listeners_map = state.broadcaster_listeners.write();
+                listeners_map
+                    .entry(broadcaster_id.clone())
+                    .or_insert_with(HashSet::new)
+                    .insert(validated_session_id.to_string());
+            }
+
             {
                 let mut broadcasts = state.broadcast_states.write();
                 if let Some(broadcast) = broadcasts.get_mut(&broadcaster_id) {
@@ -823,16 +833,6 @@ async fn handle_client_message(
                         .unwrap_or(0);
                     broadcast.listener_count = count;
                 }
-            }
-
-            tracing::info!("Client tuning into: {}", session_id);
-
-            {
-                let mut listeners_map = state.broadcaster_listeners.write();
-                listeners_map
-                    .entry(broadcaster_id.clone())
-                    .or_insert_with(HashSet::new)
-                    .insert(validated_session_id.to_string());
             }
 
             // Retrieve current broadcast state if it exists
