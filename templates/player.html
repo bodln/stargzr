@@ -347,12 +347,13 @@
         margin-bottom: 8px;
         border-radius: 4px;
         border: 1px solid #e9ecef;
-        cursor: move;
+        cursor: default;
         display: flex;
         align-items: center;
         gap: 10px;
         transition: all 0.2s;
-        touch-action: none; /* prevent scroll hijack during touch drag on mobile */
+        /* Allow normal page scrolling everywhere on the row except the handle */
+        touch-action: pan-y;
       }
 
       .playlist-item:hover {
@@ -374,6 +375,10 @@
         font-size: 18px;
         cursor: grab;
         color: #6c757d;
+        /* Only the handle suppresses scroll — the rest of the row stays scrollable */
+        touch-action: none;
+        user-select: none;
+        padding: 4px 2px; /* slightly larger hit area on mobile */
       }
 
       .drag-handle:active {
@@ -391,6 +396,23 @@
         flex: 1;
         font-size: 14px;
         color: #212529;
+        /* min-width: 0 lets flex children shrink below their content size —
+           without this the text pushes the Play button off-screen */
+        min-width: 0;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+        cursor: default;
+      }
+
+      /* The inner span is what actually scrolls on hover */
+      .song-name .song-text {
+        display: inline-block;
+      }
+
+      @keyframes song-marquee {
+        0%, 15%  { transform: translateX(0); }
+        85%, 100% { transform: translateX(var(--scroll-dist, 0px)); }
       }
 
       .play-song-btn {
@@ -510,7 +532,7 @@
     <!-- Player Controls (existing) -->
     <div id="player-controls">
       <div class="song-info">
-        <strong>Now Playing:</strong> {{ current_song }}
+        <strong>You Are Now Playing:</strong> {{ current_song }}
       </div>
       <div>Track {{ current_index + 1 }} of {{ total_songs }}</div>
     </div>
@@ -691,7 +713,7 @@
           return null;
         }
 
-        render() {
+        render(skipScroll = false) {
           const container = document.getElementById('playlist-display');
           
           if (this.songs.length === 0) {
@@ -711,7 +733,7 @@
                    data-index="${index}">
                 <span class="drag-handle">⋮⋮</span>
                 <span class="song-number">${index + 1}.</span>
-                <span class="song-name">${song.filename}</span>
+                <span class="song-name"><span class="song-text">${song.filename}</span></span>
                 <button class="play-song-btn" 
                         onclick="playlistManager.playSong('${song.id}')"
                         ${player.isInRadioMode() ? 'disabled' : ''}>
@@ -722,21 +744,46 @@
           }).join('');
 
           this.setupDragAndDrop();
+          if (!skipScroll) this.scrollToCurrentSong();
         }
 
         setupDragAndDrop() {
           const items = document.querySelectorAll('.playlist-item');
           items.forEach(item => {
-            // Desktop: HTML5 drag events
+            // Desktop: HTML5 drag events on the whole row (unchanged)
             item.addEventListener('dragstart', this.handleDragStart.bind(this));
             item.addEventListener('dragover', this.handleDragOver.bind(this));
             item.addEventListener('drop', this.handleDrop.bind(this));
             item.addEventListener('dragend', this.handleDragEnd.bind(this));
+          });
 
-            // Mobile: touch events
-            item.addEventListener('touchstart', this.handleTouchStart.bind(this), { passive: true });
-            item.addEventListener('touchmove', this.handleTouchMove.bind(this), { passive: false });
-            item.addEventListener('touchend', this.handleTouchEnd.bind(this), { passive: true });
+          // Marquee: scroll overflowing song names on hover so full title is readable.
+          // Measures actual overflow so the animation travels exactly the right distance.
+          document.querySelectorAll('.song-name').forEach(el => {
+            const span = el.querySelector('.song-text');
+            if (!span) return;
+            el.addEventListener('mouseenter', () => {
+              const overflow = span.scrollWidth - el.clientWidth;
+              if (overflow <= 0) return; // text fits — nothing to scroll
+              const duration = Math.max(2, overflow / 40); // ~40px/s feels natural
+              span.style.setProperty('--scroll-dist', `-${overflow}px`);
+              span.style.animation = `song-marquee ${duration}s ease-in-out infinite`;
+            });
+            el.addEventListener('mouseleave', () => {
+              span.style.animation = '';
+              span.style.transform = '';
+            });
+          });
+
+          // Mobile: touch events only on the ⋮⋮ handle so the rest of the
+          // row remains scrollable on phones
+          document.querySelectorAll('.drag-handle').forEach(handle => {
+            handle.addEventListener('touchstart', this.handleTouchStart.bind(this), { passive: false });
+            handle.addEventListener('touchmove', this.handleTouchMove.bind(this), { passive: false });
+            handle.addEventListener('touchend', this.handleTouchEnd.bind(this), { passive: true });
+            // touchcancel fires when the browser interrupts the gesture (incoming
+            // call, scroll takeover, etc.) — without this the clone stays on screen
+            handle.addEventListener('touchcancel', this.handleTouchCancel.bind(this), { passive: true });
           });
         }
 
@@ -764,7 +811,7 @@
             this.songs.splice(draggedIndex, 1);
             this.songs.splice(targetIndex, 0, draggedSong);
             this.saveCustomOrder();
-            this.render();
+            this.render(true); // don't scroll — user is looking at the drag target area
             debugLog(`Moved song from position ${draggedIndex + 1} to ${targetIndex + 1}`);
           }
           return false;
@@ -778,20 +825,30 @@
         // ── Mobile touch handlers ──────────────────────────────────────────
 
         handleTouchStart(e) {
-          this.touchDragElement = e.currentTarget;
-          this.touchDragStartIndex = parseInt(e.currentTarget.dataset.index);
+          // e.currentTarget is the ⋮⋮ handle — walk up to the row
+          const row = e.currentTarget.closest('.playlist-item');
+          if (!row) return;
+
+          e.preventDefault(); // prevent scroll starting from the handle
+
+          this.touchDragElement = row;
+          this.touchDragStartIndex = parseInt(row.dataset.index);
           this.touchDragCurrentIndex = this.touchDragStartIndex;
 
           const touch = e.touches[0];
           this.touchLastY = touch.clientY;
 
-          // Create a floating clone so the user sees what they're dragging
-          const rect = e.currentTarget.getBoundingClientRect();
-          this.touchClone = e.currentTarget.cloneNode(true);
+          // Record where inside the row the finger landed so the clone
+          // appears anchored under the finger, not jumping to the row's top edge
+          const rect = row.getBoundingClientRect();
+          this.touchGrabOffsetY = touch.clientY - rect.top;
+
+          // Floating clone follows the finger
+          this.touchClone = row.cloneNode(true);
           this.touchClone.style.cssText = `
             position: fixed;
             left: ${rect.left}px;
-            top: ${rect.top}px;
+            top: ${touch.clientY - this.touchGrabOffsetY}px;
             width: ${rect.width}px;
             opacity: 0.85;
             pointer-events: none;
@@ -803,8 +860,11 @@
           `;
           document.body.appendChild(this.touchClone);
 
-          e.currentTarget.classList.add('dragging');
+          row.classList.add('dragging');
           this.touchDragActive = true;
+
+          // Haptic feedback on grab (supported on Android Chrome)
+          if (navigator.vibrate) navigator.vibrate(30);
         }
 
         handleTouchMove(e) {
@@ -812,12 +872,21 @@
           e.preventDefault(); // stop page scroll while dragging
 
           const touch = e.touches[0];
-          const dy = touch.clientY - this.touchLastY;
           this.touchLastY = touch.clientY;
 
-          // Move the clone with the finger
-          const cloneTop = parseFloat(this.touchClone.style.top) + dy;
-          this.touchClone.style.top = `${cloneTop}px`;
+          // Position clone so the grab point stays under the finger
+          this.touchClone.style.top = `${touch.clientY - this.touchGrabOffsetY}px`;
+
+          // Auto-scroll the playlist container when the finger is near its edges.
+          const container = document.getElementById('playlist-display');
+          const cRect = container.getBoundingClientRect();
+          const edgeZone = 60; // px from top/bottom edge that triggers scroll
+          const scrollSpeed = 8; // px scrolled per touchmove tick
+          if (touch.clientY < cRect.top + edgeZone) {
+            container.scrollTop -= scrollSpeed;
+          } else if (touch.clientY > cRect.bottom - edgeZone) {
+            container.scrollTop += scrollSpeed;
+          }
 
           // Find which playlist item the finger is currently over
           this.touchClone.style.display = 'none'; // hide clone so elementFromPoint works
@@ -830,11 +899,23 @@
           const targetIndex = parseInt(targetItem.dataset.index);
           if (isNaN(targetIndex) || targetIndex === this.touchDragCurrentIndex) return;
 
+          // Midpoint guard: only swap once the clone's leading edge has crossed
+          // past the midpoint of the target row, preventing jittery back-and-forth
+          // when hovering near a row boundary.
+          const targetRect = targetItem.getBoundingClientRect();
+          const targetMid = targetRect.top + targetRect.height / 2;
+          const movingDown = targetIndex > this.touchDragCurrentIndex;
+          if (movingDown && touch.clientY < targetMid) return;
+          if (!movingDown && touch.clientY > targetMid) return;
+
           // Reorder data array live for immediate visual feedback
           const draggedSong = this.songs[this.touchDragCurrentIndex];
           this.songs.splice(this.touchDragCurrentIndex, 1);
           this.songs.splice(targetIndex, 0, draggedSong);
           this.touchDragCurrentIndex = targetIndex;
+
+          // Haptic feedback on each reorder step
+          if (navigator.vibrate) navigator.vibrate(15);
 
           // Lightweight re-render that keeps drag state intact
           this.renderForDrag(targetIndex);
@@ -858,7 +939,47 @@
             debugLog(`Moved song from position ${this.touchDragStartIndex + 1} to ${this.touchDragCurrentIndex + 1}`);
           }
 
-          this.render();
+          this.render(true); // don't scroll — user is looking at the drag target area
+        }
+
+        // Fires when the browser cancels the touch gesture (e.g. incoming call,
+        // system scroll takeover). Cleans up exactly like touchend but without
+        // saving the order — the drag was interrupted, treat it as a no-op.
+        handleTouchCancel(e) {
+          if (!this.touchDragActive) return;
+          this.touchDragActive = false;
+
+          if (this.touchClone) {
+            this.touchClone.remove();
+            this.touchClone = null;
+          }
+
+          document.querySelectorAll('.playlist-item.dragging').forEach(el => {
+            el.classList.remove('dragging');
+          });
+
+          // Revert the in-progress reorder back to the last saved state
+          this.render(true); // don't scroll — cancelled drag, leave list where it is
+          debugLog('Touch drag cancelled by browser');
+        }
+
+        // Scrolls #playlist-display only if the playing item isn't already
+        // fully visible. Uses getBoundingClientRect so the position is always
+        // relative to the visible viewport of the container, not a DOM ancestor.
+        scrollToCurrentSong() {
+          const container = document.getElementById('playlist-display');
+          const activeItem = container.querySelector('.current-playing');
+          if (!activeItem) return;
+
+          const cRect = container.getBoundingClientRect();
+          const iRect = activeItem.getBoundingClientRect();
+
+          // Already fully visible — don't touch the scroll position
+          if (iRect.top >= cRect.top && iRect.bottom <= cRect.bottom) return;
+
+          // Scroll the minimum needed so the item sits 16px from the top edge
+          const targetScrollTop = container.scrollTop + (iRect.top - cRect.top) - 16;
+          container.scrollTo({ top: Math.max(0, targetScrollTop), behavior: 'smooth' });
         }
 
         // Mid-drag re-render: rebuilds DOM order and data-index values while
@@ -877,7 +998,7 @@
                    data-index="${index}">
                 <span class="drag-handle">⋮⋮</span>
                 <span class="song-number">${index + 1}.</span>
-                <span class="song-name">${song.filename}</span>
+                <span class="song-name"><span class="song-text">${song.filename}</span></span>
                 <button class="play-song-btn"
                         onclick="playlistManager.playSong('${song.id}')"
                         ${player.isInRadioMode() ? 'disabled' : ''}>
