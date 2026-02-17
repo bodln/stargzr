@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -78,6 +79,9 @@ pub struct AppState {
 
     /// Per broadcaster listener count
     broadcaster_listeners: DashMap<String, HashSet<String>>,
+
+    /// Counts live WebSocket connections — incremented on connect, decremented on disconnect.
+    active_connections: AtomicUsize,
 }
 
 /// Helper type for cleaner function signatures
@@ -597,6 +601,7 @@ async fn handle_radio_connection(
     let heartbeat_limiter = Arc::new(RateLimiter::for_heartbeat());
     let broadcast_limiter = Arc::new(RateLimiter::for_broadcast());
 
+    state.active_connections.fetch_add(1, Relaxed);
     broadcast_analytics(&state);
 
     tracing::info!(
@@ -740,6 +745,9 @@ async fn handle_radio_connection(
 
     delete_broadcasting_session(&state, &validated_session_id);
 
+    if state.active_connections.load(Relaxed) > 0 {
+        state.active_connections.fetch_sub(1, Relaxed);
+    }
     broadcast_analytics(&state);
 
     tracing::info!(
@@ -1183,7 +1191,7 @@ fn broadcast_analytics(state: &SharedState) {
         .map(|entry| entry.value().len())
         .sum::<usize>();
 
-    let active_connections = state.sessions.len();
+    let active_connections = state.active_connections.load(Relaxed);
 
     let active_broadcasters = state.broadcast_channels.len();
 
@@ -1360,6 +1368,7 @@ async fn init_player_state(music_folder: PathBuf) -> SharedState {
         broadcast_channels: DashMap::new(), // tracks broadcaster channels
         broadcaster_listeners: DashMap::new(),
         global_broadcast_tx, // used to send Sync messages to listeners
+        active_connections: AtomicUsize::new(0),
     })
 }
 
