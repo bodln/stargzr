@@ -21,7 +21,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -76,11 +75,6 @@ pub struct AppState {
 
     /// Per broadcaster listener count
     broadcaster_listeners: RwLock<HashMap<String, HashSet<String>>>,
-
-    // Real-time analytics counters
-    active_connections: AtomicUsize,
-    active_broadcasters: AtomicUsize,
-    active_listeners: AtomicUsize,
 }
 
 /// Helper type for cleaner function signatures
@@ -611,13 +605,11 @@ async fn handle_radio_connection(
     let heartbeat_limiter = Arc::new(RateLimiter::for_heartbeat());
     let broadcast_limiter = Arc::new(RateLimiter::for_broadcast());
 
-    state.active_connections.fetch_add(1, Relaxed);
     broadcast_analytics(&state);
 
     tracing::info!(
-        "Client connected: {} (total: {})",
-        &validated_session_id,
-        state.active_connections.load(Relaxed)
+        "Client connected: {}",
+        &validated_session_id
     );
 
     // Send task
@@ -757,15 +749,12 @@ async fn handle_radio_connection(
 
     delete_broadcasting_session(&state, &validated_session_id);
 
-    if state.active_connections.load(Relaxed) > 0 {
-        state.active_connections.fetch_sub(1, Relaxed);
         broadcast_analytics(&state);
-    }
+    
 
     tracing::info!(
-        "Client disconnected: {} (total: {})",
+        "Client disconnected: {}",
         &validated_session_id,
-        state.active_connections.load(Relaxed)
     );
 }
 
@@ -866,7 +855,6 @@ async fn handle_client_message(
                     .await
                     .map_err(|_| PlayerError::WebSocketError("Failed to send sync".into()))?;
 
-                state.active_listeners.fetch_add(1, Relaxed);
                 broadcast_analytics(state);
             } else {
                 // No broadcaster found with this ID
@@ -903,10 +891,8 @@ async fn handle_client_message(
                 .send(None)
                 .map_err(|_| PlayerError::WebSocketError("Failed to tune out".into()))?;
 
-            if state.active_listeners.load(Relaxed) > 0 {
-                state.active_listeners.fetch_sub(1, Relaxed);
-                broadcast_analytics(state);
-            }
+
+            broadcast_analytics(state);
         }
 
         RadioMessage::BroadcastUpdate {
@@ -1041,10 +1027,6 @@ async fn handle_client_message(
                 }
             }
 
-            if state.active_broadcasters.load(Relaxed) > 0 {
-                state.active_broadcasters.fetch_sub(1, Relaxed);
-            }
-
             broadcast_analytics(state);
         }
 
@@ -1078,7 +1060,6 @@ async fn handle_client_message(
                     "New broadcaster {} starting (incrementing counter)",
                     broadcaster_id
                 );
-                state.active_broadcasters.fetch_add(1, Relaxed);
             }
 
             tracing::debug!(
@@ -1215,11 +1196,6 @@ fn delete_broadcasting_session(state: &SharedState, broadcaster_id: &str) {
             broadcasts.remove(broadcaster_id);
         }
 
-        if state.active_broadcasters.load(Relaxed) > 0 {
-            state.active_broadcasters.fetch_sub(1, Relaxed);
-            tracing::debug!("Decremented active_broadcasters for {}", broadcaster_id);
-        }
-
         let broadcaster_msg_id = broadcaster_id;
 
         let offline_msg = RadioMessage::BroadcasterOffline {
@@ -1263,26 +1239,42 @@ fn create_error_message(error: &PlayerError) -> RadioMessage {
 /// Broadcasts current analytics to all connected clients via the global channel.
 /// Call this whenever any counter changes to keep all clients synchronized.
 fn broadcast_analytics(state: &SharedState) {
-    // Collect all broadcaster states
+    // Compute active_listeners as the total number of strings across all
+    // per-broadcaster listener sets — single read lock, no atomic to drift
+    let active_listeners = {
+        let map = state.broadcaster_listeners.read();
+        map.values().map(|set| set.len()).sum::<usize>()
+    };
+
+    let active_connections = state.sessions.read().len();
+
+    let active_broadcasters = state.broadcast_channels.read().len();
+
+    // Collect broadcaster states, injecting fresh listener counts so the UI
+    // is always accurate regardless of whether TuneIn/TuneOut updated it
     let broadcasters: Vec<BroadcastState> = {
         let broadcasts = state.broadcast_states.read();
-        broadcasts.values().cloned().collect()
+        let listeners_map = state.broadcaster_listeners.read();
+        broadcasts.values().map(|b| {
+            let mut b = b.clone();
+            b.listener_count = listeners_map
+                .get(&b.broadcaster_id)
+                .map(|s| s.len())
+                .unwrap_or(0);
+            b
+        }).collect()
     };
 
     let analytics_msg = RadioMessage::Analytics {
-        active_connections: state.active_connections.load(Relaxed),
-        active_broadcasters: state.broadcast_channels.read().len(),
-        active_listeners: state.active_listeners.load(Relaxed),
+        active_connections,
+        active_broadcasters,
+        active_listeners,
         broadcasters,
     };
 
     match state.global_broadcast_tx.send(analytics_msg) {
-        Ok(count) => {
-            tracing::trace!("Analytics update sent to {} clients", count);
-        }
-        Err(_) => {
-            tracing::trace!("Analytics update sent but no clients connected");
-        }
+        Ok(count) => tracing::trace!("Analytics update sent to {} clients", count),
+        Err(_) => tracing::trace!("Analytics update sent but no clients connected"),
     }
 }
 
@@ -1360,9 +1352,6 @@ async fn cleanup_stale_sessions(state: Arc<AppState>) {
                     tracing::info!("Removed stale broadcaster state: {}", broadcaster_id);
                 }
             }
-
-            // Decrement the broadcaster count for analytics
-            state.active_broadcasters.fetch_sub(1, Relaxed);
 
             // Send offline notification to any remaining listeners
             // It's okay if there are no listeners - we handle that gracefully
@@ -1446,9 +1435,6 @@ async fn init_player_state(music_folder: PathBuf) -> SharedState {
         broadcast_channels: RwLock::new(HashMap::new()), // tracks broadcaster channels
         broadcaster_listeners: RwLock::new(HashMap::new()),
         global_broadcast_tx, // used to send Sync messages to listeners
-        active_connections: AtomicUsize::new(0),
-        active_broadcasters: AtomicUsize::new(0),
-        active_listeners: AtomicUsize::new(0),
     })
 }
 
