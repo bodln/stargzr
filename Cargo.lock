@@ -802,38 +802,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "network_tests"
-version = "0.1.0"
-dependencies = [
- "askama",
- "atomic-wait",
- "axum",
- "dashmap",
- "futures",
- "futures-util",
- "http-body-util",
- "hyper",
- "hyper-util",
- "local-ip-address",
- "metrics",
- "once_cell",
- "parking_lot",
- "pin-project",
- "rand",
- "regex",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
- "tower",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1197,6 +1165,38 @@ checksum = "233504af464074f9d066d7b5416c5f9b894a5862a6506e306f7b816cdd6f1807"
 dependencies = [
  "libc",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "stargzr"
+version = "0.1.0"
+dependencies = [
+ "askama",
+ "atomic-wait",
+ "axum",
+ "dashmap",
+ "futures",
+ "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "local-ip-address",
+ "metrics",
+ "once_cell",
+ "parking_lot",
+ "pin-project",
+ "rand",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

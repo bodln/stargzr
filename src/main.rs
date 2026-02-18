@@ -1,17 +1,15 @@
-use axum::middleware::Next;
 use hyper::server::conn::http1;
-use hyper::{Request};
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
 use local_ip_address;
-use network_tests::{player};
+use stargzr::{player};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tower::ServiceBuilder;
-use network_tests::middlewares::{Logger, RateLimit, SpawnRequest, echo};
+use stargzr::middlewares::{Logger, RateLimit, SpawnRequest, echo};
 
 type _BoxError = Box<dyn std::error::Error + Send + Sync>;
 
