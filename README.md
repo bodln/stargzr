@@ -48,11 +48,10 @@ src/
     error.rs        — PlayerError, PlayerResult
     validation.rs   — SessionId newtype, song index validation
     rate_limit.rs   — token bucket rate limiter
+    templates/
+      player.html         — full player page with radio UI and playlist
+      player_controls.html — HTMX partial for control updates
   main.rs
-templates/
-  player/
-    player.html         — full player page with radio UI and playlist
-    player_controls.html — HTMX partial for control updates
 music/                  — your MP3 files go here
 ```
 
@@ -87,7 +86,7 @@ Then open `http://localhost:8083/player` in your browser.
 
 1. Open the player and copy your **Session ID**
 2. Click **Start Broadcasting** — you are now live
-3. Share your Session ID with someone else
+3. Share your Session ID with someone else (all broadcaster IDs will be shown in a public list and people can tune in from there too)
 4. They paste it into the **Tune In** field and click **Tune In**
 5. Their playback syncs to yours — play, pause, and seek updates propagate in real time
 
