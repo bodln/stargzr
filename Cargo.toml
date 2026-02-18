@@ -1,5 +1,5 @@
 [package]
-name = "network_tests"
+name = "stargzr"
 version = "0.1.0"
 edition = "2024"
 
