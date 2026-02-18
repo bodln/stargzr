@@ -1,0 +1,3 @@
+# Templates are Askama HTML files (Rust server-side templating)
+# Marked as documentation so GitHub Linguist counts this as a Rust project
+templates/* linguist-documentation
