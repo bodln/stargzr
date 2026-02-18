@@ -4,7 +4,7 @@ use hyper::{Request};
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
 use local_ip_address;
-use network_tests::{axum_test, player};
+use network_tests::{player};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -49,9 +49,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     //  #   Hyper testing  #
     //  ####################
 
-    // Setting up the server (inside your tokio::spawn)
-    tokio::task::spawn(axum_test::initilaze());
-
     // Client
     tokio::task::spawn(async move {
         let uri_str = format!("http://{}:{}", help_ip, port);
@@ -83,6 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _stream = TcpStream::connect(address).await;
     });
 
+    // Server
     loop {
         tokio::select! {
             Ok((stream, address)) = listener.accept() => {
@@ -133,17 +131,4 @@ async fn shutdown_signal() {
     tokio::signal::ctrl_c()
         .await
         .expect("Failed to install CTRL+C signal handler");
-}
-
-async fn _add_ngrok_header(
-    mut req: Request<axum::body::Body>,
-    next: Next,
-) -> axum::response::Response {
-    req.headers_mut()
-        .insert("ngrok-skip-browser-warning", "true".parse().unwrap());
-
-    let mut res = next.run(req).await;
-    res.headers_mut()
-        .insert("ngrok-skip-browser-warning", "true".parse().unwrap());
-    res
 }

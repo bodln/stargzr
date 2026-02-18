@@ -1683,6 +1683,7 @@
               : playback_time;
 
             this.audio.currentTime = this.targetTime;
+            // this.audio.currentTime = is_playing ? playback_time : playback_time; // no adjustment for time
             if (is_playing && this.audio.paused) this.audio.play();
             if (!is_playing && !this.audio.paused) this.audio.pause();
           }
@@ -1898,7 +1899,7 @@
                 `→ Broadcasting: song ${msg.song_index}, time ${msg.playback_time.toFixed(2)}s`,
               );
               this.ws.send(JSON.stringify(msg));
-            }, 800); // 800ms collapses burst events into one
+            }, 0); // 800ms collapses burst events into one
           };
 
           // Store handlers for cleanup
@@ -1929,7 +1930,7 @@
           this.ws.send(JSON.stringify(initMsg));
 
           this.updateBroadcastingUI(true);
-          this.isStartingBroadcast = false;
+          this.isStartingBroadcast = false;this.audio.play();
         }
 
         stopBroadcasting() {

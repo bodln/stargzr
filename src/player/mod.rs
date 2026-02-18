@@ -124,3 +124,16 @@ pub async fn initialize(path_buf: PathBuf) {
     // Start serving requests using the Axum router
     axum::serve(listener, router).await.expect("Server failed");
 }
+
+async fn _add_ngrok_header(
+    mut req: hyper::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    req.headers_mut()
+        .insert("ngrok-skip-browser-warning", "true".parse().unwrap());
+
+    let mut res = next.run(req).await;
+    res.headers_mut()
+        .insert("ngrok-skip-browser-warning", "true".parse().unwrap());
+    res
+}
