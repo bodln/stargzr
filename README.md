@@ -104,7 +104,7 @@ To let people outside your local network tune in:
 4. Share your public IP or use a tunnel like [ngrok](https://ngrok.com)
 
 ---
-<img width="550" height="1120" alt="image" src="https://github.com/user-attachments/assets/7e024c6e-a9e5-464b-b490-2e0e4ac7c08a" />
+<img width="2509" height="2120" alt="image" src="https://github.com/user-attachments/assets/c51672fa-8d2f-4b0b-b126-3c3d3599e0d1" />
 
 ---
 
