@@ -114,16 +114,125 @@ Edit the path in `main.rs` to point to your music folder before running.
 Listeners receive an initial `Sync` on tune-in, then periodic `Heartbeat` messages for drift correction. If a broadcaster disconnects, all tuned listeners are notified automatically.
 
 ---
+## Sharing Your stargzr Server
 
-## Port Forwarding
+stargzr can be exposed outside your local network in three primary ways:
 
-To let people outside your local network tune in:
+- Direct port forwarding (public IP exposure)
+- Free subdomain + reverse proxy with HTTPS
+- Cloudflare Tunnel (no port forwarding)
 
-1. Forward port `8083` in your router to your machine's local IP
-2. Find your local IP with `ipconfig` (Windows) or `ip addr` (Linux)
-3. Set a static DHCP binding in your router using your MAC address so your IP doesn't change
-4. Share your public IP or use a tunnel like [ngrok](https://ngrok.com)
+---
 
+### 1. Direct Port Forwarding (Public IP Exposure)
+
+Forward port `8083` in your router to your machine’s local IP.
+
+Determine your local IP:
+
+- Windows:
+```
+
+ipconfig
+
+```
+
+- Linux:
+```
+
+ip addr
+
+```
+
+Configure a static DHCP lease in your router by binding your machine’s MAC address to its local IP to prevent IP changes.
+
+Your server becomes accessible at:
+
+```
+
+http://YOUR_PUBLIC_IP:8083
+
+```
+
+This method exposes your public IP address!!!
+
+
+
+
+### 2. Free Subdomain + HTTPS via Caddy (Stable Setup)
+
+Acquire a free subdomain from:
+
+```
+
+[https://freedns.afraid.org/subdomain/](https://freedns.afraid.org/subdomain/)
+
+```
+
+Example:
+
+```
+
+stargzr.jumpingcrab.com
+
+```
+
+Forward port `443` in your router to your machine.
+
+Create a Caddy configuration file named `Configfile`:
+
+```
+
+stargzr.jumpingcrab.com {
+reverse_proxy localhost:8083
+}
+
+```
+
+Run Caddy:
+
+```
+
+caddy run --config C:\caddy\Configfile
+
+```
+
+Caddy automatically provisions and renews HTTPS certificates.
+
+Your server becomes accessible at:
+
+```
+
+[https://stargzr.jumpingcrab.com](https://stargzr.jumpingcrab.com)
+
+```
+
+This method provides:
+
+- Stable domain
+- Automatic HTTPS
+- Public IP exposure via reverse proxy
+
+
+
+
+### 3. Cloudflare Tunnel (No Port Forwarding)
+
+Run:
+
+```
+
+cloudflared tunnel --url [http://localhost:8083](http://localhost:8083)
+
+```
+
+Cloudflare generates a public URL:
+
+```
+
+[https://random-name.trycloudflare.com](https://random-name.trycloudflare.com)
+
+```
 ---
 
 ## Docker Image
