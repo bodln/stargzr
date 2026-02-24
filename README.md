@@ -132,16 +132,12 @@ Determine your local IP:
 
 - Windows:
 ```
-
 ipconfig
-
 ```
 
 - Linux:
 ```
-
 ip addr
-
 ```
 
 Configure a static DHCP lease in your router by binding your machine’s MAC address to its local IP to prevent IP changes.
@@ -149,9 +145,7 @@ Configure a static DHCP lease in your router by binding your machine’s MAC add
 Your server becomes accessible at:
 
 ```
-
 http://YOUR_PUBLIC_IP:8083
-
 ```
 
 This method exposes your public IP address!!!
@@ -163,18 +157,12 @@ This method exposes your public IP address!!!
 
 Acquire a free subdomain from:
 
-```
-
 [https://freedns.afraid.org/subdomain/](https://freedns.afraid.org/subdomain/)
-
-```
 
 Example:
 
 ```
-
 stargzr.jumpingcrab.com
-
 ```
 
 Forward port `443` in your router to your machine.
@@ -182,30 +170,23 @@ Forward port `443` in your router to your machine.
 Create a Caddy configuration file named `Configfile`:
 
 ```
-
 stargzr.jumpingcrab.com {
-reverse_proxy localhost:8083
+  reverse_proxy localhost:8083
 }
-
 ```
 
 Run Caddy:
 
 ```
-
 caddy run --config C:\caddy\Configfile
-
 ```
 
 Caddy automatically provisions and renews HTTPS certificates.
 
 Your server becomes accessible at:
 
-```
-
 [https://stargzr.jumpingcrab.com](https://stargzr.jumpingcrab.com)
 
-```
 
 This method provides:
 
@@ -221,17 +202,13 @@ This method provides:
 Run:
 
 ```
-
-cloudflared tunnel --url [http://localhost:8083](http://localhost:8083)
-
+cloudflared tunnel --url http://localhost:8083
 ```
 
 Cloudflare generates a public URL:
 
 ```
-
-[https://random-name.trycloudflare.com](https://random-name.trycloudflare.com)
-
+https://random-name.trycloudflare.com
 ```
 ---
 
