@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  stargzr:
+    #build: .
+    image: omersadikovic/stargzr:latest
+    container_name: stargzr
+    ports:
+      - "8083:8083"
+    volumes:
+      # CHANGE THIS PATH to your music folder location
+      - ./music:/app/music:ro
+    environment:
+      - MUSIC_PATH=/app/music
+    restart: unless-stopped

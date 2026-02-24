@@ -1,7 +1,14 @@
 use stargzr::player;
 use std::path::PathBuf;
+use std::env;
 
 #[tokio::main]
 async fn main() {
-    player::initialize(PathBuf::from("D:/Skola/.projekti/stargzr/music")).await;
+    // Try to get music path from environment variable, otherwise use default
+    let music_path = env::var("MUSIC_PATH")
+        .unwrap_or_else(|_| "D:/Skola/.projekti/stargzr/music".to_string());
+    
+    println!("Starting stargzr with music path: {}", music_path);
+    
+    player::initialize(PathBuf::from(music_path)).await;
 }

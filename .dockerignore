@@ -1,0 +1,15 @@
+target/
+music/
+.git/
+.gitignore
+.gitattributes
+tests/
+README.md
+LICENSE
+.vscode/
+.idea/
+*.log
+.DS_Store
+Dockerfile
+docker-compose.yml
+.dockerignore
