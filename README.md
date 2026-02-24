@@ -61,24 +61,45 @@ music/                  — your MP3 files go here
 
 ### Prerequisites
 
-- Rust (stable)
+- Docker Desktop (for Docker usage) OR Rust (for native build)
 - A folder of MP3 files
 
-### Running
+### Running with Docker Compose
+
+Edit `docker-compose.yml` to point to your music folder, then:
 
 ```bash
-git clone https://github.com/yourusername/stargzr
+docker-compose up -d
+```
+
+Open `http://localhost:8083/player` in your browser.
+
+### Running with Docker (Manual Build)
+
+```bash
+# Build the image
+docker build -t omersadikovic/stargzr:latest .
+
+# Run the container (adjust the path to your music folder)
+docker run -d --name stargzr -p 8083:8083 -v "/path/to/your/music:/app/music:ro" omersadikovic/stargzr:latest
+```
+
+### Running from DockerHub (No Build Required)
+
+```bash
+docker pull omersadikovic/stargzr:latest
+docker run -d --name stargzr -p 8083:8083 -v "/path/to/your/music:/app/music:ro" omersadikovic/stargzr:latest
+```
+
+### Running Natively with Rust
+
+```bash
+git clone https://github.com/bodln/stargzr
 cd stargzr
 cargo run --release
 ```
 
-By default the server binds to `0.0.0.0:8083`. Edit the path in `main.rs` to point to your music folder:
-
-```rust
-player::initialize(PathBuf::from("/path/to/your/music")).await;
-```
-
-Then open `http://localhost:8083/player` in your browser.
+Edit the path in `main.rs` to point to your music folder before running.
 
 ---
 
@@ -104,6 +125,13 @@ To let people outside your local network tune in:
 4. Share your public IP or use a tunnel like [ngrok](https://ngrok.com)
 
 ---
+
+## Docker Image
+
+Available at `omersadikovic/stargzr:latest` on Docker Hub.
+
+---
+
 <img width="2509" height="2120" alt="image" src="https://github.com/user-attachments/assets/c51672fa-8d2f-4b0b-b126-3c3d3599e0d1" />
 
 ---
