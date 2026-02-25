@@ -71,10 +71,7 @@ async fn handle_radio_connection(
     state.active_connections.fetch_add(1, Relaxed);
     broadcast_analytics(&state);
 
-    tracing::info!(
-        "Client connected: {}",
-        &validated_session_id
-    );
+    tracing::info!("Client connected: {}", &validated_session_id);
 
     // Send task
     let state_clone = state.clone();
@@ -217,10 +214,7 @@ async fn handle_radio_connection(
     }
     broadcast_analytics(&state);
 
-    tracing::info!(
-        "Client disconnected: {}",
-        &validated_session_id,
-    );
+    tracing::info!("Client disconnected: {}", &validated_session_id,);
 }
 
 /// Serializes a `RadioMessage` and sends it to the client over the WebSocket.
@@ -268,13 +262,15 @@ async fn handle_client_message(
 
             tracing::info!("Client tuning into: {}", session_id);
 
-            state.broadcaster_listeners
+            state
+                .broadcaster_listeners
                 .entry(broadcaster_id.clone())
                 .or_insert_with(HashSet::new)
                 .insert(validated_session_id.to_string());
 
             if let Some(mut broadcast) = state.broadcast_states.get_mut(&broadcaster_id) {
-                let count = state.broadcaster_listeners
+                let count = state
+                    .broadcaster_listeners
                     .get(&broadcaster_id)
                     .map(|set| set.len())
                     .unwrap_or(0);
@@ -282,7 +278,10 @@ async fn handle_client_message(
             }
 
             // Retrieve current broadcast state if it exists
-            let maybe_state = state.broadcast_states.get(&broadcaster_id).map(|b| b.clone());
+            let maybe_state = state
+                .broadcast_states
+                .get(&broadcaster_id)
+                .map(|b| b.clone());
 
             if let Some(b_state) = maybe_state {
                 // Send a Sync message with the current state to the newly tuned client
@@ -398,7 +397,9 @@ async fn handle_client_message(
                 listener_count: listener_count,
             };
 
-            state.broadcast_states.insert(broadcaster_id.clone(), new_state);
+            state
+                .broadcast_states
+                .insert(broadcaster_id.clone(), new_state);
 
             // Forward the update to all subscribed clients via Sync message
             let sync_msg = RadioMessage::Sync {
@@ -526,14 +527,19 @@ async fn handle_client_message(
                 listener_count: 0,
             };
 
-            state.broadcast_states.insert(broadcaster_id.clone(), new_state);
+            state
+                .broadcast_states
+                .insert(broadcaster_id.clone(), new_state);
 
             // Create the channel if it doesn't exist
-            state.broadcast_channels.entry(broadcaster_id.clone()).or_insert_with(|| {
-                let (tx, _rx) = broadcast::channel::<RadioMessage>(100);
-                tracing::debug!("Created broadcast channel for session: {}", broadcaster_id);
-                tx
-            });
+            state
+                .broadcast_channels
+                .entry(broadcaster_id.clone())
+                .or_insert_with(|| {
+                    let (tx, _rx) = broadcast::channel::<RadioMessage>(100);
+                    tracing::debug!("Created broadcast channel for session: {}", broadcaster_id);
+                    tx
+                });
 
             // Send announcement through global channel, not the broadcaster's channel
             if !was_already_broadcasting {
@@ -653,7 +659,8 @@ fn create_error_message(error: &PlayerError) -> RadioMessage {
 pub fn broadcast_analytics(state: &SharedState) {
     // Compute active_listeners as the total number of strings across all
     // per-broadcaster listener sets — single read lock, no atomic to drift
-    let active_listeners = state.broadcaster_listeners
+    let active_listeners = state
+        .broadcaster_listeners
         .iter()
         .map(|entry| entry.value().len())
         .sum::<usize>();
@@ -664,14 +671,19 @@ pub fn broadcast_analytics(state: &SharedState) {
 
     // Collect broadcaster states, injecting fresh listener counts so the UI
     // is always accurate regardless of whether TuneIn/TuneOut updated it
-    let broadcasters: Vec<BroadcastState> = state.broadcast_states.iter().map(|entry| {
-        let mut b = entry.value().clone();
-        b.listener_count = state.broadcaster_listeners
-            .get(&b.broadcaster_id)
-            .map(|s| s.len())
-            .unwrap_or(0);
-        b
-    }).collect();
+    let broadcasters: Vec<BroadcastState> = state
+        .broadcast_states
+        .iter()
+        .map(|entry| {
+            let mut b = entry.value().clone();
+            b.listener_count = state
+                .broadcaster_listeners
+                .get(&b.broadcaster_id)
+                .map(|s| s.len())
+                .unwrap_or(0);
+            b
+        })
+        .collect();
 
     let analytics_msg = RadioMessage::Analytics {
         active_connections,
@@ -700,14 +712,14 @@ pub async fn cleanup_stale_sessions(state: Arc<AppState>) {
         // Cleanup Player Sessions
         // These are private playback sessions for users not in radio mode
         {
-            let before_count = state.sessions.len();
+            let mut removed = 0;
 
-            // Remove sessions older than 1 hour
             state.sessions.retain(|session_id, session| {
                 let age = now.duration_since(session.last_activity);
                 let should_keep = age.as_secs() < 3600;
 
                 if !should_keep {
+                    removed += 1;
                     tracing::info!(
                         "Cleaning up stale player session: {} (age: {}s)",
                         session_id,
@@ -718,7 +730,6 @@ pub async fn cleanup_stale_sessions(state: Arc<AppState>) {
                 should_keep
             });
 
-            let removed = before_count - state.sessions.len();
             if removed > 0 {
                 tracing::info!("Cleaned up {} stale player session(s)", removed);
             }
@@ -757,7 +768,10 @@ pub async fn cleanup_stale_sessions(state: Arc<AppState>) {
 
             // Send offline notification to any remaining listeners
             // It's okay if there are no listeners - we handle that gracefully
-            let maybe_tx = state.broadcast_channels.get(&broadcaster_id).map(|r| r.clone());
+            let maybe_tx = state
+                .broadcast_channels
+                .get(&broadcaster_id)
+                .map(|r| r.clone());
             if let Some(tx) = maybe_tx {
                 let offline_msg = RadioMessage::BroadcasterOffline {
                     broadcaster_id: broadcaster_id.clone(),

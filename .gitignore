@@ -7,3 +7,5 @@ Rust Atomics and Locks (Mara Bos) (Z-Library) open with aquile reader dont forge
 ~$st notes formated.docx
 music
 todo.txt
+.gitignore
+stress_test
