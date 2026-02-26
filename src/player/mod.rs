@@ -1,15 +1,17 @@
 mod handlers;
-mod radio;
 mod session;
 mod templates;
 mod types;
 mod logging;
 pub mod error;
+pub mod radio;
 pub mod validation;
 pub mod rate_limit;
 pub mod reconnect;
 
 pub use types::{AppState, BroadcastState, RadioMessage, SharedState, SongInfo};
+
+use crate::player::handlers::radio_websocket;
 
 use self::logging::init_logging;
 use axum::Router;
@@ -25,7 +27,7 @@ use handlers::{
     get_playlist, next_song, player_controls, player_page, prev_song, stream_audio_by_id,
     stream_audio_by_index,
 };
-use radio::{cleanup_stale_sessions, radio_websocket};
+use radio::{cleanup_stale_sessions};
 
 /// Initializes the shared player state by scanning the music folder,
 /// building a playlist, and setting up broadcast channels and session tracking.

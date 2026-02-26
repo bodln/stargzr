@@ -1,4 +1,4 @@
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::http::header;
@@ -6,6 +6,9 @@ use serde::Deserialize;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
+
+use crate::player::radio::handle_radio_connection;
+use crate::player::validation::SessionId;
 
 use super::session::{get_session_id, get_or_create_position, update_session_index, update_broadcast_index};
 use super::templates::{PlayerTemplate, PlayerControlsTemplate};
@@ -262,6 +265,37 @@ pub async fn stream_audio_internal(
         .header(header::CACHE_CONTROL, "public, max-age=31536000")
         .body(body)
         .unwrap())
+}
+
+// Upgrade with WebRTC? to have p2p
+
+/// WebSocket entrypoint for the radio synchronization system.
+/// No state is modified here; it exists purely as a thin Axum integration
+/// layer for the radio protocol.
+pub async fn radio_websocket(
+    ws: WebSocketUpgrade,
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let session_id_str = get_session_id(&headers);
+
+    // This is the session id first given to the user
+    // It is used so if someone tampers with their original session their calls are moot
+    let validated_session_id = match SessionId::new(session_id_str) {
+        Ok(id) => id,
+        Err(e) => {
+            // If the session ID is invalid, reject the WebSocket upgrade
+            tracing::warn!(
+                "Rejected WebSocket connection with invalid session ID: {}",
+                e
+            );
+            return (StatusCode::BAD_REQUEST, "Invalid session ID").into_response();
+        }
+    };
+
+    ws.on_upgrade(|socket| {
+        handle_radio_connection(socket, state, validated_session_id.into_inner())
+    })
 }
 
 /// Returns the full playlist with song IDs for client-side management

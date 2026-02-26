@@ -4,9 +4,6 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{State, WebSocketUpgrade};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{broadcast, mpsc};
 
@@ -14,42 +11,11 @@ use super::error::{PlayerError, PlayerResult};
 use super::rate_limit::RateLimiter;
 use super::validation::{SessionId, validate_song_index};
 
-use super::session::{get_session_id, now_ms};
+use super::session::{now_ms};
 use super::types::{AppState, BroadcastState, RadioMessage, SharedState};
 
-// Upgrade with WebRTC? to have p2p
-
-/// WebSocket entrypoint for the radio synchronization system.
-/// No state is modified here; it exists purely as a thin Axum integration
-/// layer for the radio protocol.
-pub async fn radio_websocket(
-    ws: WebSocketUpgrade,
-    State(state): State<SharedState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    let session_id_str = get_session_id(&headers);
-
-    // This is the session id first given to the user
-    // It is used so if someone tampers with their original session their calls are moot
-    let validated_session_id = match SessionId::new(session_id_str) {
-        Ok(id) => id,
-        Err(e) => {
-            // If the session ID is invalid, reject the WebSocket upgrade
-            tracing::warn!(
-                "Rejected WebSocket connection with invalid session ID: {}",
-                e
-            );
-            return (StatusCode::BAD_REQUEST, "Invalid session ID").into_response();
-        }
-    };
-
-    ws.on_upgrade(|socket| {
-        handle_radio_connection(socket, state, validated_session_id.into_inner())
-    })
-}
-
 /// Manages the full lifecycle of a radio WebSocket connection.
-async fn handle_radio_connection(
+pub async fn handle_radio_connection(
     socket: WebSocket,
     state: SharedState,
     validated_session_id: String,
