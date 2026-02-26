@@ -29,7 +29,7 @@ impl IntoResponse for PlayerTemplate {
                 .header(
                     header::SET_COOKIE,
                     format!(
-                        "player_session={}; Path=/player; HttpOnly; SameSite=Strict; Max-Age=3600",
+                        "player_session={}; Path=/stargzr/player; HttpOnly; SameSite=Strict; Max-Age=3600",
                         self.session_id
                     ),
                 )

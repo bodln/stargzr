@@ -76,8 +76,8 @@ async fn init_player_state(music_folder: PathBuf) -> SharedState {
 /// Returns a future because state initialization is async.
 pub fn create_player_router(state: Arc<AppState>) -> impl std::future::Future<Output = Router> {
     async move {
-        // Build the router with all routes
-        Router::new()
+        // Build the inner router with all your routes
+        let inner = Router::new()
             .route("/", get(player_page)) // Root page
             .route("/player", get(player_page)) // Player main page
             .route("/player/next", post(next_song)) // Next song action
@@ -87,7 +87,10 @@ pub fn create_player_router(state: Arc<AppState>) -> impl std::future::Future<Ou
             .route("/player/radio", get(radio_websocket)) // Radio WebSocket
             .route("/player/controls", get(player_controls)) // Return current controls/status
             .route("/player/playlist", get(get_playlist))
-            .with_state(state) // Attach shared state to all routes
+            .with_state(state.clone()); // Attach shared state
+
+        // Nest the inner router under "/stargzr" so all routes are prefixed
+        Router::new().nest("/stargzr", inner)
     }
 }
 

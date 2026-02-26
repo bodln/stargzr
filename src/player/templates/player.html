@@ -545,7 +545,7 @@
 
     <!-- Audio Player -->
     <audio id="audio-player" controls>
-      <source src="/player/stream/{{ current_index }}" type="audio/mpeg" />
+      <source src="/stargzr/player/stream/{{ current_index }}" type="audio/mpeg" />
       Your browser doesn't support audio playback.
     </audio>
 
@@ -606,7 +606,7 @@
         async loadPlaylist() {
           try {
             debugLog("Fetching playlist from server...");
-            const response = await fetch("/player/playlist");
+            const response = await fetch("/stargzr/player/playlist");
             const serverSongs = await response.json();
             // Store original server order before any custom reordering
             this.originalSongs = serverSongs;
@@ -1065,7 +1065,7 @@
           this.currentSongId = songId;
           const song = this.songs.find((s) => s.id === songId);
 
-          audio.src = `/player/stream/id/${songId}`;
+          audio.src = `/stargzr/player/stream/id/${songId}`;
           audio.load();
           audio.play();
 
@@ -1375,7 +1375,7 @@
 
           const protocol =
             window.location.protocol === "https:" ? "wss:" : "ws:";
-          const wsUrl = `${protocol}//${window.location.host}/player/radio`;
+          const wsUrl = `${protocol}//${window.location.host}/stargzr/player/radio`;
 
           debugLog(
             `Connecting to WebSocket: ${wsUrl} (attempt ${this.reconnectAttempts + 1})`,
@@ -1641,10 +1641,10 @@
               : null;
 
             if (songId) {
-              this.audio.src = `/player/stream/id/${songId}`;
+              this.audio.src = `/stargzr/player/stream/id/${songId}`;
             } else {
               // Fall back to numeric index if playlist manager isn't ready yet
-              this.audio.src = `/player/stream/${song_index}`;
+              this.audio.src = `/stargzr/player/stream/${song_index}`;
             }
             this.audio.load();
 
