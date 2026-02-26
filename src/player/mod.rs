@@ -27,7 +27,7 @@ use handlers::{
     get_playlist, next_song, player_controls, player_page, prev_song, stream_audio_by_id,
     stream_audio_by_index,
 };
-use radio::{cleanup_stale_sessions};
+use session::{cleanup_stale_sessions};
 
 /// Initializes the shared player state by scanning the music folder,
 /// building a playlist, and setting up broadcast channels and session tracking.

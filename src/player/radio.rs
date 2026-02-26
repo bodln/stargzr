@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
-use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
@@ -12,7 +11,7 @@ use super::rate_limit::RateLimiter;
 use super::validation::{SessionId, validate_song_index};
 
 use super::session::{now_ms};
-use super::types::{AppState, BroadcastState, RadioMessage, SharedState};
+use super::types::{BroadcastState, RadioMessage, SharedState};
 
 /// Manages the full lifecycle of a radio WebSocket connection.
 pub async fn handle_radio_connection(
@@ -661,111 +660,5 @@ pub fn broadcast_analytics(state: &SharedState) {
     match state.global_broadcast_tx.send(analytics_msg) {
         Ok(count) => tracing::trace!("Analytics update sent to {} clients", count),
         Err(_) => tracing::trace!("Analytics update sent but no clients connected"),
-    }
-}
-
-/// Periodically cleans up stale player sessions and broadcaster channels.
-pub async fn cleanup_stale_sessions(state: Arc<AppState>) {
-    let mut interval = tokio::time::interval(Duration::from_secs(60));
-
-    loop {
-        // Wait for the next tick (initially fires immediately, then every 60s)
-        interval.tick().await;
-
-        let now = std::time::Instant::now();
-        let now_ms = now_ms();
-
-        // Cleanup Player Sessions
-        // These are private playback sessions for users not in radio mode
-        {
-            let mut removed = 0;
-
-            state.sessions.retain(|session_id, session| {
-                let age = now.duration_since(session.last_activity);
-                let should_keep = age.as_secs() < 3600;
-
-                if !should_keep {
-                    removed += 1;
-                    tracing::info!(
-                        "Cleaning up stale player session: {} (age: {}s)",
-                        session_id,
-                        age.as_secs()
-                    );
-                }
-
-                should_keep
-            });
-
-            if removed > 0 {
-                tracing::info!("Cleaned up {} stale player session(s)", removed);
-            }
-        }
-
-        // Cleanup Broadcaster Sessions
-        // These are active radio broadcasts that should be recent
-        let mut stale_broadcasters = Vec::new();
-
-        {
-            // Find broadcasters that haven't updated in 30+ seconds
-            for entry in state.broadcast_states.iter() {
-                let age_ms = now_ms.saturating_sub(entry.value().server_timestamp_ms);
-                let age_secs = age_ms / 1000;
-
-                // 30 seconds is chosen because:
-                // - Heartbeats come every 2-3 seconds normally
-                // - 30 seconds allows for network hiccups and reconnects
-                // - But catches truly disconnected broadcasters quickly
-                if age_secs > 30 {
-                    tracing::info!(
-                        "Found stale broadcaster: {} (age: {}s)",
-                        entry.key(),
-                        age_secs
-                    );
-                    stale_broadcasters.push(entry.key().clone());
-                }
-            }
-        }
-
-        // Now remove the stale broadcasters and notify listeners
-        for broadcaster_id in stale_broadcasters {
-            if state.broadcast_states.remove(&broadcaster_id).is_some() {
-                tracing::info!("Removed stale broadcaster state: {}", broadcaster_id);
-            }
-
-            // Send offline notification to any remaining listeners
-            // It's okay if there are no listeners - we handle that gracefully
-            let maybe_tx = state
-                .broadcast_channels
-                .get(&broadcaster_id)
-                .map(|r| r.clone());
-            if let Some(tx) = maybe_tx {
-                let offline_msg = RadioMessage::BroadcasterOffline {
-                    broadcaster_id: broadcaster_id.clone(),
-                };
-
-                match tx.send(offline_msg) {
-                    Ok(listener_count) => {
-                        tracing::info!(
-                            "Notified {} listener(s) that broadcaster {} went offline",
-                            listener_count,
-                            broadcaster_id
-                        );
-                    }
-                    Err(_) => {
-                        tracing::debug!(
-                            "No listeners to notify for offline broadcaster: {}",
-                            broadcaster_id
-                        );
-                    }
-                }
-            }
-
-            // Remove the broadcast channel itself
-            if state.broadcast_channels.remove(&broadcaster_id).is_some() {
-                tracing::info!("Removed broadcast channel: {}", broadcaster_id);
-            }
-        }
-
-        broadcast_analytics(&state);
     }
 }
