@@ -13,6 +13,3 @@ async fn main() {
     player::initialize(PathBuf::from(music_path)).await;
 }
 // DOCUMENT ENTIRE WORK FLOW WITH CODE SNIPPETS
-
-// SET THE SONG REARRANGE TO AUTO SCROLL 
-// ONLY AFTER LEAVING PLAYLIST WINDOW BOUNDS ON MOBILE
