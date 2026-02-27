@@ -581,6 +581,21 @@
         debugLog("Session ID copied to clipboard");
       }
 
+      // Hidden audio element used to buffer the next song before it's needed.
+      // Swapping src into the main player from a pre-buffered element is instant
+      // because the browser has already fetched and decoded the first chunk.
+      const preloader = new Audio();
+      preloader.preload = 'auto';
+
+      function preloadSong(songId) {
+        if (!songId) return;
+        const url = `/stargzr/player/stream/id/${songId}`;
+        // Don't re-fetch if already loaded
+        if (preloader.src.endsWith(url)) return;
+        preloader.src = url;
+        debugLog(`Preloading: ${songId}`);
+      }
+
       // Playlist Management Class
       class PlaylistManager {
         constructor(sessionId) {
@@ -614,6 +629,9 @@
 
             // Display the playlist
             this.render();
+
+            // Preload the next song immediately after playlist is ready
+            this.preloadAdjacent();
           } catch (err) {
             debugLog(`Failed to load playlist: ${err.message}`);
           }
@@ -646,6 +664,14 @@
               debugLog(`Synced current song from audio src (index ${index}): ${song.filename}`);
             }
           }
+        }
+
+        // Preloads the song before and after the current one.
+        // Called after every song change so the next track is always warm in the browser cache.
+        preloadAdjacent() {
+          if (player.isInRadioMode()) return;
+          const next = this.getNextSong();
+          if (next) preloadSong(next.id);
         }
 
         loadCustomOrder() {
@@ -775,7 +801,7 @@
             });
           });
 
-          // Mobile: touch events only on the ⋮⋮ handle so the rest of the
+          // Mobile: touch events only on the handle so the rest of the
           // row remains scrollable on phones
           document.querySelectorAll('.drag-handle').forEach(handle => {
             handle.addEventListener('touchstart', this.handleTouchStart.bind(this), { passive: false });
@@ -787,7 +813,7 @@
           });
         }
 
-        // ── Desktop drag handlers ──────────────────────────────────────────
+        // -- Desktop drag handlers --
 
         handleDragStart(e) {
           this.draggedElement = e.currentTarget;
@@ -822,10 +848,10 @@
           this.draggedElement = null;
         }
 
-        // ── Mobile touch handlers ──────────────────────────────────────────
+        // -- Mobile touch handlers --
 
         handleTouchStart(e) {
-          // e.currentTarget is the ⋮⋮ handle — walk up to the row
+          // e.currentTarget is the handle — walk up to the row
           const row = e.currentTarget.closest('.playlist-item');
           if (!row) return;
 
@@ -1025,8 +1051,15 @@
 
           this.currentSongId = songId;
           const song = this.songs.find(s => s.id === songId);
-          
-          audio.src = `/stargzr/player/stream/id/${songId}`;
+
+          // If the preloader already buffered this song, hand it off directly
+          // instead of creating a new network request from scratch
+          if (preloader.src && preloader.src.includes(songId) && preloader.readyState >= 2) {
+            debugLog(`Using preloaded audio for: ${songId}`);
+            audio.src = preloader.src;
+          } else {
+            audio.src = `/stargzr/player/stream/id/${songId}`;
+          }
           audio.load();
           audio.play();
           
@@ -1039,6 +1072,9 @@
           
           this.render();
           debugLog(`Playing: ${song ? song.filename : songId}`);
+
+          // Preload the next song immediately after switching
+          this.preloadAdjacent();
         }
 
         getSongById(songId) {
@@ -1162,10 +1198,10 @@
           
           document.addEventListener(visibilityEvent, () => {
             if (document[visibilityProp]) {
-              debugLog("📱 Page hidden - broadcasting may be affected on mobile");
+              debugLog("Page hidden - broadcasting may be affected on mobile");
               this.onPageHidden();
             } else {
-              debugLog("👁️ Page visible again");
+              debugLog("Page visible again");
               this.onPageVisible();
             }
           });
@@ -1175,7 +1211,7 @@
           this.pageHiddenAt = Date.now();
           
           if (this.isBroadcasting) {
-            debugLog("📱 Page backgrounded - JavaScript will be throttled");
+            debugLog("Page backgrounded - JavaScript will be throttled");
             // DON'T speed up heartbeats - browser throttles anyway, it's pointless
             this.releaseWakeLock();
           }
@@ -1185,7 +1221,7 @@
           const hiddenDuration = this.pageHiddenAt ? (Date.now() - this.pageHiddenAt) / 1000 : 0;
           this.pageHiddenAt = null;
           
-          debugLog(`👁️ Page visible again (was hidden for ${hiddenDuration.toFixed(1)}s)`);
+          debugLog(`Page visible again (was hidden for ${hiddenDuration.toFixed(1)}s)`);
           
           // Reconnect if needed
           if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
@@ -1197,7 +1233,7 @@
             // If we were hidden for less than 40 seconds, just resume broadcasting
             // The server's timeout is 45s, so if we were hidden < 40s, we should still be valid
             if (hiddenDuration < 40) {
-              debugLog("✓ Resuming broadcast (short background duration)");
+              debugLog("Resuming broadcast (short background duration)");
               
               // Re-acquire wake lock
               this.requestWakeLock();
@@ -1208,7 +1244,7 @@
               }
             } else {
               // We were backgrounded for a long time, server probably cleaned us up
-              debugLog("⚠️ Long background duration - verifying broadcast state");
+              debugLog("Long background duration - verifying broadcast state");
               this.verifyBroadcastState();
             }
           }
@@ -1222,7 +1258,7 @@
           
           try {
             this.wakeLock = await navigator.wakeLock.request('screen');
-            debugLog("✓ Wake lock acquired - screen will stay on");
+            debugLog("Wake lock acquired - screen will stay on");
             
             this.wakeLock.addEventListener('release', () => {
               debugLog("Wake lock released");
@@ -1252,7 +1288,7 @@
             session_id: this.sessionId
           };
           
-          debugLog("→ Querying broadcast state from server");
+          debugLog("Querying broadcast state from server");
           this.ws.send(JSON.stringify(msg));
         }
 
@@ -1334,7 +1370,7 @@
           }
 
           const onOpen = () => {
-            debugLog("✓ WebSocket connected");
+            debugLog("WebSocket connected");
             this.reconnectAttempts = 0;
             this.updateConnectionState("connected");
 
@@ -1353,7 +1389,7 @@
           };
 
           const onMessage = (event) => {
-            debugLog(`← Received: ${event.data}`);
+            debugLog(`Received: ${event.data}`);
             try {
               const msg = JSON.parse(event.data);
               this.handleRadioMessage(msg);
@@ -1363,7 +1399,7 @@
           };
 
           const onError = (error) => {
-            debugLog(`✗ WebSocket error`);
+            debugLog(`WebSocket error`);
             this.updateConnectionState("error");
           };
 
@@ -1469,7 +1505,7 @@
             debugLog(`Server says broadcasting: ${msg.is_broadcasting}, client thinks: ${this.isBroadcasting}`);
             
             if (msg.is_broadcasting !== this.isBroadcasting) {
-              debugLog(`⚠️ State mismatch detected!`);
+              debugLog(`State mismatch detected!`);
               
               if (msg.is_broadcasting && !this.isBroadcasting) {
                 // Server thinks we're broadcasting but we're not - sync to server
@@ -1481,7 +1517,7 @@
               } else if (!msg.is_broadcasting && this.isBroadcasting) {
                 // Server says we're not broadcasting, but we think we are
                 // This likely happened due to tab backgrounding - just resume broadcasting
-                debugLog("🔄 Server lost our session - resuming broadcast automatically");
+                debugLog("Server lost our session - resuming broadcast automatically");
                 
                 const wasPlaying = !this.audio.paused;
                 const currentTime = this.audio.currentTime;
@@ -1495,7 +1531,7 @@
                   is_playing: wasPlaying,
                 };
                 
-                debugLog(`→ Resuming broadcast: song ${initMsg.song_index}, time ${initMsg.playback_time.toFixed(2)}s`);
+                debugLog(`Resuming broadcast: song ${initMsg.song_index}, time ${initMsg.playback_time.toFixed(2)}s`);
                 
                 if (this.ws && this.ws.readyState === WebSocket.OPEN) {
                   this.ws.send(JSON.stringify(initMsg));
@@ -1569,7 +1605,11 @@
               ? window.playlistManager.getSongIdByServerIndex(song_index)
               : null;
 
-            if (songId) {
+            // Use preloaded audio if it matches, otherwise fetch fresh
+            if (songId && preloader.src && preloader.src.includes(songId) && preloader.readyState >= 2) {
+              debugLog(`Using preloaded audio for song ${song_index}`);
+              this.audio.src = preloader.src;
+            } else if (songId) {
               this.audio.src = `/stargzr/player/stream/id/${songId}`;
             } else {
               // Fall back to numeric index if playlist manager isn't ready yet
@@ -1658,7 +1698,7 @@
               paused: this.audio.paused,
               songId: window.playlistManager?.currentSongId ?? null,
             };
-            debugLog(`📸 Saved pre-radio state: ${this.preRadioSnapshot.src} @ ${this.preRadioSnapshot.currentTime.toFixed(2)}s`);
+            debugLog(`Saved pre-radio state: ${this.preRadioSnapshot.src} @ ${this.preRadioSnapshot.currentTime.toFixed(2)}s`);
           }
 
           this.mode = "radio";
@@ -1669,7 +1709,7 @@
             broadcaster_id: broadcasterId,
           };
 
-          debugLog(`→ Sending TuneIn: ${JSON.stringify(msg)}`);
+          debugLog(`Sending TuneIn: ${JSON.stringify(msg)}`);
           this.ws.send(JSON.stringify(msg));
 
           audio.controls = false;
@@ -1707,7 +1747,7 @@
             this.preRadioSnapshot = null;
 
             if (snap.src) {
-              debugLog(`↩️ Restoring pre-radio state: ${snap.src} @ ${snap.currentTime.toFixed(2)}s`);
+              debugLog(`Restoring pre-radio state: ${snap.src} @ ${snap.currentTime.toFixed(2)}s`);
               this.audio.src = snap.src;
               this.audio.load();
 
@@ -1750,7 +1790,7 @@
           };
           
           debugLog(
-            `→ Heartbeat: song ${this.getCurrentSongIndex()}, time ${msg.playback_time.toFixed(2)}s`,
+            `Heartbeat: song ${this.getCurrentSongIndex()}, time ${msg.playback_time.toFixed(2)}s`,
           );
           this.ws.send(JSON.stringify(msg));
         }
@@ -1802,7 +1842,7 @@
               is_playing: !this.audio.paused,
             };
             debugLog(
-              `→ Broadcasting: song ${msg.song_index}, time ${msg.playback_time.toFixed(2)}s`,
+              `Broadcasting: song ${msg.song_index}, time ${msg.playback_time.toFixed(2)}s`,
             );
             this.ws.send(JSON.stringify(msg));
           };
@@ -1827,7 +1867,7 @@
             is_playing: !this.audio.paused,
           };
           debugLog(
-            `→ Starting broadcast: song ${initMsg.song_index}, time ${initMsg.playback_time.toFixed(2)}s`,
+            `Starting broadcast: song ${initMsg.song_index}, time ${initMsg.playback_time.toFixed(2)}s`,
           );
           this.ws.send(JSON.stringify(initMsg));
           
