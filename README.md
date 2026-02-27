@@ -72,7 +72,7 @@ Edit `docker-compose.yml` to point to your music folder, then:
 docker-compose up -d
 ```
 
-Open `http://localhost:8083/player` in your browser.
+Open `http://localhost:8083/stargzr` in your browser.
 
 ### Running with Docker (Manual Build)
 
@@ -145,7 +145,7 @@ Configure a static DHCP lease in your router by binding your machine’s MAC add
 Your server becomes accessible at:
 
 ```
-http://YOUR_PUBLIC_IP:8083
+http://YOUR_PUBLIC_IP:8083/stargzr
 ```
 
 This method exposes your public IP address!!!
@@ -185,7 +185,7 @@ Caddy automatically provisions and renews HTTPS certificates.
 
 Your server becomes accessible at:
 
-[https://stargzr.jumpingcrab.com](https://stargzr.jumpingcrab.com)
+[https://stargzr.jumpingcrab.com/stargzr](https://stargzr.jumpingcrab.com/stargzr)
 
 
 This method provides:
