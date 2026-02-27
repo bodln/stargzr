@@ -15,6 +15,9 @@ use super::validation::{SessionId, validate_song_index};
 use super::session::{now_ms};
 use super::types::{BroadcastState, RadioMessage, SharedState};
 
+// Analytics are expensive — don't send more often than this on high-frequency paths
+const ANALYTICS_THROTTLE_MS: u64 = 500;
+
 /// Manages the full lifecycle of a radio WebSocket connection.
 pub async fn handle_radio_connection(
     socket: WebSocket,
@@ -24,7 +27,7 @@ pub async fn handle_radio_connection(
     let (mut sender, mut receiver) = socket.split();
 
     // Private channel for responses from the receive task to the send task (same WebSocket)
-    // For when you receive soemthing and want to return it to yourself and only yourself
+    // For when you receive something and want to return it to yourself and only yourself
     let (out_tx, mut out_rx) = mpsc::channel::<RadioMessage>(32);
 
     // Channel used to communicate tuned broadcaster changes
@@ -51,9 +54,7 @@ pub async fn handle_radio_connection(
             tokio::select! {
                 // Global channel
                 Ok(msg) = global_broadcast_rx.recv() => {
-                    let should_forward = should_forward_message(&msg).await;
-
-                    if should_forward {
+                    if should_forward_message(&msg) {
                         if let Err(e) = send_message(&mut sender, &msg).await {
                             tracing::error!("Failed to forward broadcast: {}", e);
                             break;
@@ -97,7 +98,7 @@ pub async fn handle_radio_connection(
                     }
                 } => {
                     // This fires when current_tuned_broadcaster_rx is some and receives something
-                    if should_forward_message(&msg).await {
+                    if should_forward_message(&msg) {
                         if let Err(e) = send_message(&mut sender, &msg).await {
                             tracing::error!("Failed to forward broadcast: {}", e);
                             break;
@@ -201,7 +202,8 @@ async fn send_message(
 
 /// Validates that the message is a broadcastable type.
 /// All messages that arrive here have already been filtered by subscription.
-async fn should_forward_message(msg: &RadioMessage) -> bool {
+/// Not async — zero await points, async overhead on every message was pointless.
+fn should_forward_message(msg: &RadioMessage) -> bool {
     matches!(
         msg,
         RadioMessage::BroadcasterOnline { .. }
@@ -220,7 +222,7 @@ async fn handle_client_message(
     validated_session_id: &str,
     // communication between receive and send tasks
     out_tx: &mpsc::Sender<RadioMessage>,
-    // communication on wether the client changed who they are listening to
+    // communication on whether the client changed who they are listening to
     tuned_tx: &tokio::sync::watch::Sender<Option<String>>,
     heartbeat_limiter: &Arc<RateLimiter>,
     broadcast_limiter: &Arc<RateLimiter>,
@@ -232,11 +234,24 @@ async fn handle_client_message(
 
             tracing::info!("Client tuning into: {}", session_id);
 
+            // If already tuned to someone, remove from their listener set first
+            if let Some((_, old_broadcaster)) = state.session_tuned_to.remove(validated_session_id) {
+                if let Some(mut listeners) = state.broadcaster_listeners.get_mut(&old_broadcaster) {
+                    listeners.remove(validated_session_id);
+                }
+            }
+
             state
                 .broadcaster_listeners
                 .entry(broadcaster_id.clone())
                 .or_insert_with(HashSet::new)
                 .insert(validated_session_id.to_string());
+
+            // Track reverse mapping for O(1) TuneOut
+            state.session_tuned_to.insert(
+                validated_session_id.to_string(),
+                broadcaster_id.clone(),
+            );
 
             if let Some(mut broadcast) = state.broadcast_states.get_mut(&broadcaster_id) {
                 let count = state
@@ -278,7 +293,7 @@ async fn handle_client_message(
                     .await
                     .map_err(|_| PlayerError::WebSocketError("Failed to send sync".into()))?;
 
-                broadcast_analytics(state);
+                broadcast_analytics_throttled(state);
             } else {
                 // No broadcaster found with this ID
                 return Err(PlayerError::BroadcasterNotFound(broadcaster_id));
@@ -288,23 +303,15 @@ async fn handle_client_message(
         RadioMessage::TuneOut => {
             tracing::info!("Client tuned out");
 
-            // Remove from broadcaster's listener set and update count
-            let maybe_broadcaster_id = {
-                let mut found_broadcaster = None;
-
-                for mut entry in state.broadcaster_listeners.iter_mut() {
-                    if entry.value_mut().remove(validated_session_id) {
-                        found_broadcaster = Some((entry.key().clone(), entry.value().len()));
-                        break;
+            // O(1) reverse lookup instead of scanning every broadcaster's listener set
+            if let Some((_, broadcaster_id)) = state.session_tuned_to.remove(validated_session_id) {
+                if let Some(mut listeners) = state.broadcaster_listeners.get_mut(&broadcaster_id) {
+                    listeners.remove(validated_session_id);
+                    let count = listeners.len();
+                    drop(listeners);
+                    if let Some(mut broadcast) = state.broadcast_states.get_mut(&broadcaster_id) {
+                        broadcast.listener_count = count;
                     }
-                }
-                found_broadcaster
-            };
-
-            // Update the broadcast state with the new count
-            if let Some((broadcaster_id, count)) = maybe_broadcaster_id {
-                if let Some(mut broadcast) = state.broadcast_states.get_mut(&broadcaster_id) {
-                    broadcast.listener_count = count;
                 }
             }
 
@@ -312,7 +319,7 @@ async fn handle_client_message(
                 .send(None)
                 .map_err(|_| PlayerError::WebSocketError("Failed to tune out".into()))?;
 
-            broadcast_analytics(state);
+            broadcast_analytics_throttled(state);
         }
 
         RadioMessage::BroadcastUpdate {
@@ -392,7 +399,8 @@ async fn handle_client_message(
                 }
             }
 
-            broadcast_analytics(state);
+            // Throttled — BroadcastUpdate fires on every play/pause/seek
+            broadcast_analytics_throttled(state);
         }
 
         RadioMessage::Heartbeat {
@@ -416,6 +424,7 @@ async fn handle_client_message(
 
                 tracing::trace!("Heartbeat from {}: time={:.2}", session_id, playback_time);
             }
+            // No analytics here — heartbeats are the hottest path and change nothing visible
         }
 
         RadioMessage::StopBroadcasting { broadcaster_id } => {
@@ -623,7 +632,25 @@ fn create_error_message(error: &PlayerError) -> RadioMessage {
     }
 }
 
-// TODO this current analytics of sending broadcast state is too expensive
+/// Throttled analytics — skips the broadcast if one was sent within ANALYTICS_THROTTLE_MS.
+/// Use this on high-frequency paths (TuneIn, TuneOut, BroadcastUpdate).
+/// Discrete state-change events (connect, disconnect, start/stop) should call broadcast_analytics directly.
+pub fn broadcast_analytics_throttled(state: &SharedState) {
+    let now = now_ms() as u64;
+    let last = state.last_analytics_ms.load(Relaxed);
+
+    if now.saturating_sub(last) < ANALYTICS_THROTTLE_MS {
+        return;
+    }
+
+    // compare_exchange prevents a thundering herd of concurrent updates all firing at once
+    if state.last_analytics_ms
+        .compare_exchange(last, now, Relaxed, Relaxed)
+        .is_ok()
+    {
+        broadcast_analytics(state);
+    }
+}
 
 /// Broadcasts current analytics to all connected clients via the global channel.
 /// Call this whenever any counter changes to keep all clients synchronized.

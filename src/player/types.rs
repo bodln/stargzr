@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use tokio::sync::broadcast;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -56,8 +56,16 @@ pub struct AppState {
     /// Per broadcaster listener count
     pub broadcaster_listeners: DashMap<String, HashSet<String>>,
 
+    /// Reverse map: session_id -> broadcaster_id they are currently tuned to.
+    /// Makes TuneOut O(1) instead of scanning every broadcaster's listener set.
+    pub session_tuned_to: DashMap<String, String>,
+
     /// Counts live WebSocket connections — incremented on connect, decremented on disconnect.
     pub active_connections: AtomicUsize,
+
+    /// Timestamp (ms) of the last analytics broadcast.
+    /// Used to throttle analytics on high-frequency paths like BroadcastUpdate.
+    pub last_analytics_ms: AtomicU64,
 }
 
 /// Helper type for cleaner function signatures

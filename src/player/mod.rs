@@ -19,7 +19,7 @@ use axum::routing::{get, post};
 use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -67,8 +67,10 @@ async fn init_player_state(music_folder: PathBuf) -> SharedState {
         broadcast_states: DashMap::new(), // tracks broadcaster states
         broadcast_channels: DashMap::new(), // tracks broadcaster channels
         broadcaster_listeners: DashMap::new(),
+        session_tuned_to: DashMap::new(),
         global_broadcast_tx, // used to send Sync messages to listeners
         active_connections: AtomicUsize::new(0),
+        last_analytics_ms: AtomicU64::new(0),
     })
 }
 
