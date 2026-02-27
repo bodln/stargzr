@@ -144,6 +144,7 @@ pub async fn cleanup_stale_sessions(state: Arc<AppState>) {
         // Now remove the stale broadcasters and notify listeners
         for broadcaster_id in stale_broadcasters {
             if state.broadcast_states.remove(&broadcaster_id).is_some() {
+                state.broadcaster_listeners.remove(&broadcaster_id);
                 tracing::info!("Removed stale broadcaster state: {}", broadcaster_id);
             }
 

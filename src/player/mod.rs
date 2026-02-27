@@ -109,7 +109,7 @@ pub async fn initialize(path_buf: PathBuf) {
     let addr = listener.local_addr().unwrap();
 
     tracing::info!(
-        "✓ MP3 Player listening on http://{} -> https://evolved-gladly-possum.ngrok-free.app/player",
+        "✓ MP3 Player listening on http://{}/stargzr",
         addr
     );
 

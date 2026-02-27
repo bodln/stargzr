@@ -177,6 +177,7 @@ pub async fn handle_radio_connection(
     if state.active_connections.load(Relaxed) > 0 {
         state.active_connections.fetch_sub(1, Relaxed);
     }
+
     broadcast_analytics(&state);
 
     tracing::info!("Client disconnected: {}", &validated_session_id,);
@@ -584,6 +585,7 @@ pub fn delete_broadcasting_session(state: &SharedState, broadcaster_id: &str) {
     );
 
     state.broadcast_states.remove(broadcaster_id);
+    state.broadcaster_listeners.remove(broadcaster_id);
 
     let offline_msg = RadioMessage::BroadcasterOffline {
         broadcaster_id: broadcaster_id.to_string(),
