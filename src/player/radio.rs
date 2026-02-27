@@ -6,6 +6,8 @@ use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{broadcast, mpsc};
 
+use crate::player::session::remove_session_from_all_listeners;
+
 use super::error::{PlayerError, PlayerResult};
 use super::rate_limit::RateLimiter;
 use super::validation::{SessionId, validate_song_index};
@@ -171,6 +173,8 @@ pub async fn handle_radio_connection(
             send_task.abort();
         }
     }
+
+    remove_session_from_all_listeners(&state, &validated_session_id);
 
     delete_broadcasting_session(&state, &validated_session_id);
 

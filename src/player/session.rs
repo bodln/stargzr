@@ -185,3 +185,23 @@ pub async fn cleanup_stale_sessions(state: Arc<AppState>) {
         broadcast_analytics(&state);
     }
 }
+
+/// Removes a session from all broadcaster listener sets.
+/// This handles abrupt disconnects where TuneOut was never sent.
+pub fn remove_session_from_all_listeners(state: &Arc<AppState>, session_id: &str) {
+    let mut affected_broadcasters = Vec::new();
+
+    // Remove session from every listener set
+    for mut entry in state.broadcaster_listeners.iter_mut() {
+        if entry.value_mut().remove(session_id) {
+            affected_broadcasters.push((entry.key().clone(), entry.value().len()));
+        }
+    }
+
+    // Update cached listener_count if you keep it
+    for (broadcaster_id, new_count) in affected_broadcasters {
+        if let Some(mut broadcast) = state.broadcast_states.get_mut(&broadcaster_id) {
+            broadcast.listener_count = new_count;
+        }
+    }
+}
