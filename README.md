@@ -42,12 +42,13 @@ src/
     mod.rs          — server init, router, playlist scanning
     types.rs        — AppState, RadioMessage, SongInfo, BroadcastState
     handlers.rs     — HTTP route handlers (page, next, prev, stream, playlist)
-    radio.rs        — WebSocket lifecycle, radio protocol, analytics, cleanup
-    session.rs      — session helpers, timestamp utils
+    radio.rs        — WebSocket lifecycle, radio protocol, analytics
+    session.rs      — session helpers, timestamp utils, stale session cleanup
     templates.rs    — Askama template structs and IntoResponse impls
     error.rs        — PlayerError, PlayerResult
     validation.rs   — SessionId newtype, song index validation
     rate_limit.rs   — token bucket rate limiter
+    reconnect.rs    — reconnection logic
     templates/
       player.html         — full player page with radio UI and playlist
       player_controls.html — HTMX partial for control updates
@@ -126,7 +127,7 @@ stargzr can be exposed outside your local network in three primary ways:
 
 ### 1. Direct Port Forwarding (Public IP Exposure)
 
-Forward port `8083` in your router to your machine’s local IP.
+Forward port `8083` in your router to your machine's local IP.
 
 Determine your local IP:
 
@@ -140,7 +141,7 @@ ipconfig
 ip addr
 ```
 
-Configure a static DHCP lease in your router by binding your machine’s MAC address to its local IP to prevent IP changes.
+Configure a static DHCP lease in your router by binding your machine's MAC address to its local IP to prevent IP changes.
 
 Your server becomes accessible at:
 
@@ -167,7 +168,7 @@ stargzr.jumpingcrab.com
 
 Forward port `443` in your router to your machine.
 
-Create a Caddy configuration file named `Configfile`:
+Create a Caddy configuration file named `Caddyfile`:
 
 ```
 stargzr.jumpingcrab.com {
@@ -175,10 +176,16 @@ stargzr.jumpingcrab.com {
 }
 ```
 
-Run Caddy:
+Run Caddy (if the file is named `Caddyfile`, no `--config` flag is needed):
 
 ```
-caddy run --config C:\caddy\Configfile
+caddy run
+```
+
+Or with an explicit path:
+
+```
+caddy run --config C:\caddy\Caddyfile
 ```
 
 Caddy automatically provisions and renews HTTPS certificates.
