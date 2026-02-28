@@ -155,11 +155,11 @@ pub async fn cleanup_stale_sessions(state: Arc<AppState>) {
                 .get(&broadcaster_id)
                 .map(|r| r.clone());
             if let Some(tx) = maybe_tx {
-                let offline_msg = RadioMessage::BroadcasterOffline {
+                let offline_msg = Arc::new(RadioMessage::BroadcasterOffline {
                     broadcaster_id: broadcaster_id.clone(),
-                };
+                });
 
-                match tx.send(offline_msg) {
+                match tx.send(offline_msg.clone()) {
                     Ok(listener_count) => {
                         tracing::info!(
                             "Notified {} listener(s) that broadcaster {} went offline",

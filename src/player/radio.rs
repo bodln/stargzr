@@ -47,7 +47,7 @@ pub async fn handle_radio_connection(
     let state_clone = state.clone();
 
     let mut send_task = tokio::spawn(async move {
-        let mut current_tuned_broadcaster_rx: Option<broadcast::Receiver<RadioMessage>> = None;
+        let mut current_tuned_broadcaster_rx: Option<broadcast::Receiver<Arc<RadioMessage>>> = None;
 
         loop {
             // Polls all channels simultaneously
@@ -379,13 +379,13 @@ async fn handle_client_message(
                 .insert(broadcaster_id.clone(), new_state);
 
             // Forward the update to all subscribed clients via Sync message
-            let sync_msg = RadioMessage::Sync {
+            let sync_msg = Arc::new(RadioMessage::Sync {
                 broadcaster_id: broadcaster_id.clone(),
                 song_index,
                 playback_time,
                 is_playing,
                 server_timestamp_ms: server_ts,
-            };
+            });
 
             // A return value of Err does not mean that future calls to send will fail
             if let Some(tx) = state.broadcast_channels.get(&broadcaster_id) {
@@ -424,7 +424,6 @@ async fn handle_client_message(
 
                 tracing::trace!("Heartbeat from {}: time={:.2}", session_id, playback_time);
             }
-            // No analytics here — heartbeats are the hottest path and change nothing visible
         }
 
         RadioMessage::StopBroadcasting { broadcaster_id } => {
@@ -434,9 +433,9 @@ async fn handle_client_message(
             state.broadcast_states.remove(&broadcaster_id);
             state.broadcast_channels.remove(&broadcaster_id);
 
-            let offline_msg = RadioMessage::BroadcasterOffline {
+            let offline_msg = Arc::new(RadioMessage::BroadcasterOffline {
                 broadcaster_id: broadcaster_id.clone(),
-            };
+            });
 
             // A return value of Err does not mean that future calls to send will fail
             match state.global_broadcast_tx.send(offline_msg) {
@@ -515,16 +514,16 @@ async fn handle_client_message(
                 .broadcast_channels
                 .entry(broadcaster_id.clone())
                 .or_insert_with(|| {
-                    let (tx, _rx) = broadcast::channel::<RadioMessage>(100);
+                    let (tx, _rx) = broadcast::channel::<Arc<RadioMessage>>(100);
                     tracing::debug!("Created broadcast channel for session: {}", broadcaster_id);
                     tx
                 });
 
             // Send announcement through global channel, not the broadcaster's channel
             if !was_already_broadcasting {
-                let broadcasting_msg = RadioMessage::BroadcasterOnline {
+                let broadcasting_msg = Arc::new(RadioMessage::BroadcasterOnline {
                     broadcaster_id: broadcaster_id.clone(),
-                };
+                });
 
                 state
                     .global_broadcast_tx
@@ -600,9 +599,9 @@ pub fn delete_broadcasting_session(state: &SharedState, broadcaster_id: &str) {
     state.broadcast_states.remove(broadcaster_id);
     state.broadcaster_listeners.remove(broadcaster_id);
 
-    let offline_msg = RadioMessage::BroadcasterOffline {
+    let offline_msg = Arc::new(RadioMessage::BroadcasterOffline {
         broadcaster_id: broadcaster_id.to_string(),
-    };
+    });
 
     match state.global_broadcast_tx.send(offline_msg) {
         Ok(listener_count) => {
@@ -683,12 +682,12 @@ pub fn broadcast_analytics(state: &SharedState) {
         })
         .collect();
 
-    let analytics_msg = RadioMessage::Analytics {
+    let analytics_msg = Arc::new(RadioMessage::Analytics {
         active_connections,
         active_broadcasters,
         active_listeners,
         broadcasters,
-    };
+    });
 
     match state.global_broadcast_tx.send(analytics_msg) {
         Ok(count) => tracing::trace!("Analytics update sent to {} clients", count),

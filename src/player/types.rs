@@ -47,11 +47,13 @@ pub struct AppState {
     /// Global broadcast channel for system-wide announcements.
     /// Used for BroadcasterOnline/Offline messages that all clients should see,
     /// regardless of which broadcaster they're tuned to.
-    pub global_broadcast_tx: broadcast::Sender<RadioMessage>,
+    /// The message is wrapped in an Arc to avoid sending the fat message but just a pointer
+    pub global_broadcast_tx: broadcast::Sender<Arc<RadioMessage>>,
 
     /// Per-broadcaster channels for targeted playback sync.
     /// Each broadcaster has their own channel that only their listeners subscribe to.
-    pub broadcast_channels: DashMap<String, broadcast::Sender<RadioMessage>>,
+    /// The message is wrapped in an Arc to avoid sending the fat message but just a pointer
+    pub broadcast_channels: DashMap<String, broadcast::Sender<Arc<RadioMessage>>>,
 
     /// Per broadcaster listener count
     pub broadcaster_listeners: DashMap<String, HashSet<String>>,
