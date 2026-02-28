@@ -13,7 +13,7 @@ use super::rate_limit::RateLimiter;
 use super::validation::{SessionId, validate_song_index};
 
 use super::session::{now_ms};
-use super::types::{BroadcastState, RadioMessage, SharedState};
+use super::types::{BroadcastState, PreparedMessage, RadioMessage, SharedState};
 
 // Analytics are expensive — don't send more often than this on high-frequency paths
 const ANALYTICS_THROTTLE_MS: u64 = 500;
@@ -47,18 +47,42 @@ pub async fn handle_radio_connection(
     let state_clone = state.clone();
 
     let mut send_task = tokio::spawn(async move {
-        let mut current_tuned_broadcaster_rx: Option<broadcast::Receiver<Arc<RadioMessage>>> = None;
+        let mut current_tuned_broadcaster_rx: Option<broadcast::Receiver<Arc<PreparedMessage>>> = None;
 
         loop {
-            // Polls all channels simultaneously
+            // biased: skips random branch selection — tuned broadcaster is the hottest path
+            // and gets priority when multiple branches are ready simultaneously
             tokio::select! {
+                biased;
+
+                // Broadcast messages from the tuned broadcaster — hottest path, checked first
+                Ok(msg) = async {
+                    match &mut current_tuned_broadcaster_rx {
+                        Some(rx) => rx.recv().await,
+                        // If current_tuned_broadcaster_rx is None, return a pending future
+                        // so this branch never becomes ready and never wins select!
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Err(e) = send_prepared(&mut sender, &msg).await {
+                        tracing::error!("Failed to forward broadcast: {}", e);
+                        break;
+                    }
+                }
+
                 // Global channel
                 Ok(msg) = global_broadcast_rx.recv() => {
-                    if should_forward_message(&msg) {
-                        if let Err(e) = send_message(&mut sender, &msg).await {
-                            tracing::error!("Failed to forward broadcast: {}", e);
-                            break;
-                        }
+                    if let Err(e) = send_prepared(&mut sender, &msg).await {
+                        tracing::error!("Failed to forward broadcast: {}", e);
+                        break;
+                    }
+                }
+
+                // Messages from the receive task
+                Some(msg) = out_rx.recv() => {
+                    if let Err(e) = send_message(&mut sender, &msg).await {
+                        tracing::error!("Failed to send message: {}", e);
+                        break;
                     }
                 }
 
@@ -76,32 +100,6 @@ pub async fn handle_radio_connection(
                         None => {
                             current_tuned_broadcaster_rx = None;
                             tracing::debug!("Tuned out");
-                        }
-                    }
-                }
-
-                // Messages from the receive task
-                Some(msg) = out_rx.recv() => {
-                    if let Err(e) = send_message(&mut sender, &msg).await {
-                        tracing::error!("Failed to send message: {}", e);
-                        break;
-                    }
-                }
-
-                // Broadcast messages from other connections to the appropriate channel
-                Ok(msg) = async {
-                    match &mut current_tuned_broadcaster_rx {
-                        Some(rx) => rx.recv().await,
-                        // If current_tuned_broadcaster_rx is None, return a pending future
-                        // so this branch never becomes ready and never wins select!
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    // This fires when current_tuned_broadcaster_rx is some and receives something
-                    if should_forward_message(&msg) {
-                        if let Err(e) = send_message(&mut sender, &msg).await {
-                            tracing::error!("Failed to forward broadcast: {}", e);
-                            break;
                         }
                     }
                 }
@@ -189,6 +187,7 @@ pub async fn handle_radio_connection(
 }
 
 /// Serializes a `RadioMessage` and sends it to the client over the WebSocket.
+/// Used for self-directed messages (out_rx path) that are never shared across listeners.
 async fn send_message(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     msg: &RadioMessage,
@@ -200,19 +199,16 @@ async fn send_message(
         .map_err(|e| PlayerError::WebSocketError(e.to_string()))
 }
 
-/// Validates that the message is a broadcastable type.
-/// All messages that arrive here have already been filtered by subscription.
-/// Not async — zero await points, async overhead on every message was pointless.
-fn should_forward_message(msg: &RadioMessage) -> bool {
-    matches!(
-        msg,
-        RadioMessage::BroadcasterOnline { .. }
-            | RadioMessage::BroadcasterOffline { .. }
-            | RadioMessage::Sync { .. }
-            | RadioMessage::Heartbeat { .. }
-            | RadioMessage::Analytics { .. }
-            | RadioMessage::BroadcastStateResponse { .. }
-    )
+/// Sends a pre-serialized message to the client.
+/// Used for broadcast paths where the same message is shared across many listeners.
+async fn send_prepared(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    prepared: &PreparedMessage,
+) -> PlayerResult<()> {
+    sender
+        .send(Message::Text(prepared.json.clone().into()))
+        .await
+        .map_err(|e| PlayerError::WebSocketError(e.to_string()))
 }
 
 /// Handles an incoming `RadioMessage` from a client WebSocket.
@@ -378,14 +374,14 @@ async fn handle_client_message(
                 .broadcast_states
                 .insert(broadcaster_id.clone(), new_state);
 
-            // Forward the update to all subscribed clients via Sync message
-            let sync_msg = Arc::new(RadioMessage::Sync {
+            // Serialize once here — all N listeners share the same Arc<PreparedMessage>
+            let sync_msg = Arc::new(PreparedMessage::new(&RadioMessage::Sync {
                 broadcaster_id: broadcaster_id.clone(),
                 song_index,
                 playback_time,
                 is_playing,
                 server_timestamp_ms: server_ts,
-            });
+            }));
 
             // A return value of Err does not mean that future calls to send will fail
             if let Some(tx) = state.broadcast_channels.get(&broadcaster_id) {
@@ -433,9 +429,9 @@ async fn handle_client_message(
             state.broadcast_states.remove(&broadcaster_id);
             state.broadcast_channels.remove(&broadcaster_id);
 
-            let offline_msg = Arc::new(RadioMessage::BroadcasterOffline {
+            let offline_msg = Arc::new(PreparedMessage::new(&RadioMessage::BroadcasterOffline {
                 broadcaster_id: broadcaster_id.clone(),
-            });
+            }));
 
             // A return value of Err does not mean that future calls to send will fail
             match state.global_broadcast_tx.send(offline_msg) {
@@ -514,16 +510,16 @@ async fn handle_client_message(
                 .broadcast_channels
                 .entry(broadcaster_id.clone())
                 .or_insert_with(|| {
-                    let (tx, _rx) = broadcast::channel::<Arc<RadioMessage>>(100);
+                    let (tx, _rx) = broadcast::channel::<Arc<PreparedMessage>>(100);
                     tracing::debug!("Created broadcast channel for session: {}", broadcaster_id);
                     tx
                 });
 
             // Send announcement through global channel, not the broadcaster's channel
             if !was_already_broadcasting {
-                let broadcasting_msg = Arc::new(RadioMessage::BroadcasterOnline {
+                let broadcasting_msg = Arc::new(PreparedMessage::new(&RadioMessage::BroadcasterOnline {
                     broadcaster_id: broadcaster_id.clone(),
-                });
+                }));
 
                 state
                     .global_broadcast_tx
@@ -599,9 +595,9 @@ pub fn delete_broadcasting_session(state: &SharedState, broadcaster_id: &str) {
     state.broadcast_states.remove(broadcaster_id);
     state.broadcaster_listeners.remove(broadcaster_id);
 
-    let offline_msg = Arc::new(RadioMessage::BroadcasterOffline {
+    let offline_msg = Arc::new(PreparedMessage::new(&RadioMessage::BroadcasterOffline {
         broadcaster_id: broadcaster_id.to_string(),
-    });
+    }));
 
     match state.global_broadcast_tx.send(offline_msg) {
         Ok(listener_count) => {
@@ -654,6 +650,11 @@ pub fn broadcast_analytics_throttled(state: &SharedState) {
 /// Broadcasts current analytics to all connected clients via the global channel.
 /// Call this whenever any counter changes to keep all clients synchronized.
 pub fn broadcast_analytics(state: &SharedState) {
+    // Skip the entire scan and allocation when no one is connected
+    if state.active_connections.load(Relaxed) == 0 {
+        return;
+    }
+
     // Compute active_listeners as the total number of strings across all
     // per-broadcaster listener sets — single read lock, no atomic to drift
     let active_listeners = state
@@ -682,12 +683,12 @@ pub fn broadcast_analytics(state: &SharedState) {
         })
         .collect();
 
-    let analytics_msg = Arc::new(RadioMessage::Analytics {
+    let analytics_msg = Arc::new(PreparedMessage::new(&RadioMessage::Analytics {
         active_connections,
         active_broadcasters,
         active_listeners,
         broadcasters,
-    });
+    }));
 
     match state.global_broadcast_tx.send(analytics_msg) {
         Ok(count) => tracing::trace!("Analytics update sent to {} clients", count),

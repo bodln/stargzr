@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::player::{RadioMessage, radio::broadcast_analytics};
 
-use super::types::{AppState, PlayerSession};
+use super::types::{AppState, PlayerSession, PreparedMessage};
 
 /// Extracts the session id from the request header
 pub fn get_session_id(headers: &HeaderMap) -> String {
@@ -155,11 +155,11 @@ pub async fn cleanup_stale_sessions(state: Arc<AppState>) {
                 .get(&broadcaster_id)
                 .map(|r| r.clone());
             if let Some(tx) = maybe_tx {
-                let offline_msg = Arc::new(RadioMessage::BroadcasterOffline {
+                let offline_msg = Arc::new(PreparedMessage::new(&RadioMessage::BroadcasterOffline {
                     broadcaster_id: broadcaster_id.clone(),
-                });
+                }));
 
-                match tx.send(offline_msg.clone()) {
+                match tx.send(offline_msg) {
                     Ok(listener_count) => {
                         tracing::info!(
                             "Notified {} listener(s) that broadcaster {} went offline",
