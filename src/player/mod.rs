@@ -96,6 +96,38 @@ pub fn create_player_router(state: Arc<AppState>) -> impl std::future::Future<Ou
     }
 }
 
+/// Thin wrapper around TcpListener that sets TCP_NODELAY on every accepted socket.
+/// Disables Nagle's algorithm, a TCP/IP congestion control mechanism that improves network efficiency by combining multiple small, 
+/// outgoing data packets into fewer, larger packets before transmission. 
+/// Small WebSocket frames are sent immediately
+/// instead of being held in the kernel buffer waiting to be batched.
+struct NodeDelayListener(tokio::net::TcpListener);
+
+impl axum::serve::Listener for NodeDelayListener {
+    type Io = tokio::net::TcpStream;
+    type Addr = std::net::SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            match self.0.accept().await {
+                Ok((stream, addr)) => {
+                    if let Err(e) = stream.set_nodelay(true) {
+                        tracing::warn!("Failed to set TCP_NODELAY: {}", e);
+                    }
+                    return (stream, addr);
+                }
+                Err(e) => {
+                    tracing::error!("Accept error: {}", e);
+                }
+            }
+        }
+    }
+
+    fn local_addr(&self) -> tokio::io::Result<Self::Addr> {
+        self.0.local_addr()
+    }
+}
+
 /// Starts the MP3 player server, binds to a TCP port, and runs Axum
 pub async fn initialize(path_buf: PathBuf) {
     // Set up tracing/logging
@@ -128,8 +160,10 @@ pub async fn initialize(path_buf: PathBuf) {
     // Set up signal handler for Ctrl+C and shutdown_rx channel
     // Use: axum::serve(listener, router).with_graceful_shutdown(async { shutdown_rx.await.ok(); })
 
-    // Start serving requests using the Axum router
-    axum::serve(listener, router).await.expect("Server failed");
+    // Start serving requests — NodeDelayListener sets TCP_NODELAY on every accepted socket
+    axum::serve(NodeDelayListener(listener), router)
+        .await
+        .expect("Server failed");
 }
 
 async fn _add_ngrok_header(
