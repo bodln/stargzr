@@ -32,6 +32,21 @@ pub struct BroadcastState {
     pub listener_count: usize,
 }
 
+/// A message that has been serialized once at the broadcast site.
+/// Shared via Arc so every listener pays only a pointer clone, not a re-serialization.
+pub struct PreparedMessage {
+    pub json: String,
+}
+
+impl PreparedMessage {
+    pub fn new(msg: &RadioMessage) -> Self {
+        Self {
+            json: serde_json::to_string(msg)
+                .expect("RadioMessage serialization is infallible"),
+        }
+    }
+}
+
 // DashMap shards the map across multiple independent RwLocks (one per shard, ~4× cpu count),
 // so concurrent operations on different keys never block each other — unlike a single
 // RwLock<HashMap> where every heartbeat, TuneIn, and BroadcastUpdate serialises globally.
@@ -47,13 +62,13 @@ pub struct AppState {
     /// Global broadcast channel for system-wide announcements.
     /// Used for BroadcasterOnline/Offline messages that all clients should see,
     /// regardless of which broadcaster they're tuned to.
-    /// The message is wrapped in an Arc to avoid sending the fat message but just a pointer
-    pub global_broadcast_tx: broadcast::Sender<Arc<RadioMessage>>,
+    /// Carries Arc<PreparedMessage> — serialized once, cloned cheaply to every receiver.
+    pub global_broadcast_tx: broadcast::Sender<Arc<PreparedMessage>>,
 
     /// Per-broadcaster channels for targeted playback sync.
     /// Each broadcaster has their own channel that only their listeners subscribe to.
-    /// The message is wrapped in an Arc to avoid sending the fat message but just a pointer
-    pub broadcast_channels: DashMap<String, broadcast::Sender<Arc<RadioMessage>>>,
+    /// Carries Arc<PreparedMessage> — serialized once, cloned cheaply to every receiver.
+    pub broadcast_channels: DashMap<String, broadcast::Sender<Arc<PreparedMessage>>>,
 
     /// Per broadcaster listener count
     pub broadcaster_listeners: DashMap<String, HashSet<String>>,
