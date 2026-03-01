@@ -327,7 +327,7 @@ async fn handle_client_message(
             ensure_same_session(&broadcaster_id, validated_session_id)?;
 
             // Enforce broadcast update rate limits (prevents spam)
-            broadcast_limiter.check_and_consume(&broadcaster_id).await?;
+            broadcast_limiter.check_and_consume(&broadcaster_id)?;
 
             // Ensure the requested song index exists in the playlist
             validate_song_index(song_index, state.playlist.len())?;
@@ -407,9 +407,7 @@ async fn handle_client_message(
             let session_id = SessionId::new(broadcaster_id.clone())?;
 
             // Enforce heartbeat rate limits
-            heartbeat_limiter
-                .check_and_consume(session_id.as_str())
-                .await?;
+            heartbeat_limiter.check_and_consume(session_id.as_str())?;
 
             let server_ts = now_ms();
 
@@ -455,7 +453,7 @@ async fn handle_client_message(
             ensure_same_session(&broadcaster_id, validated_session_id)?;
 
             // Enforce broadcast update rate limits (prevents spam)
-            broadcast_limiter.check_and_consume(&broadcaster_id).await?;
+            broadcast_limiter.check_and_consume(&broadcaster_id)?;
 
             // Ensure the requested song index exists in the playlist
             validate_song_index(song_index, state.playlist.len())?;
