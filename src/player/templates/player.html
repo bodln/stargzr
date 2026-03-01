@@ -581,21 +581,6 @@
         debugLog("Session ID copied to clipboard");
       }
 
-      // Hidden audio element used to buffer the next song before it's needed.
-      // Swapping src into the main player from a pre-buffered element is instant
-      // because the browser has already fetched and decoded the first chunk.
-      const preloader = new Audio();
-      preloader.preload = 'auto';
-
-      function preloadSong(songId) {
-        if (!songId) return;
-        const url = `/stargzr/player/stream/id/${songId}`;
-        // Don't re-fetch if already loaded
-        if (preloader.src.endsWith(url)) return;
-        preloader.src = url;
-        debugLog(`Preloading: ${songId}`);
-      }
-
       // Playlist Management Class
       class PlaylistManager {
         constructor(sessionId) {
@@ -629,9 +614,6 @@
 
             // Display the playlist
             this.render();
-
-            // Preload the next song immediately after playlist is ready
-            this.preloadAdjacent();
           } catch (err) {
             debugLog(`Failed to load playlist: ${err.message}`);
           }
@@ -664,14 +646,6 @@
               debugLog(`Synced current song from audio src (index ${index}): ${song.filename}`);
             }
           }
-        }
-
-        // Preloads the song before and after the current one.
-        // Called after every song change so the next track is always warm in the browser cache.
-        preloadAdjacent() {
-          if (player.isInRadioMode()) return;
-          const next = this.getNextSong();
-          if (next) preloadSong(next.id);
         }
 
         loadCustomOrder() {
@@ -814,7 +788,6 @@
         }
 
         // -- Desktop drag handlers --
-
         handleDragStart(e) {
           this.draggedElement = e.currentTarget;
           e.currentTarget.classList.add('dragging');
@@ -1052,14 +1025,8 @@
           this.currentSongId = songId;
           const song = this.songs.find(s => s.id === songId);
 
-          // If the preloader already buffered this song, hand it off directly
-          // instead of creating a new network request from scratch
-          if (preloader.src && preloader.src.includes(songId) && preloader.readyState >= 2) {
-            debugLog(`Using preloaded audio for: ${songId}`);
-            audio.src = preloader.src;
-          } else {
-            audio.src = `/stargzr/player/stream/id/${songId}`;
-          }
+          audio.src = `/stargzr/player/stream/id/${songId}`;
+
           audio.load();
           audio.play();
           
@@ -1072,9 +1039,6 @@
           
           this.render();
           debugLog(`Playing: ${song ? song.filename : songId}`);
-
-          // Preload the next song immediately after switching
-          this.preloadAdjacent();
         }
 
         getSongById(songId) {
