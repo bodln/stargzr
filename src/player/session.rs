@@ -8,9 +8,8 @@ use crate::player::{RadioMessage, radio::broadcast_analytics};
 use super::types::{AppState, PlayerSession, PreparedMessage};
 
 /// Extracts the session id from the request header
-pub fn get_session_id(headers: &HeaderMap, state: &AppState) -> String {
-    // Try to extract session ID from cookie
-    let extracted_id = headers
+pub fn get_session_id(headers: &HeaderMap) -> String {
+    headers
         .get(header::COOKIE)
         .and_then(|cookie| cookie.to_str().ok())
         .and_then(|cookies| {
@@ -19,19 +18,8 @@ pub fn get_session_id(headers: &HeaderMap, state: &AppState) -> String {
                 cookie.strip_prefix("player_session=")
             })
         })
-        .map(|s| s.to_string());
-    
-    // Check if extracted ID is still valid (exists in sessions map)
-    if let Some(id) = extracted_id {
-        if state.sessions.contains_key(&id) {
-            return id; // Valid session, no new cookie needed
-        }
-        // Session was cleaned up, fall through to generate new
-    }
-    
-    // No valid session found, generate fresh UUID
-    let new_id = Uuid::new_v4().to_string();
-    new_id // true = send Set-Cookie header
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| Uuid::new_v4().to_string())
 }
 
 /// Based on the session id extracts the current playlist position
