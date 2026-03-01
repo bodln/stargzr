@@ -30,12 +30,12 @@ async fn test_rate_limiter() {
     let limiter = RateLimiter::new(2.0, 1.0);
     let session_id = "test-session";
 
-    assert!(limiter.check_and_consume(session_id).await.is_ok());
-    assert!(limiter.check_and_consume(session_id).await.is_ok());
-    assert!(limiter.check_and_consume(session_id).await.is_err());
+    assert!(limiter.check_and_consume(session_id).is_ok());
+    assert!(limiter.check_and_consume(session_id).is_ok());
+    assert!(limiter.check_and_consume(session_id).is_err());
 
     tokio::time::sleep(Duration::from_secs(2)).await;
-    assert!(limiter.check_and_consume(session_id).await.is_ok());
+    assert!(limiter.check_and_consume(session_id).is_ok());
 }
 
 #[test]

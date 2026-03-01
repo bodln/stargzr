@@ -148,31 +148,25 @@ pub async fn cleanup_stale_sessions(state: Arc<AppState>) {
                 tracing::info!("Removed stale broadcaster state: {}", broadcaster_id);
             }
 
-            // Send offline notification to any remaining listeners
-            // It's okay if there are no listeners - we handle that gracefully
-            let maybe_tx = state
-                .broadcast_channels
-                .get(&broadcaster_id)
-                .map(|r| r.clone());
-            if let Some(tx) = maybe_tx {
-                let offline_msg = Arc::new(PreparedMessage::new(&RadioMessage::BroadcasterOffline {
-                    broadcaster_id: broadcaster_id.clone(),
-                }));
+            // Notify all clients via the global channel consistent with delete_broadcasting_session
+            // and ensures the broadcaster disappears from analytics for everyone, not just tuned listeners
+            let offline_msg = Arc::new(PreparedMessage::new(&RadioMessage::BroadcasterOffline {
+                broadcaster_id: broadcaster_id.clone(),
+            }));
 
-                match tx.send(offline_msg) {
-                    Ok(listener_count) => {
-                        tracing::info!(
-                            "Notified {} listener(s) that broadcaster {} went offline",
-                            listener_count,
-                            broadcaster_id
-                        );
-                    }
-                    Err(_) => {
-                        tracing::debug!(
-                            "No listeners to notify for offline broadcaster: {}",
-                            broadcaster_id
-                        );
-                    }
+            match state.global_broadcast_tx.send(offline_msg) {
+                Ok(listener_count) => {
+                    tracing::info!(
+                        "Notified {} listener(s) that broadcaster {} went offline",
+                        listener_count,
+                        broadcaster_id
+                    );
+                }
+                Err(_) => {
+                    tracing::debug!(
+                        "No listeners to notify for offline broadcaster: {}",
+                        broadcaster_id
+                    );
                 }
             }
 

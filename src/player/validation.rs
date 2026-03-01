@@ -1,30 +1,23 @@
 use super::error::{PlayerError, PlayerResult};
-use regex::Regex;
-use once_cell::sync::Lazy;
-
-// Compile the regex once at startup rather than on every validation
-static SESSION_ID_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$").unwrap()
-});
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SessionId(String);
 
 impl SessionId {
     pub fn new(id: String) -> PlayerResult<Self> {
-        if !SESSION_ID_REGEX.is_match(&id) {
-            return Err(PlayerError::InvalidSessionId(format!(
+        // uuid::Uuid::parse_str is faster and drops the regex and once_cell dependencies
+        uuid::Uuid::parse_str(&id)
+            .map_err(|_| PlayerError::InvalidSessionId(format!(
                 "Session ID must be a valid UUID, got: {}",
                 id
-            )));
-        }
+            )))?;
         Ok(SessionId(id))
     }
-    
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
-    
+
     pub fn into_inner(self) -> String {
         self.0
     }
