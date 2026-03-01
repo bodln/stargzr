@@ -13,3 +13,5 @@ async fn main() {
     player::initialize(PathBuf::from(music_path)).await;
 }
 // DOCUMENT ENTIRE WORK FLOW WITH CODE SNIPPETS
+
+// on get session id make sre the old session is still valid in the session, meaning it wasnt cleaned up
