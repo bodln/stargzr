@@ -185,6 +185,30 @@ pub async fn stream_audio_by_index(
     stream_audio_internal(&state, song, &headers).await
 }
 
+/// Parses a "bytes=start-end" range header into (start, end) byte offsets.
+/// Returns None if the header is missing or unparseable callers fall back to full file.
+/// The previous code silently falls through and serves the full file instead of returning a 416 Range Not Satisfiable error.
+/// This change is purely about making the fallthrough behavior explicit and readable if anything fails, 
+/// None is returned and you know exactly why.
+fn parse_range_header(headers: &HeaderMap, file_size: u64) -> Option<(u64, u64)> {
+    let range_str = headers.get(header::RANGE)?.to_str().ok()?;
+    let range_str = range_str.strip_prefix("bytes=")?;
+
+    // Range requests have the format "start-end", and both parts are optional.
+    // You might see "bytes=0-999" (first 1000 bytes), "bytes=2000000-" (from byte 2 million to the end),
+    // or even "bytes=-1000" (last 1000 bytes, though we don't handle this case)
+    let (start_str, end_str) = range_str.split_once('-')?;
+
+    let start: u64 = start_str.parse().ok()?;
+    let end: u64 = if end_str.is_empty() {
+        file_size - 1
+    } else {
+        end_str.parse::<u64>().ok()?.min(file_size - 1)
+    };
+
+    Some((start, end))
+}
+
 /// Streams an audio file to the client, with full support for HTTP byte-range requests.
 /// This handler is intentionally stateless: it does not modify playback state
 /// or session position, it only serves file data.
@@ -196,57 +220,38 @@ pub async fn stream_audio_internal(
     let file_path = state.music_folder.join(&song.filename);
     let file_size = song.size;
 
-    // Parse Range header if present
-    if let Some(range_value) = headers.get(header::RANGE) {
-        if let Ok(range_str) = range_value.to_str() {
-            if let Some(range_str) = range_str.strip_prefix("bytes=") {
-                // Range requests have the format "start-end", and both parts are optional.
-                // You might see "bytes=0-999" (first 1000 bytes), "bytes=2000000-" (from byte 2 million to the end),
-                // or even "bytes=-1000" (last 1000 bytes, though we don't handle this case)
-                let parts: Vec<&str> = range_str.split('-').collect();
+    if let Some((start, end)) = parse_range_header(headers, file_size) {
+        let mut file = File::open(&file_path)
+            .await
+            .map_err(|_| StatusCode::NOT_FOUND)?;
 
-                if parts.len() == 2 {
-                    let start: u64 = parts[0].parse().unwrap_or(0);
-                    let end: u64 = if parts[1].is_empty() {
-                        file_size - 1
-                    } else {
-                        parts[1].parse().unwrap_or(file_size - 1).min(file_size - 1)
-                    };
+        file.seek(std::io::SeekFrom::Start(start))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-                    let mut file = File::open(&file_path)
-                        .await
-                        .map_err(|_| StatusCode::NOT_FOUND)?;
+        let length = end - start + 1; // example end = 0, start = 0, that is counted as one byte (the first one)
+        let limited_file = file.take(length);
+        let stream = ReaderStream::with_capacity(limited_file, 128 * 1024); // we read 128 kilobytes at a time
+        let body = axum::body::Body::from_stream(stream);
 
-                    file.seek(std::io::SeekFrom::Start(start))
-                        .await
-                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-                    let length = end - start + 1; // example end = 0, start = 0, that is counted as one byte (the first one)
-                    let limited_file = file.take(length);
-                    let stream = ReaderStream::with_capacity(limited_file, 128 * 1024); // we read 128 kilobytes at a time
-                    let body = axum::body::Body::from_stream(stream);
-
-                    return Ok(Response::builder()
-                        .status(StatusCode::PARTIAL_CONTENT)
-                        .header(header::CONTENT_TYPE, "audio/mpeg")
-                        // We tell the browser that this server supports range requests on this resource,
-                        // which enables the seeking functionality in the HTML5 audio player.
-                        .header(header::ACCEPT_RANGES, "bytes") // required for partial content responses
-                        .header(
-                            header::CONTENT_RANGE,
-                            format!("bytes {}-{}/{}", start, end, file_size),
-                        )
-                        .header(header::CONTENT_LENGTH, length.to_string()) // specifies how many bytes are in this particular response body (not the whole file)
-                        // CACHE_CONTROL header tells browsers and intermediate proxies that this content can be cached
-                        // for up to 31,536,000 seconds (one year).
-                        // Since MP3 files don't change, aggressive caching dramatically improves performance for repeated playback.
-                        // (seeking to previously loaded part of the song)
-                        .header(header::CACHE_CONTROL, "public, max-age=31536000")
-                        .body(body)
-                        .unwrap());
-                }
-            }
-        }
+        return Ok(Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(header::CONTENT_TYPE, "audio/mpeg")
+            // We tell the browser that this server supports range requests on this resource,
+            // which enables the seeking functionality in the HTML5 audio player.
+            .header(header::ACCEPT_RANGES, "bytes") // required for partial content responses
+            .header(
+                header::CONTENT_RANGE,
+                format!("bytes {}-{}/{}", start, end, file_size),
+            )
+            .header(header::CONTENT_LENGTH, length.to_string()) // specifies how many bytes are in this particular response body (not the whole file)
+            // CACHE_CONTROL header tells browsers and intermediate proxies that this content can be cached
+            // for up to 31,536,000 seconds (one year).
+            // Since MP3 files don't change, aggressive caching dramatically improves performance for repeated playback.
+            // (seeking to previously loaded part of the song)
+            .header(header::CACHE_CONTROL, "public, max-age=31536000")
+            .body(body)
+            .unwrap());
     }
 
     // If there is no range specified just start from the beginning
