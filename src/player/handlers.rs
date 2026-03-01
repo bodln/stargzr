@@ -17,7 +17,7 @@ use super::types::{SharedState, SongInfo};
 /// Renders the main player page for the current user session.
 pub async fn player_page(State(state): State<SharedState>, headers: HeaderMap) -> PlayerTemplate {
     // Identify the user session (cookie-based, falls back to UUID)
-    let session_id = get_session_id(&headers);
+    let session_id = get_session_id(&headers, &state);
 
     // Fetch or initialize the session's current playlist index
     let current_index = get_or_create_position(&state, &session_id);
@@ -41,7 +41,7 @@ pub async fn player_page(State(state): State<SharedState>, headers: HeaderMap) -
 /// Advances the current session to the next song in the playlist.
 pub async fn next_song(State(state): State<SharedState>, headers: HeaderMap) -> PlayerControlsTemplate {
     // Identify the user session
-    let session_id = get_session_id(&headers);
+    let session_id = get_session_id(&headers, &state);
 
     // Get the current position for this session
     let current_index = get_or_create_position(&state, &session_id);
@@ -73,7 +73,7 @@ pub async fn next_song(State(state): State<SharedState>, headers: HeaderMap) -> 
 /// Moves the current session to the previous song in the playlist.
 pub async fn prev_song(State(state): State<SharedState>, headers: HeaderMap) -> PlayerControlsTemplate {
     // Identify the user session
-    let session_id = get_session_id(&headers);
+    let session_id = get_session_id(&headers, &state);
 
     // Get the current position for this session
     let current_index = get_or_create_position(&state, &session_id);
@@ -143,7 +143,7 @@ pub async fn player_controls(
 
     // No broadcaster specified (or broadcaster missing), so render controls
     // based on the caller's own session state.
-    let session_id = get_session_id(&headers);
+    let session_id = get_session_id(&headers, &state);
     let index = get_or_create_position(&state, &session_id);
 
     let song = state
@@ -282,7 +282,7 @@ pub async fn radio_websocket(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let session_id_str = get_session_id(&headers);
+    let session_id_str = get_session_id(&headers, &state);
 
     // This is the session id first given to the user
     // It is used so if someone tampers with their original session their calls are moot
