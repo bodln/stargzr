@@ -1517,7 +1517,7 @@
                 alert("Your broadcast session ended. Please start broadcasting again if needed.");
               }
             } else {
-              alert(`Error: ${msg.message}`);
+              alert(`Error: ${msg.message}. Please try and refresh the page.`);
             }
             return;
           }
@@ -1525,10 +1525,10 @@
           if (msg.type === "BroadcasterOffline") {
             if (this.tunedBroadcaster === msg.broadcaster_id) {
               debugLog(`Broadcaster ${msg.broadcaster_id} went offline`);
+              this.tuneOut("broadcaster_offline");
               alert(
                 "The broadcaster you were listening to has stopped broadcasting.",
               );
-              this.tuneOut("broadcaster_offline");
             }
             return;
           }
