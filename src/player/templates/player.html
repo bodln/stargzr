@@ -1027,7 +1027,7 @@
           const song = this.songs.find(s => s.id === songId);
           
           audio.src = `/stargzr/player/stream/id/${songId}`;
-          audio.load();
+          //audio.load();
           audio.play();
           
           // Update the player controls display
