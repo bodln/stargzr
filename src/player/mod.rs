@@ -161,7 +161,7 @@ pub async fn initialize(path_buf: PathBuf) {
     // Set up signal handler for Ctrl+C and shutdown_rx channel
     // Use: axum::serve(listener, router).with_graceful_shutdown(async { shutdown_rx.await.ok(); })
 
-    // Start serving requests — NodeDelayListener sets TCP_NODELAY on every accepted socket
+    // Start serving requests, NodeDelayListener sets TCP_NODELAY on every accepted socket
     axum::serve(NodeDelayListener(listener), router)
         .await
         .expect("Server failed");

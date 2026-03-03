@@ -13,6 +13,8 @@ pub struct SongInfo {
     pub size: u64,
 }
 
+// TODO all the Strings that are cloned could maybe be replaced by some Arc<str> or something else so we dont need to clone them everywhere
+
 /// Represents a single user's PRIVATE player state
 pub struct PlayerSession {
     pub current_index: usize,
@@ -48,7 +50,7 @@ impl PreparedMessage {
 }
 
 // DashMap shards the map across multiple independent RwLocks (one per shard, ~4× cpu count),
-// so concurrent operations on different keys never block each other — unlike a single
+// so concurrent operations on different keys never block each other, unlike a single
 // RwLock<HashMap> where every heartbeat, TuneIn, and BroadcastUpdate serialises globally.
 pub struct AppState {
     pub playlist: Arc<Vec<SongInfo>>,
@@ -62,12 +64,12 @@ pub struct AppState {
     /// Global broadcast channel for system-wide announcements.
     /// Used for BroadcasterOnline/Offline messages that all clients should see,
     /// regardless of which broadcaster they're tuned to.
-    /// Carries Arc<PreparedMessage> — serialized once, cloned cheaply to every receiver.
+    /// Carries Arc<PreparedMessage>, serialized once, cloned cheaply to every receiver.
     pub global_broadcast_tx: broadcast::Sender<Arc<PreparedMessage>>,
 
     /// Per-broadcaster channels for targeted playback sync.
     /// Each broadcaster has their own channel that only their listeners subscribe to.
-    /// Carries Arc<PreparedMessage> — serialized once, cloned cheaply to every receiver.
+    /// Carries Arc<PreparedMessage>, serialized once, cloned cheaply to every receiver.
     pub broadcast_channels: DashMap<String, broadcast::Sender<Arc<PreparedMessage>>>,
 
     /// Per broadcaster listener count
@@ -77,7 +79,7 @@ pub struct AppState {
     /// Makes TuneOut O(1) instead of scanning every broadcaster's listener set.
     pub session_tuned_to: DashMap<String, String>,
 
-    /// Counts live WebSocket connections — incremented on connect, decremented on disconnect.
+    /// Counts live WebSocket connections, incremented on connect, decremented on disconnect.
     pub active_connections: AtomicUsize,
 
     /// Timestamp (ms) of the last analytics broadcast.

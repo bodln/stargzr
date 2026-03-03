@@ -15,7 +15,7 @@ use super::validation::{SessionId, validate_song_index};
 use super::session::{now_ms};
 use super::types::{BroadcastState, PreparedMessage, RadioMessage, SharedState};
 
-// Analytics are expensive — don't send more often than this on high-frequency paths
+// Analytics are expensive, don't send more often than this on high-frequency paths
 const ANALYTICS_THROTTLE_MS: u64 = 500;
 
 /// Manages the full lifecycle of a radio WebSocket connection.
@@ -50,12 +50,12 @@ pub async fn handle_radio_connection(
         let mut current_tuned_broadcaster_rx: Option<broadcast::Receiver<Arc<PreparedMessage>>> = None;
 
         loop {
-            // biased: skips random branch selection — tuned broadcaster is the hottest path
+            // biased: skips random branch selection, tuned broadcaster is the hottest path
             // and gets priority when multiple branches are ready simultaneously
             tokio::select! {
                 biased;
 
-                // Broadcast messages from the tuned broadcaster — hottest path, checked first
+                // Broadcast messages from the tuned broadcaster, hottest path, checked first
                 Ok(msg) = async {
                     match &mut current_tuned_broadcaster_rx {
                         Some(rx) => rx.recv().await,
@@ -367,14 +367,14 @@ async fn handle_client_message(
                 playback_time,
                 is_playing,
                 server_timestamp_ms: server_ts,
-                listener_count: listener_count,
+                listener_count
             };
 
             state
                 .broadcast_states
                 .insert(broadcaster_id.clone(), new_state);
 
-            // Serialize once here — all N listeners share the same Arc<PreparedMessage>
+            // Serialize once here, all N listeners share the same Arc<PreparedMessage>
             let sync_msg = Arc::new(PreparedMessage::new(&RadioMessage::Sync {
                 broadcaster_id: broadcaster_id.clone(),
                 song_index,
@@ -395,7 +395,7 @@ async fn handle_client_message(
                 }
             }
 
-            // Throttled — BroadcastUpdate fires on every play/pause/seek
+            // Throttled, BroadcastUpdate fires on every play/pause/seek
             broadcast_analytics_throttled(state);
         }
 
@@ -535,7 +535,7 @@ async fn handle_client_message(
         RadioMessage::QueryBroadcastState { session_id } => {
             ensure_same_session(&session_id, validated_session_id)?;
 
-            // Check if this session is currently broadcasting
+            // Check if this session is currently broadcasting, by making sure that the current session is both alive and broadcasting
             let is_broadcasting = state.broadcast_states.contains_key(&session_id) && state.sessions.contains_key(&session_id);
             let current_state = state.broadcast_states.get(&session_id).map(|b| b.clone());
 
@@ -627,7 +627,7 @@ fn create_error_message(error: &PlayerError) -> RadioMessage {
     }
 }
 
-/// Throttled analytics — skips the broadcast if one was sent within ANALYTICS_THROTTLE_MS.
+/// Throttled analytics, skips the broadcast if one was sent within ANALYTICS_THROTTLE_MS.
 /// Use this on high-frequency paths (TuneIn, TuneOut, BroadcastUpdate).
 /// Discrete state-change events (connect, disconnect, start/stop) should call broadcast_analytics directly.
 pub fn broadcast_analytics_throttled(state: &SharedState) {
@@ -656,7 +656,7 @@ pub fn broadcast_analytics(state: &SharedState) {
     }
 
     // Compute active_listeners as the total number of strings across all
-    // per-broadcaster listener sets — single read lock, no atomic to drift
+    // per-broadcaster listener sets, single read lock, no atomic to drift
     let active_listeners = state
         .broadcaster_listeners
         .iter()

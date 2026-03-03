@@ -375,7 +375,7 @@
         font-size: 18px;
         cursor: grab;
         color: #6c757d;
-        /* Only the handle suppresses scroll — the rest of the row stays scrollable */
+        /* Only the handle suppresses scroll, the rest of the row stays scrollable */
         touch-action: none;
         user-select: none;
         padding: 4px 2px; /* slightly larger hit area on mobile */
@@ -632,7 +632,7 @@
           this.sessionId = sessionId;
           this.songs = [];
           // Preserves the original server order so we can look up the correct
-          // numeric index to broadcast — the server's /stream/{index} endpoints
+          // numeric index to broadcast, the server's /stream/{index} endpoints
           // use this order, not the user's custom order
           this.originalSongs = [];
           this.currentSongId = null;
@@ -747,7 +747,7 @@
         }
 
         // Returns the server's numeric index for a given song ID.
-        // This is what the broadcast protocol uses — it must match the
+        // This is what the broadcast protocol uses, it must match the
         // original unshuffled server order, not the user's custom order.
         getServerIndexById(songId) {
           const index = this.originalSongs.findIndex((s) => s.id === songId);
@@ -816,7 +816,7 @@
             if (!span) return;
             el.addEventListener("mouseenter", () => {
               const overflow = span.scrollWidth - el.clientWidth;
-              if (overflow <= 0) return; // text fits — nothing to scroll
+              if (overflow <= 0) return; // text fits, nothing to scroll
               const duration = Math.max(2, overflow / 40); // ~40px/s feels natural
               span.style.setProperty("--scroll-dist", `-${overflow}px`);
               span.style.animation = `song-marquee ${duration}s ease-in-out infinite`;
@@ -846,7 +846,7 @@
               { passive: true },
             );
             // touchcancel fires when the browser interrupts the gesture (incoming
-            // call, scroll takeover, etc.) — without this the clone stays on screen
+            // call, scroll takeover, etc.), without this the clone stays on screen
             handle.addEventListener(
               "touchcancel",
               this.handleTouchCancel.bind(this),
@@ -879,7 +879,7 @@
             this.songs.splice(draggedIndex, 1);
             this.songs.splice(targetIndex, 0, draggedSong);
             this.saveCustomOrder();
-            this.render(true); // don't scroll — user is looking at the drag target area
+            this.render(true); // don't scroll, user is looking at the drag target area
             debugLog(
               `Moved song from position ${draggedIndex + 1} to ${targetIndex + 1}`,
             );
@@ -895,7 +895,7 @@
         // ── Mobile touch handlers ──────────────────────────────────────────
 
         handleTouchStart(e) {
-          // e.currentTarget is the ⋮⋮ handle — walk up to the row
+          // e.currentTarget is the ⋮⋮ handle, walk up to the row
           const row = e.currentTarget.closest(".playlist-item");
           if (!row) return;
 
@@ -948,7 +948,7 @@
           this.touchClone.style.top = `${touch.clientY - this.touchGrabOffsetY}px`;
 
           // Auto-scroll only when the clone is significantly out of bounds.
-          // Scroll threshold creates a "dead zone" — once the clone comes back
+          // Scroll threshold creates a "dead zone", once the clone comes back
           // within this margin, scrolling stops so you can freely reorder visible items.
           const container = document.getElementById("playlist-display");
           const cRect = container.getBoundingClientRect();
@@ -957,13 +957,13 @@
           const scrollSpeed = 8;
 
           if (cloneRect.top < cRect.top - scrollThreshold) {
-            // Clone is 30px+ above visible area — scroll up
+            // Clone is 30px+ above visible area, scroll up
             container.scrollTop -= scrollSpeed;
           } else if (cloneRect.bottom > cRect.bottom + scrollThreshold) {
-            // Clone is 30px+ below visible area — scroll down
+            // Clone is 30px+ below visible area, scroll down
             container.scrollTop += scrollSpeed;
           }
-          // else: clone is in bounds or within 30px of edge — no scroll
+          // else: clone is in bounds or within 30px of edge, no scroll
 
           // Find which playlist item the finger is currently over
           this.touchClone.style.display = "none"; // hide clone so elementFromPoint works
@@ -1022,12 +1022,12 @@
             );
           }
 
-          this.render(true); // don't scroll — user is looking at the drag target area
+          this.render(true); // don't scroll, user is looking at the drag target area
         }
 
         // Fires when the browser cancels the touch gesture (e.g. incoming call,
         // system scroll takeover). Cleans up exactly like touchend but without
-        // saving the order — the drag was interrupted, treat it as a no-op.
+        // saving the order, the drag was interrupted, treat it as a no-op.
         handleTouchCancel(e) {
           if (!this.touchDragActive) return;
           this.touchDragActive = false;
@@ -1042,7 +1042,7 @@
           });
 
           // Revert the in-progress reorder back to the last saved state
-          this.render(true); // don't scroll — cancelled drag, leave list where it is
+          this.render(true); // don't scroll, cancelled drag, leave list where it is
           debugLog("Touch drag cancelled by browser");
         }
 
@@ -1057,7 +1057,7 @@
           const cRect = container.getBoundingClientRect();
           const iRect = activeItem.getBoundingClientRect();
 
-          // Already fully visible — don't touch the scroll position
+          // Already fully visible, don't touch the scroll position
           if (iRect.top >= cRect.top && iRect.bottom <= cRect.bottom) return;
 
           // Scroll the minimum needed so the item sits 16px from the top edge
@@ -1695,14 +1695,14 @@
             // between the Sync message arriving and the browser being ready to
             // seek is accounted for.
             // Exception: if the broadcaster's playback_time is near 0, the song
-            // just started — adding latency compensation would skip the opening
+            // just started, adding latency compensation would skip the opening
             // notes, so we just seek to 0 instead.
             this.audio.addEventListener(
               "canplay",
               () => {
                 let seekTo;
                 if (playback_time < 1.0) {
-                  // Song just started on broadcaster side — begin from the top
+                  // Song just started on broadcaster side, begin from the top
                   seekTo = 0;
                 } else {
                   const freshElapsed =
@@ -1710,7 +1710,7 @@
                   seekTo = Math.max(0, playback_time + freshElapsed);
                 }
                 debugLog(
-                  `canplay — seeking to ${seekTo.toFixed(2)}s (broadcaster at ${playback_time.toFixed(2)}s)`,
+                  `canplay, seeking to ${seekTo.toFixed(2)}s (broadcaster at ${playback_time.toFixed(2)}s)`,
                 );
                 this.audio.currentTime = seekTo;
                 if (is_playing) this.audio.play();
@@ -1718,7 +1718,7 @@
               { once: true },
             );
           } else {
-            // Same song — sync position and play state directly, no load needed
+            // Same song, sync position and play state directly, no load needed
             const now = Date.now();
             const elapsed = (now - server_timestamp_ms) * 0 / 1000; // I set these to 0 so no adjustment is made 
             this.targetTime = is_playing
@@ -2213,11 +2213,11 @@
       // Audio ended handler uses playlist manager
       audio.addEventListener("ended", () => {
         if (player.isInRadioMode()) {
-          debugLog("Track ended, but in radio mode — waiting for broadcaster");
+          debugLog("Track ended, but in radio mode, waiting for broadcaster");
           return;
         }
 
-        debugLog("Track ended — moving to next track");
+        debugLog("Track ended, moving to next track");
         playlistManager.playNext();
       });
 
@@ -2237,7 +2237,7 @@
         }
       });
 
-      // Initialize playlist manager — syncCurrentFromAudio is called inside
+      // Initialize playlist manager, syncCurrentFromAudio is called inside
       // loadPlaylist once song data is available, so the initial audio src is
       // resolved to a song ID before the first render
       const playlistManager = new PlaylistManager(sessionId);
@@ -2275,7 +2275,7 @@
             alert("Your session has expired. Please refresh the page.");
           }
         } catch (_) {
-          // Network error — do not block playback
+          // Network error, do not block playback
         }
       });
 

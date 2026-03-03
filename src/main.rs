@@ -63,3 +63,18 @@ async fn main() {
 // this is an effort to decrease the difference in playback for broadcaster and its listeners
 // also we must keep in mind that if the calclated adjustment when addedto the playback time exceeds the file size(song duration) we do not add it but send playback as is
 // also this should be calculated only when seeking and never when switching songs, because we want the listener to start hearing a new song from 0:00 not ex. 0:00,8 or 0:01,1 
+
+
+
+
+// TODO
+// add more structired tracing, maybe per session, per broadcast kind of stuff. some merics wouldnt hurt anyone prometheus
+
+
+// TODO
+// Add rate limit on starting web socket conection so one gu cant make a bunch of ws conns
+
+
+
+// TODO
+// redis ,ultiple instance stff, some cross instance stuff with bb8 or deadpool
