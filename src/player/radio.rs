@@ -530,11 +530,13 @@ async fn handle_client_message(
             broadcast_analytics(state);
         }
 
+        // On a page visibility reload checks if our session is alive and broadcasting,
+        // if it is, returns the state so the sessions can resume its braodcating (this is used for mobile visibility mode)
         RadioMessage::QueryBroadcastState { session_id } => {
             ensure_same_session(&session_id, validated_session_id)?;
 
             // Check if this session is currently broadcasting
-            let is_broadcasting = state.broadcast_states.contains_key(&session_id);
+            let is_broadcasting = state.broadcast_states.contains_key(&session_id) && state.sessions.contains_key(&session_id);
             let current_state = state.broadcast_states.get(&session_id).map(|b| b.clone());
 
             tracing::debug!(
