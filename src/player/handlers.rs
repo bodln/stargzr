@@ -308,3 +308,20 @@ pub async fn get_playlist(State(state): State<SharedState>) -> impl IntoResponse
     let playlist: Vec<SongInfo> = state.playlist.iter().cloned().collect();
     axum::Json(playlist)
 }
+
+/// Returns 200 if session cookie maps to a live session, 401 otherwise.
+/// Called by the frontend on audio play to detect expired sessions early.
+pub async fn check_session(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let valid = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| {
+            cookies.split(';').find_map(|c| c.trim().strip_prefix("player_session="))
+        })
+        .map(|id| state.sessions.contains_key(id))
+        .unwrap_or(false);
+    if valid { StatusCode::OK } else { StatusCode::UNAUTHORIZED }
+}
