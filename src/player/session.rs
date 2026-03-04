@@ -81,10 +81,10 @@ pub fn now_ms() -> u128 {
 
 /// Periodically cleans up stale player sessions and broadcaster channels.
 pub async fn cleanup_stale_sessions(state: Arc<AppState>) {
-    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    let mut interval = tokio::time::interval(Duration::from_secs(3600));
 
     loop {
-        // Wait for the next tick (initially fires immediately, then every 60s)
+        // Wait for the next tick (initially fires immediately, then every 1h)
         interval.tick().await;
 
         let now = std::time::Instant::now();
@@ -97,7 +97,7 @@ pub async fn cleanup_stale_sessions(state: Arc<AppState>) {
 
             state.sessions.retain(|session_id, session| {
                 let age = now.duration_since(session.last_activity);
-                let should_keep = age.as_secs() < 3600;
+                let should_keep = age.as_secs() < 43200; // Only keep sessions younger than 12 hours
 
                 if !should_keep {
                     removed += 1;
