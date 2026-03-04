@@ -1707,23 +1707,17 @@
                 } else {
                   seekTo = playback_time;
                 }
-                
+
                 debugLog(
                   `canplay, seeking to ${seekTo.toFixed(2)}s (broadcaster at ${playback_time.toFixed(2)}s)`,
                 );
+                
                 this.audio.currentTime = seekTo;
                 if (is_playing) this.audio.play();
               },
               { once: true },
             );
           } else {
-            // Same song, sync position and play state directly, no load needed
-            const now = Date.now();
-            const elapsed = (now - server_timestamp_ms) * 0 / 1000; // I set these to 0 so no adjustment is made 
-            this.targetTime = is_playing
-              ? playback_time + elapsed
-              : playback_time;
-
             this.audio.currentTime = playback_time;
             if (is_playing && this.audio.paused) this.audio.play();
             if (!is_playing && !this.audio.paused) this.audio.pause();
