@@ -189,7 +189,7 @@ pub async fn stream_audio_by_index(
 /// Parses a "bytes=start-end" range header into (start, end) byte offsets.
 /// Returns None if the header is missing or unparseable callers fall back to full file.
 /// The previous code silently falls through and serves the full file instead of returning a 416 Range Not Satisfiable error.
-/// This change is purely about making the fallthrough behavior explicit and readable if anything fails, 
+/// This change is purely about making the fallthrough behavior explicit and readable if anything fails,
 /// None is returned and you know exactly why.
 fn parse_range_header(headers: &HeaderMap, file_size: u64) -> Option<(u64, u64)> {
     let range_str = headers.get(header::RANGE)?.to_str().ok()?;
@@ -309,7 +309,7 @@ pub async fn radio_websocket(
             return (StatusCode::BAD_REQUEST, "Invalid session ID").into_response();
         }
     };
-
+    crate::player::metrics::inc_ws_connections();
     ws.on_upgrade(|socket| {
         handle_radio_connection(socket, state, validated_session_id.into_inner())
     })
@@ -336,4 +336,9 @@ pub async fn check_session(
         .map(|id| state.sessions.contains_key(id))
         .unwrap_or(false);
     if valid { StatusCode::OK } else { StatusCode::UNAUTHORIZED }
+}
+
+/// Serves the Prometheus metrics scrape endpoint.
+pub async fn metrics_handler() -> impl IntoResponse {
+    crate::player::metrics::render()
 }

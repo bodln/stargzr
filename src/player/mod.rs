@@ -4,6 +4,7 @@ mod templates;
 mod types;
 mod logging;
 pub mod error;
+pub mod metrics;
 pub mod radio;
 pub mod validation;
 pub mod rate_limit;
@@ -11,7 +12,7 @@ pub mod reconnect;
 
 pub use types::{AppState, BroadcastState, RadioMessage, SharedState, SongInfo};
 
-use crate::player::handlers::{check_session, radio_websocket};
+use crate::player::handlers::{check_session, metrics_handler, radio_websocket};
 
 use self::logging::init_logging;
 use axum::Router;
@@ -92,6 +93,7 @@ pub fn create_player_router(state: Arc<AppState>) -> impl std::future::Future<Ou
             .route("/player/controls", get(player_controls)) // Return current controls/status
             .route("/player/playlist", get(get_playlist))
             .route("/player/session/check", get(check_session))
+            .route("/metrics", get(metrics_handler))
             .with_state(state.clone()); // Attach shared state
 
         // Nest the inner router under "/stargzr" so all routes are prefixed
@@ -100,8 +102,8 @@ pub fn create_player_router(state: Arc<AppState>) -> impl std::future::Future<Ou
 }
 
 /// Thin wrapper around TcpListener that sets TCP_NODELAY on every accepted socket.
-/// Disables Nagle's algorithm, a TCP/IP congestion control mechanism that improves network efficiency by combining multiple small, 
-/// outgoing data packets into fewer, larger packets before transmission. 
+/// Disables Nagle's algorithm, a TCP/IP congestion control mechanism that improves network efficiency by combining multiple small,
+/// outgoing data packets into fewer, larger packets before transmission.
 /// Small WebSocket frames are sent immediately
 /// instead of being held in the kernel buffer waiting to be batched.
 struct NodeDelayListener(tokio::net::TcpListener);
@@ -152,6 +154,9 @@ pub async fn initialize(path_buf: PathBuf) {
     // Set up tracing/logging
     init_logging();
 
+    // Set up Prometheus metrics recorder (global, must be called once before any metrics)
+    metrics::init_metrics();
+
     tracing::info!("Starting MP3 Player server");
 
     // Bind TCP listener to localhost:8083
@@ -185,8 +190,8 @@ pub async fn initialize(path_buf: PathBuf) {
         NodeDelayListener(listener),
         router.into_make_service_with_connect_info::<PeerAddr>(),
     )
-        .await
-        .expect("Server failed");
+    .await
+    .expect("Server failed");
 }
 
 async fn _add_ngrok_header(

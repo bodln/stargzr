@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{broadcast, mpsc};
+use tracing::Instrument;
 
 use crate::player::session::remove_session_from_all_listeners;
 
@@ -42,6 +43,13 @@ pub async fn handle_radio_connection(
     broadcast_analytics(&state);
 
     tracing::info!("Client connected: {}", &validated_session_id);
+
+    // Root span for this session, propagated into both spawned tasks so all logs
+    // carry session_id without having to thread it through every function call
+    let session_span = tracing::info_span!(
+        "ws_session",
+        session_id = %validated_session_id,
+    );
 
     // Send task
     let state_clone = state.clone();
@@ -95,7 +103,7 @@ pub async fn handle_radio_connection(
                                 .map(|r| r.clone());
 
                             current_tuned_broadcaster_rx = tx.map(|t| t.subscribe());
-                            tracing::debug!("Tuned in to {:?}", broadcast_id);
+                            tracing::debug!(broadcaster_id = %broadcast_id, "Tuned in");
                         }
                         None => {
                             current_tuned_broadcaster_rx = None;
@@ -110,7 +118,7 @@ pub async fn handle_radio_connection(
                 }
             }
         }
-    });
+    }.instrument(session_span.clone()));
 
     // Receive task
     let state_clone = state.clone();
@@ -159,7 +167,7 @@ pub async fn handle_radio_connection(
         }
 
         tracing::debug!("Receive task ended");
-    });
+    }.instrument(session_span));
 
     // Wait for either task to complete, then abort the other too
     tokio::select! {
@@ -225,10 +233,12 @@ async fn handle_client_message(
 ) -> PlayerResult<()> {
     match msg {
         RadioMessage::TuneIn { broadcaster_id } => {
+            crate::player::metrics::inc_messages("TuneIn");
+
             // Validate the incoming broadcaster ID as a proper SessionId (UUID)
             let session_id = SessionId::new(broadcaster_id.clone())?;
 
-            tracing::info!("Client tuning into: {}", session_id);
+            tracing::info!(broadcaster_id = %session_id, "Client tuning in");
 
             // If already tuned to someone, remove from their listener set first
             if let Some((_, old_broadcaster)) = state.session_tuned_to.remove(validated_session_id) {
@@ -267,9 +277,10 @@ async fn handle_client_message(
             if let Some(b_state) = maybe_state {
                 // Send a Sync message with the current state to the newly tuned client
                 tracing::debug!(
-                    "Sending initial sync: song={}, time={:.2}",
-                    b_state.song_index,
-                    b_state.playback_time
+                    broadcaster_id = %broadcaster_id,
+                    song_index = b_state.song_index,
+                    playback_time = b_state.playback_time,
+                    "Sending initial sync"
                 );
 
                 let sync_msg = RadioMessage::Sync {
@@ -297,6 +308,7 @@ async fn handle_client_message(
         }
 
         RadioMessage::TuneOut => {
+            crate::player::metrics::inc_messages("TuneOut");
             tracing::info!("Client tuned out");
 
             // O(1) reverse lookup instead of scanning every broadcaster's listener set
@@ -324,20 +336,24 @@ async fn handle_client_message(
             playback_time,
             is_playing,
         } => {
+            crate::player::metrics::inc_messages("BroadcastUpdate");
             ensure_same_session(&broadcaster_id, validated_session_id)?;
 
             // Enforce broadcast update rate limits (prevents spam)
-            broadcast_limiter.check_and_consume(&broadcaster_id)?;
+            if let Err(e) = broadcast_limiter.check_and_consume(&broadcaster_id) {
+                crate::player::metrics::inc_rate_limit_hits("broadcast");
+                return Err(e);
+            }
 
             // Ensure the requested song index exists in the playlist
             validate_song_index(song_index, state.playlist.len())?;
 
             tracing::debug!(
-                "Broadcast update from {}: song={}, time={:.2}, playing={}",
-                &broadcaster_id,
+                broadcaster_id = %broadcaster_id,
                 song_index,
                 playback_time,
-                is_playing
+                is_playing,
+                "Broadcast update"
             );
 
             // If the session isn't broadcasting don't update
@@ -387,10 +403,10 @@ async fn handle_client_message(
             if let Some(tx) = state.broadcast_channels.get(&broadcaster_id) {
                 match tx.send(sync_msg) {
                     Ok(count) => {
-                        tracing::trace!("Sync sent to {} listeners", count);
+                        tracing::trace!(broadcaster_id = %broadcaster_id, listeners = count, "Sync sent");
                     }
                     Err(_) => {
-                        tracing::trace!("Sync sent but no active listeners");
+                        tracing::trace!(broadcaster_id = %broadcaster_id, "Sync sent but no active listeners");
                     }
                 }
             }
@@ -403,11 +419,16 @@ async fn handle_client_message(
             broadcaster_id,
             playback_time,
         } => {
+            crate::player::metrics::inc_messages("Heartbeat");
+
             // Validate broadcaster session ID
             let session_id = SessionId::new(broadcaster_id.clone())?;
 
             // Enforce heartbeat rate limits
-            heartbeat_limiter.check_and_consume(session_id.as_str())?;
+            if let Err(e) = heartbeat_limiter.check_and_consume(session_id.as_str()) {
+                crate::player::metrics::inc_rate_limit_hits("heartbeat");
+                return Err(e);
+            }
 
             let server_ts = now_ms();
 
@@ -416,13 +437,17 @@ async fn handle_client_message(
                 broadcast.playback_time = playback_time;
                 broadcast.server_timestamp_ms = server_ts;
 
-                tracing::trace!("Heartbeat from {}: time={:.2}", session_id, playback_time);
+                tracing::trace!(broadcaster_id = %session_id, playback_time, "Heartbeat");
             }
         }
 
         RadioMessage::StopBroadcasting { broadcaster_id } => {
+            crate::player::metrics::inc_messages("StopBroadcasting");
+
             // Validate broadcaster session ID
             ensure_same_session(&broadcaster_id, validated_session_id)?;
+
+            tracing::info!(broadcaster_id = %broadcaster_id, "Broadcaster stopping");
 
             state.broadcast_states.remove(&broadcaster_id);
             state.broadcast_channels.remove(&broadcaster_id);
@@ -434,10 +459,10 @@ async fn handle_client_message(
             // A return value of Err does not mean that future calls to send will fail
             match state.global_broadcast_tx.send(offline_msg) {
                 Ok(count) => {
-                    tracing::debug!("BroadcasterOffline sent to {} clients", count);
+                    tracing::debug!(broadcaster_id = %broadcaster_id, clients = count, "BroadcasterOffline sent");
                 }
                 Err(_) => {
-                    tracing::debug!("BroadcasterOffline sent but no clients connected");
+                    tracing::debug!(broadcaster_id = %broadcaster_id, "BroadcasterOffline sent but no clients connected");
                 }
             }
 
@@ -450,10 +475,14 @@ async fn handle_client_message(
             playback_time,
             is_playing,
         } => {
+            crate::player::metrics::inc_messages("StartBroadcasting");
             ensure_same_session(&broadcaster_id, validated_session_id)?;
 
             // Enforce broadcast update rate limits (prevents spam)
-            broadcast_limiter.check_and_consume(&broadcaster_id)?;
+            if let Err(e) = broadcast_limiter.check_and_consume(&broadcaster_id) {
+                crate::player::metrics::inc_rate_limit_hits("broadcast");
+                return Err(e);
+            }
 
             // Ensure the requested song index exists in the playlist
             validate_song_index(song_index, state.playlist.len())?;
@@ -462,22 +491,22 @@ async fn handle_client_message(
 
             if was_already_broadcasting {
                 tracing::debug!(
-                    "Broadcaster {} already registered - updating state only (NOT incrementing counter)",
-                    broadcaster_id
+                    broadcaster_id = %broadcaster_id,
+                    "Already registered - updating state only (NOT incrementing counter)",
                 );
             } else {
                 tracing::debug!(
-                    "New broadcaster {} starting (incrementing counter)",
-                    broadcaster_id
+                    broadcaster_id = %broadcaster_id,
+                    "New broadcaster starting (incrementing counter)",
                 );
             }
 
-            tracing::debug!(
-                "Starting broadcast from {}: song={}, time={:.2}, playing={}",
-                &broadcaster_id,
+            tracing::info!(
+                broadcaster_id = %broadcaster_id,
                 song_index,
                 playback_time,
-                is_playing
+                is_playing,
+                "Starting broadcast"
             );
 
             let server_ts = now_ms();
@@ -509,7 +538,7 @@ async fn handle_client_message(
                 .entry(broadcaster_id.clone())
                 .or_insert_with(|| {
                     let (tx, _rx) = broadcast::channel::<Arc<PreparedMessage>>(100);
-                    tracing::debug!("Created broadcast channel for session: {}", broadcaster_id);
+                    tracing::debug!(broadcaster_id = %broadcaster_id, "Created broadcast channel");
                     tx
                 });
 
@@ -524,7 +553,7 @@ async fn handle_client_message(
                     .send(broadcasting_msg)
                     .map_err(|_| PlayerError::BroadcastSendError)?;
 
-                tracing::info!("Broadcaster {} came online", broadcaster_id);
+                tracing::info!(broadcaster_id = %broadcaster_id, "Broadcaster came online");
             }
 
             broadcast_analytics(state);
@@ -533,6 +562,7 @@ async fn handle_client_message(
         // On a page visibility reload checks if our session is alive and broadcasting,
         // if it is, returns the state so the sessions can resume its braodcating (this is used for mobile visibility mode)
         RadioMessage::QueryBroadcastState { session_id } => {
+            crate::player::metrics::inc_messages("QueryBroadcastState");
             ensure_same_session(&session_id, validated_session_id)?;
 
             // Check if this session is currently broadcasting, by making sure that the current session is both alive and broadcasting
@@ -540,9 +570,9 @@ async fn handle_client_message(
             let current_state = state.broadcast_states.get(&session_id).map(|b| b.clone());
 
             tracing::debug!(
-                "Query broadcast state for {}: {}",
-                session_id,
-                is_broadcasting
+                session_id = %session_id,
+                is_broadcasting,
+                "Query broadcast state"
             );
 
             let response = RadioMessage::BroadcastStateResponse {
@@ -573,9 +603,9 @@ async fn handle_client_message(
 fn ensure_same_session(expected: &str, actual: &str) -> Result<(), PlayerError> {
     (expected == actual).then_some(()).ok_or_else(|| {
         tracing::warn!(
-            "Session {} attempted to act as {}",
-            actual,
-            expected
+            session_id = %actual,
+            attempted_as = %expected,
+            "Session impersonation attempt"
         );
         PlayerError::BroadcastUnauthorized(
             "Trying to use session id that differs from the one established upon websocket handshake.".into())
@@ -588,8 +618,8 @@ pub fn delete_broadcasting_session(state: &SharedState, broadcaster_id: &str) {
     }
 
     tracing::info!(
-        "Auto-cleanup: Disconnected broadcaster {} - removing state",
-        broadcaster_id
+        broadcaster_id = %broadcaster_id,
+        "Auto-cleanup: Disconnected broadcaster - removing state",
     );
 
     state.broadcast_states.remove(broadcaster_id);
@@ -602,18 +632,18 @@ pub fn delete_broadcasting_session(state: &SharedState, broadcaster_id: &str) {
     match state.global_broadcast_tx.send(offline_msg) {
         Ok(listener_count) => {
             tracing::info!(
-                "Notified {} listener(s) that {} went offline",
-                listener_count,
-                broadcaster_id
+                broadcaster_id = %broadcaster_id,
+                listeners = listener_count,
+                "Notified listeners that broadcaster went offline"
             );
         }
         Err(_) => {
-            tracing::debug!("No listeners to notify for {}", broadcaster_id);
+            tracing::debug!(broadcaster_id = %broadcaster_id, "No listeners to notify");
         }
     }
 
     if state.broadcast_channels.remove(broadcaster_id).is_some() {
-        tracing::debug!("Removed broadcast channel for {}", broadcaster_id);
+        tracing::debug!(broadcaster_id = %broadcaster_id, "Removed broadcast channel");
     }
 
     broadcast_analytics(&state);
@@ -666,6 +696,9 @@ pub fn broadcast_analytics(state: &SharedState) {
     let active_connections = state.active_connections.load(Relaxed);
 
     let active_broadcasters = state.broadcast_channels.len();
+
+    // Update Prometheus gauges alongside the WebSocket analytics push
+    crate::player::metrics::set_active(active_connections, active_broadcasters, active_listeners);
 
     // Collect broadcaster states, injecting fresh listener counts so the UI
     // is always accurate regardless of whether TuneIn/TuneOut updated it
