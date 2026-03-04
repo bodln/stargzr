@@ -33,9 +33,12 @@ pub fn get_or_create_position(state: &AppState, session_id: &str) -> usize {
 
     let mut session = state.sessions
         .entry(session_id.to_string())
-        .or_insert(PlayerSession {
-            current_index: 0,
-            last_activity: now,
+        .or_insert_with(|| {
+            crate::player::metrics::inc_sessions_created();
+            PlayerSession {
+                current_index: 0,
+                last_activity: now,
+            }
         });
 
     // Either returns a valid session or creates a new one,
@@ -112,6 +115,7 @@ pub async fn cleanup_stale_sessions(state: Arc<AppState>) {
             });
 
             if removed > 0 {
+                crate::player::metrics::inc_sessions_cleaned(removed);
                 tracing::info!("Cleaned up {} stale player session(s)", removed);
             }
         }
@@ -190,6 +194,10 @@ pub fn remove_session_from_all_listeners(state: &Arc<AppState>, session_id: &str
         if entry.value_mut().remove(session_id) {
             affected_broadcasters.push((entry.key().clone(), entry.value().len()));
         }
+    }
+
+    if !affected_broadcasters.is_empty() {
+        crate::player::metrics::inc_abrupt_disconnects();
     }
 
     // Update cached listener_count if you keep it

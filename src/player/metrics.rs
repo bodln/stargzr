@@ -16,7 +16,6 @@ pub fn init_metrics() {
     let handle = PrometheusBuilder::new()
         .install_recorder()
         .expect("Failed to install Prometheus recorder");
-
     HANDLE.set(handle).ok();
 }
 
@@ -48,4 +47,18 @@ pub fn set_active(connections: usize, broadcasters: usize, listeners: usize) {
     gauge!("radio_active_connections").set(connections as f64);
     gauge!("radio_active_broadcasters").set(broadcasters as f64);
     gauge!("radio_active_listeners").set(listeners as f64);
+}
+
+pub fn inc_sessions_created() {
+    counter!("player_sessions_created_total").increment(1);
+}
+
+pub fn inc_sessions_cleaned(count: usize) {
+    counter!("player_sessions_cleaned_total").increment(count as u64);
+}
+
+// Fired when a client drops without sending TuneOut first (abrupt disconnect, tab close, etc).
+// Lets us see in Grafana how often clients disconnect uncleanly vs tuning out properly.
+pub fn inc_abrupt_disconnects() {
+    counter!("radio_abrupt_disconnects_total").increment(1);
 }
