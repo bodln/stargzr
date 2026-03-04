@@ -349,7 +349,6 @@ async fn handle_client_message(
             validate_song_index(song_index, state.playlist.len())?;
 
             tracing::debug!(
-                broadcaster_id = %broadcaster_id,
                 song_index,
                 playback_time,
                 is_playing,
@@ -403,10 +402,10 @@ async fn handle_client_message(
             if let Some(tx) = state.broadcast_channels.get(&broadcaster_id) {
                 match tx.send(sync_msg) {
                     Ok(count) => {
-                        tracing::trace!(broadcaster_id = %broadcaster_id, listeners = count, "Sync sent");
+                        tracing::trace!(listeners = count, "Sync sent");
                     }
                     Err(_) => {
-                        tracing::trace!(broadcaster_id = %broadcaster_id, "Sync sent but no active listeners");
+                        tracing::trace!("Sync sent but no active listeners");
                     }
                 }
             }
@@ -447,7 +446,7 @@ async fn handle_client_message(
             // Validate broadcaster session ID
             ensure_same_session(&broadcaster_id, validated_session_id)?;
 
-            tracing::info!(broadcaster_id = %broadcaster_id, "Broadcaster stopping");
+            tracing::info!("Broadcaster stopping");
 
             state.broadcast_states.remove(&broadcaster_id);
             state.broadcast_channels.remove(&broadcaster_id);
@@ -459,10 +458,10 @@ async fn handle_client_message(
             // A return value of Err does not mean that future calls to send will fail
             match state.global_broadcast_tx.send(offline_msg) {
                 Ok(count) => {
-                    tracing::debug!(broadcaster_id = %broadcaster_id, clients = count, "BroadcasterOffline sent");
+                    tracing::debug!(clients = count, "BroadcasterOffline sent");
                 }
                 Err(_) => {
-                    tracing::debug!(broadcaster_id = %broadcaster_id, "BroadcasterOffline sent but no clients connected");
+                    tracing::debug!("BroadcasterOffline sent but no clients connected");
                 }
             }
 
@@ -491,18 +490,15 @@ async fn handle_client_message(
 
             if was_already_broadcasting {
                 tracing::debug!(
-                    broadcaster_id = %broadcaster_id,
                     "Already registered - updating state only (NOT incrementing counter)",
                 );
             } else {
                 tracing::debug!(
-                    broadcaster_id = %broadcaster_id,
                     "New broadcaster starting (incrementing counter)",
                 );
             }
 
             tracing::info!(
-                broadcaster_id = %broadcaster_id,
                 song_index,
                 playback_time,
                 is_playing,
@@ -538,7 +534,7 @@ async fn handle_client_message(
                 .entry(broadcaster_id.clone())
                 .or_insert_with(|| {
                     let (tx, _rx) = broadcast::channel::<Arc<PreparedMessage>>(100);
-                    tracing::debug!(broadcaster_id = %broadcaster_id, "Created broadcast channel");
+                    tracing::debug!("Created broadcast channel");
                     tx
                 });
 
@@ -553,7 +549,7 @@ async fn handle_client_message(
                     .send(broadcasting_msg)
                     .map_err(|_| PlayerError::BroadcastSendError)?;
 
-                tracing::info!(broadcaster_id = %broadcaster_id, "Broadcaster came online");
+                tracing::info!("Broadcaster came online");
             }
 
             broadcast_analytics(state);
