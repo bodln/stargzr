@@ -162,7 +162,7 @@ pub async fn player_controls(
 
 /// Stream audio by song ID instead of index
 // #[tracing::instrument] creates a span for this function and correctly re-enters it on every
-// poll across .await points, using span.enter() + _guard directly in async code is wrong
+// poll across .await points using span.enter() + _guard directly in async code is wrong
 // because tokio can resume the future on a different thread, entering/exiting on mismatched threads.
 // skip(state, headers) because they don't implement Debug and would otherwise cause a compile error.
 // fields() picks exactly what gets attached to the span, everything else is excluded.
@@ -191,7 +191,7 @@ pub async fn stream_audio_by_id(
 /// Stream audio by song index
 // Same async-safe span reasoning as stream_audio_by_id above.
 // skip(state, headers) because they don't implement Debug and we don't need them in the span.
-#[tracing::instrument(skip(state, headers), fields(index, session_id = tracing::field::Empty))]
+#[tracing::instrument(skip(state, headers), fields(index = tracing::field::Empty, session_id = tracing::field::Empty))]
 pub async fn stream_audio_by_index(
     State(state): State<SharedState>,
     Path(index): Path<usize>,
@@ -200,6 +200,7 @@ pub async fn stream_audio_by_index(
     // Record the session so streaming logs are tied to who requested it
     let session_id = get_session_id(&headers);
     tracing::Span::current().record("session_id", &session_id.as_str());
+    tracing::Span::current().record("index", index);
 
     let song = state.playlist.get(index).ok_or_else(|| {
         tracing::warn!("Song not found at index: {}", index);
@@ -236,7 +237,7 @@ fn parse_range_header(headers: &HeaderMap, file_size: u64) -> Option<(u64, u64)>
 /// Streams an audio file to the client, with full support for HTTP byte-range requests.
 /// This handler is intentionally stateless: it does not modify playback state
 /// or session position, it only serves file data.
-// Inner span, automatically nested under stream_by_id or stream_by_index because instrument
+// Inner span automatically nested under stream_by_id or stream_by_index because instrument
 // propagates the parent span context through the call, so logs show both how the song was
 // requested and what happened serving it.
 // debug level only: every seek during playback fires a range request so this would be
