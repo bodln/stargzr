@@ -1,4 +1,4 @@
-use axum::extract::{Path, Query, State, WebSocketUpgrade};
+use axum::extract::{ConnectInfo, Path, Query, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::http::header;
@@ -7,6 +7,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 
+use crate::player::PeerAddr;
 use crate::player::radio::handle_radio_connection;
 use crate::player::validation::SessionId;
 
@@ -281,9 +282,19 @@ pub async fn radio_websocket(
     ws: WebSocketUpgrade,
     State(state): State<SharedState>,
     headers: HeaderMap,
+    // ConnectInfo is populated by axum at accept time via the Connected impl on NodeDelayListener.
+    // Gives us the peer's IP without touching headers, so it can't be spoofed by the client.
+    // Requires into_make_service_with_connect_info in serve() - plain into_make_service won't inject this.
+    ConnectInfo(addr): ConnectInfo<PeerAddr>,
 ) -> impl IntoResponse {
+    let ip = addr.0.ip().to_string();
+    // Reject upgrade if this IP is hammering connections
+    if let Err(_) = state.ws_rate_limiter.check_and_consume(&ip) {
+        crate::player::metrics::inc_ws_rejected();
+        tracing::warn!(ip = %ip, "WebSocket upgrade rejected: rate limit exceeded");
+        return (StatusCode::TOO_MANY_REQUESTS, "Too many connections").into_response();
+    }
     let session_id_str = get_session_id(&headers);
-
     // This is the session id first given to the user
     // It is used so if someone tampers with their original session their calls are moot
     let validated_session_id = match SessionId::new(session_id_str) {
@@ -291,6 +302,7 @@ pub async fn radio_websocket(
         Err(e) => {
             // If the session ID is invalid, reject the WebSocket upgrade
             tracing::warn!(
+                ip = %ip,
                 "Rejected WebSocket connection with invalid session ID: {}",
                 e
             );

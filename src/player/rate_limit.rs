@@ -35,6 +35,11 @@ impl RateLimiter {
         Self::new(10.0, 2.0)
     }
 
+    // For WebSocket upgrades per IP - burst of 5, 1 new connection per 10s sustained
+    pub fn for_websocket() -> Self {
+        Self::new(5.0, 0.1)
+    }
+
     pub fn check_and_consume(&self, session_id: &str) -> PlayerResult<()> {
         let mut bucket = self.buckets.entry(session_id.to_string())
             .or_insert_with(|| TokenBucket {

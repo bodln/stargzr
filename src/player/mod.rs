@@ -27,6 +27,7 @@ use handlers::{
     get_playlist, next_song, player_controls, player_page, prev_song, stream_audio_by_id,
     stream_audio_by_index,
 };
+use rate_limit::RateLimiter;
 use session::{cleanup_stale_sessions};
 
 /// Initializes the shared player state by scanning the music folder,
@@ -71,6 +72,7 @@ async fn init_player_state(music_folder: PathBuf) -> SharedState {
         global_broadcast_tx, // used to send Sync messages to listeners
         active_connections: AtomicUsize::new(0),
         last_analytics_ms: AtomicU64::new(0),
+        ws_rate_limiter: RateLimiter::for_websocket(),
     })
 }
 
@@ -129,6 +131,22 @@ impl axum::serve::Listener for NodeDelayListener {
     }
 }
 
+// Rust's orphan rule: you can only impl a trait for a type if either the trait or the type
+// is defined in your crate. Both Connected (axum) and SocketAddr (std) are foreign, so a
+// direct impl is illegal. The fix is a local newtype wrapper - it's defined in this crate,
+// which satisfies the orphan rule and lets us anchor the impl here.
+#[derive(Clone)]
+pub struct PeerAddr(pub std::net::SocketAddr);
+
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, NodeDelayListener>> for PeerAddr {
+    fn connect_info(target: axum::serve::IncomingStream<'_, NodeDelayListener>) -> Self {
+        // IncomingStream wraps the (TcpStream, SocketAddr) pair that NodeDelayListener::accept returns.
+        // remote_addr() gives us the peer's address which is then stored in ConnectInfo<PeerAddr>
+        // and made available to handlers via the ConnectInfo extractor - used by the WS rate limiter.
+        PeerAddr(*target.remote_addr())
+    }
+}
+
 /// Starts the MP3 player server, binds to a TCP port, and runs Axum
 pub async fn initialize(path_buf: PathBuf) {
     // Set up tracing/logging
@@ -161,8 +179,12 @@ pub async fn initialize(path_buf: PathBuf) {
     // Set up signal handler for Ctrl+C and shutdown_rx channel
     // Use: axum::serve(listener, router).with_graceful_shutdown(async { shutdown_rx.await.ok(); })
 
-    // Start serving requests, NodeDelayListener sets TCP_NODELAY on every accepted socket
-    axum::serve(NodeDelayListener(listener), router)
+    // into_make_service_with_connect_info propagates the peer address into handlers.
+    // PeerAddr instead of SocketAddr because of the orphan rule - see Connected impl above.
+    axum::serve(
+        NodeDelayListener(listener),
+        router.into_make_service_with_connect_info::<PeerAddr>(),
+    )
         .await
         .expect("Server failed");
 }

@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use tokio::sync::broadcast;
 
+use super::rate_limit::RateLimiter;
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SongInfo {
     pub id: String,
@@ -85,6 +87,9 @@ pub struct AppState {
     /// Timestamp (ms) of the last analytics broadcast.
     /// Used to throttle analytics on high-frequency paths like BroadcastUpdate.
     pub last_analytics_ms: AtomicU64,
+
+    /// Per-IP rate limiter for WebSocket upgrade requests.
+    pub ws_rate_limiter: RateLimiter,
 }
 
 /// Helper type for cleaner function signatures
