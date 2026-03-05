@@ -330,14 +330,24 @@ pub async fn radio_websocket(
     // Requires into_make_service_with_connect_info in serve() - plain into_make_service won't inject this.
     ConnectInfo(addr): ConnectInfo<PeerAddr>,
 ) -> impl IntoResponse {
-    let ip = addr.0.ip().to_string();
+    // Prefer X-Real-IP set by Caddy over the peer address.
+    // Behind a reverse proxy the peer is always 127.0.0.1 so ConnectInfo
+    // is useless for rate limiting - the real client IP comes from the header.
+    let ip = headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| addr.0.ip().to_string());
+
     // Reject upgrade if this IP is hammering connections
     if let Err(_) = state.ws_rate_limiter.check_and_consume(&ip) {
         crate::player::metrics::inc_ws_rejected();
         tracing::warn!(ip = %ip, "WebSocket upgrade rejected: rate limit exceeded");
         return (StatusCode::TOO_MANY_REQUESTS, "Too many connections").into_response();
     }
+
     let session_id_str = get_session_id(&headers);
+
     // This is the session id first given to the user
     // It is used so if someone tampers with their original session their calls are moot
     let validated_session_id = match SessionId::new(session_id_str) {
@@ -362,7 +372,9 @@ pub async fn radio_websocket(
     }
 
     crate::player::metrics::inc_ws_connections();
-    
+
+    tracing::info!(ip = %ip, "IP attempting to upgrade connection.");
+
     ws.on_upgrade(|socket| {
         handle_radio_connection(socket, state, validated_session_id.into_inner())
     })
