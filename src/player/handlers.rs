@@ -185,7 +185,7 @@ pub async fn stream_audio_by_id(
             StatusCode::NOT_FOUND
         })?;
 
-    stream_audio_internal(&state, song, &headers).await
+    stream_audio_internal(&state, song, &headers, &session_id).await
 }
 
 /// Stream audio by song index
@@ -207,7 +207,7 @@ pub async fn stream_audio_by_index(
         StatusCode::NOT_FOUND
     })?;
 
-    stream_audio_internal(&state, song, &headers).await
+    stream_audio_internal(&state, song, &headers, &session_id).await
 }
 
 /// Parses a "bytes=start-end" range header into (start, end) byte offsets.
@@ -247,9 +247,16 @@ pub async fn stream_audio_internal(
     state: &SharedState,
     song: &SongInfo,
     headers: &HeaderMap,
+    session_id: &str,
 ) -> Result<Response, StatusCode> {
     let file_path = state.music_folder.join(&song.filename);
     let file_size = song.size;
+
+    // Touch the session so passive listeners don't get cleaned up mid-song.
+    // Range requests fire on every seek so this naturally stays fresh during playback.
+    if let Some(mut session) = state.sessions.get_mut(session_id) {
+        session.last_activity = std::time::Instant::now();
+    }
 
     if let Some((start, end)) = parse_range_header(headers, file_size) {
         let mut file = File::open(&file_path)
