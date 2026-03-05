@@ -352,7 +352,17 @@ pub async fn radio_websocket(
             return (StatusCode::BAD_REQUEST, "Invalid session ID").into_response();
         }
     };
+
+    // Reject the upgrade if the session cookie doesn't map to a live server session.
+    // This catches expired sessions that passed cookie validation but were cleaned up.
+    // The frontend detects the 401 and reloads to get a fresh session.
+    if !state.sessions.contains_key(validated_session_id.as_str()) {
+        tracing::warn!(ip = %ip, session_id = %validated_session_id, "WebSocket upgrade rejected: session not found");
+        return (StatusCode::UNAUTHORIZED, "Session expired").into_response();
+    }
+
     crate::player::metrics::inc_ws_connections();
+    
     ws.on_upgrade(|socket| {
         handle_radio_connection(socket, state, validated_session_id.into_inner())
     })

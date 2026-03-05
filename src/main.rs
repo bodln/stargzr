@@ -15,13 +15,6 @@ async fn main() {
 // DOCUMENT ENTIRE WORK FLOW WITH CODE SNIPPETS
 
 // TODO
-// on get session id make sre the old session is still valid in the session, meaning it wasnt cleaned up, maybe add an endpoint for checking the session and reloading on the frontend
-// then remove the get session id function in session.rs and this just does it for you...idk, check that on song play too maybe and only send alert that you need to refresh
-// for now i will set the session cleanup to be way less frequent. 
-// UPDATE: this is partially done, i need to add a thing that upon loading into a page with a dead sssion it autoomatically reloads 
-
-
-// TODO
 // maybe figure out a way to resolve the cutting off of the last few seconds of the song for the tunedin listener when he is that many seconds behind the broadcaster, 
 // and the broadcaster goes to the next song automatically when he completely finishes the song he is broadcasting
 
@@ -51,7 +44,3 @@ async fn main() {
 // also this should be calculated only when seeking and never when switching songs, because we want the listener to start hearing a new song from 0:00 not ex. 0:00,8 or 0:01,1 
 // Also dont forget to remove the time correction on the frontend and have it done exclusively on the backend, maybe even have it on the tune in button,
 // so when someone tunes in we compare the time of the tune in vs the arrival of the current broadcast state and then adjust accordingly
-
-
-// TODO
-// Prometheus metrics scraping and graphana dipsplaying, firegraph maybe

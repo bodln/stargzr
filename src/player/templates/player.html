@@ -1468,13 +1468,27 @@
             this.updateConnectionState("error");
           };
 
-          const onClose = (event) => {
+          const onClose = async (event) => {
             debugLog(
               `WebSocket closed (code: ${event.code}, clean: ${event.wasClean})`,
             );
             this.updateConnectionState("disconnected");
-
             this.removeWebSocketHandlers();
+
+            // When a WebSocket upgrade is rejected with a non-101 the browser fires onerror then onclose with code 1006. 
+            // We can't read the HTTP status from a WebSocket error directly, so piggyback on the existing session check endpoint in the onClose handler
+            // Code 1006 means abnormal closure, could be a rejected upgrade.
+            // Check if the session expired and reload if so rather than reconnecting forever.
+            if (event.code === 1006 && !this.isIntentionalDisconnect) {
+              try {
+                const resp = await fetch("/stargzr/player/session/check");
+                if (resp.status === 401) {
+                  debugLog("Session expired on WS connect, reloading...");
+                  window.location.reload();
+                  return;
+                }
+              } catch (_) {}
+            }
 
             if (!this.isIntentionalDisconnect) {
               this.scheduleReconnect();
@@ -1711,7 +1725,7 @@
                 debugLog(
                   `canplay, seeking to ${seekTo.toFixed(2)}s (broadcaster at ${playback_time.toFixed(2)}s)`,
                 );
-                
+
                 this.audio.currentTime = seekTo;
                 if (is_playing) this.audio.play();
               },
@@ -2138,6 +2152,21 @@
       const player = new RadioPlayer(audio, sessionId);
 
       player.connectWebSocket();
+
+      // Check session validity on page load - if the server cleaned it up while we
+      // were away, reload so a fresh session cookie is issued rather than silently
+      // operating with a dead session.
+      (async () => {
+        try {
+          const resp = await fetch("/stargzr/player/session/check");
+          if (resp.status === 401) {
+            debugLog("Session expired, reloading to get a fresh one...");
+            window.location.reload();
+          }
+        } catch (_) {
+          // Network error on load, don't block the page
+        }
+      })();
 
       // UI Elements
       const tuneInBtn = document.getElementById("tune-in-btn");
