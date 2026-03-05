@@ -1,0 +1,12 @@
+stargzr.jumpingcrab.com {
+    handle /api* {
+        reverse_proxy 127.0.0.1:8084
+    }
+    handle /stargzr* {
+        reverse_proxy 127.0.0.1:8083 {
+            # Pass the real client IP to the backend so rate limiting works correctly.
+            # Without this, all requests appear to come from 127.0.0.1 (the proxy itself).
+            header_up X-Real-IP {remote_host}
+        }
+    }
+}
