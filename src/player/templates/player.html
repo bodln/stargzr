@@ -1212,6 +1212,10 @@
           // track is still playing. Cleared once the local 'ended' event fires and
           // we switch to the new song, or cancelled if a manual Sync arrives first.
           this.pendingAutoNextIndex = null;
+          // Target playback time for the pending AutoNext song. Defaults to 0 (start
+          // of track) but updated by any Sync the broadcaster sends while we're still
+          // finishing our current track, so a seek or pause after AutoNext is respected.
+          this.pendingAutoNextTime = 0;
 
           // Reconnection state
           this.reconnectAttempts = 0;
@@ -1686,13 +1690,17 @@
 
             debugLog(`AutoNext received: queuing song index ${msg.next_song_index} for after current track ends`);
             this.pendingAutoNextIndex = msg.next_song_index;
+            this.pendingAutoNextTime = 0; // start from beginning unless broadcaster seeks
 
-            // When our current song finishes, switch to the queued song from the top
+            // When our current song finishes, switch to the queued song at whatever
+            // position the broadcaster is at (updated below if they seek before we finish)
             this.audio.addEventListener('ended', () => {
               if (this.pendingAutoNextIndex === null) return;
 
               const idx = this.pendingAutoNextIndex;
+              const seekTo = this.pendingAutoNextTime;
               this.pendingAutoNextIndex = null;
+              this.pendingAutoNextTime = 0;
 
               const songId = window.playlistManager?.getSongIdByServerIndex(idx) ?? null;
               this.audio.src = songId
@@ -1701,11 +1709,11 @@
               this.audio.load();
 
               this.audio.addEventListener('canplay', () => {
-                this.audio.currentTime = 0;
+                this.audio.currentTime = seekTo;
                 this.audio.play();
               }, { once: true });
 
-              debugLog(`AutoNext: switched to song index ${idx} after local track ended`);
+              debugLog(`AutoNext: switched to song index ${idx} at ${seekTo.toFixed(2)}s after local track ended`);
             }, { once: true });
 
             return;
@@ -1727,9 +1735,11 @@
           const { song_index, playback_time, is_playing, server_timestamp_ms } =
             msg;
 
-          // Broadcaster already moved on via AutoNext, suppress the Sync for that song
-          // so we don't jump mid-track; we'll switch over when our own ended fires.
+          // Broadcaster is still on the pending AutoNext song, don't switch yet,
+          // but record their current position so if they seek we start at the right spot.
           if (this.pendingAutoNextIndex !== null && msg.song_index === this.pendingAutoNextIndex) {
+            this.pendingAutoNextTime = playback_time;
+            debugLog(`AutoNext position updated to ${playback_time.toFixed(2)}s (broadcaster seeked before we finished)`);
             return;
           }
 
@@ -1744,7 +1754,7 @@
 
           if (currentIndex !== song_index) {
             // Broadcaster switched to a different song.
-            // Load the new track and defer the seek until canplay fires,
+            // Load the new track and defer the seek until canplay fires
             // seeking before the browser has buffered any data causes the
             // half-second skip at the start of every song change.
             debugLog(
@@ -1882,6 +1892,7 @@
           this.mode = "private";
           this.tunedBroadcaster = null;
           this.pendingAutoNextIndex = null;
+          this.pendingAutoNextTime = 0;
 
           modeDisplay.textContent = "Private Mode";
           modeDisplay.className = "mode-badge private";
