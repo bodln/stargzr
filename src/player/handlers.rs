@@ -63,6 +63,12 @@ pub async fn next_song(State(state): State<SharedState>, headers: HeaderMap) -> 
         .map(|s| s.filename.clone())
         .unwrap_or_else(|| "No songs found".to_string());
 
+    // Touch the session so passive listeners don't get cleaned up mid-song.
+    // Range requests fire on every seek so this naturally stays fresh during playback.
+    if let Some(mut session) = state.sessions.get_mut(&session_id) {
+        session.last_activity = std::time::Instant::now();
+    }
+
     // Return updated control state (used for partial page updates)
     PlayerControlsTemplate {
         current_song,
@@ -94,6 +100,12 @@ pub async fn prev_song(State(state): State<SharedState>, headers: HeaderMap) -> 
         .get(new_index)
         .map(|s| s.filename.clone())
         .unwrap_or_else(|| "No songs found".to_string());
+
+    // Touch the session so passive listeners don't get cleaned up mid-song.
+    // Range requests fire on every seek so this naturally stays fresh during playback.
+    if let Some(mut session) = state.sessions.get_mut(&session_id) {
+        session.last_activity = std::time::Instant::now();
+    }
 
     // Return updated control state (used for partial page updates)
     PlayerControlsTemplate {

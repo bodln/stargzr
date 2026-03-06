@@ -1475,7 +1475,7 @@
             this.updateConnectionState("disconnected");
             this.removeWebSocketHandlers();
 
-            // When a WebSocket upgrade is rejected with a non-101 the browser fires onerror then onclose with code 1006. 
+            // When a WebSocket upgrade is rejected with a non-101 the browser fires onerror then onclose with code 1006.
             // We can't read the HTTP status from a WebSocket error directly, so piggyback on the existing session check endpoint in the onClose handler
             // Code 1006 means abnormal closure, could be a rejected upgrade.
             // Check if the session expired and reload if so rather than reconnecting forever.
@@ -1551,6 +1551,17 @@
 
           if (this.isBroadcasting) {
             this.stopBroadcasting();
+          }
+
+          // Explicitly tell the server we're no longer listening before closing.
+          // On mobile the OS may keep the TCP connection alive after the app exits,
+          // so the server can't rely on socket close alone to clean up listener state.
+          if (
+            this.mode === "radio" &&
+            this.ws &&
+            this.ws.readyState === WebSocket.OPEN
+          ) {
+            this.ws.send(JSON.stringify({ type: "TuneOut" }));
           }
 
           if (this.ws) {

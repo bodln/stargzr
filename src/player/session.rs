@@ -196,6 +196,10 @@ pub fn remove_session_from_all_listeners(state: &Arc<AppState>, session_id: &str
         }
     }
 
+    // Clean up reverse map, without this session_tuned_to leaks entries
+    // for every listener that disconnects without sending TuneOut first
+    state.session_tuned_to.remove(session_id);
+
     if !affected_broadcasters.is_empty() {
         crate::player::metrics::inc_abrupt_disconnects();
     }

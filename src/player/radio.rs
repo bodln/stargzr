@@ -13,7 +13,7 @@ use super::error::{PlayerError, PlayerResult};
 use super::rate_limit::RateLimiter;
 use super::validation::{SessionId, validate_song_index};
 
-use super::session::{now_ms};
+use super::session::now_ms;
 use super::types::{BroadcastState, PreparedMessage, RadioMessage, SharedState};
 
 // Analytics are expensive, don't send more often than this on high-frequency paths
@@ -54,120 +54,128 @@ pub async fn handle_radio_connection(
     // Send task
     let state_clone = state.clone();
 
-    let mut send_task = tokio::spawn(async move {
-        let mut current_tuned_broadcaster_rx: Option<broadcast::Receiver<Arc<PreparedMessage>>> = None;
+    let mut send_task = tokio::spawn(
+        async move {
+            let mut current_tuned_broadcaster_rx: Option<
+                broadcast::Receiver<Arc<PreparedMessage>>,
+            > = None;
 
-        loop {
-            // biased: skips random branch selection, tuned broadcaster is the hottest path
-            // and gets priority when multiple branches are ready simultaneously
-            tokio::select! {
-                biased;
+            loop {
+                // biased: skips random branch selection, tuned broadcaster is the hottest path
+                // and gets priority when multiple branches are ready simultaneously
+                tokio::select! {
+                    biased;
 
-                // Broadcast messages from the tuned broadcaster, hottest path, checked first
-                Ok(msg) = async {
-                    match &mut current_tuned_broadcaster_rx {
-                        Some(rx) => rx.recv().await,
-                        // If current_tuned_broadcaster_rx is None, return a pending future
-                        // so this branch never becomes ready and never wins select!
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    if let Err(e) = send_prepared(&mut sender, &msg).await {
-                        tracing::error!("Failed to forward broadcast: {}", e);
-                        break;
-                    }
-                }
-
-                // Global channel
-                Ok(msg) = global_broadcast_rx.recv() => {
-                    if let Err(e) = send_prepared(&mut sender, &msg).await {
-                        tracing::error!("Failed to forward broadcast: {}", e);
-                        break;
-                    }
-                }
-
-                // Messages from the receive task
-                Some(msg) = out_rx.recv() => {
-                    if let Err(e) = send_message(&mut sender, &msg).await {
-                        tracing::error!("Failed to send message: {}", e);
-                        break;
-                    }
-                }
-
-                // Change the channel we are listening on in the case of change
-                Ok(()) = tuned_rx.changed() => {
-                    match tuned_rx.borrow().clone() {
-                        Some(broadcast_id) => {
-                            let tx = state_clone.broadcast_channels
-                                .get(&broadcast_id)
-                                .map(|r| r.clone());
-
-                            current_tuned_broadcaster_rx = tx.map(|t| t.subscribe());
-                            tracing::debug!(broadcaster_id = %broadcast_id, "Tuned in");
+                    // Broadcast messages from the tuned broadcaster, hottest path, checked first
+                    Ok(msg) = async {
+                        match &mut current_tuned_broadcaster_rx {
+                            Some(rx) => rx.recv().await,
+                            // If current_tuned_broadcaster_rx is None, return a pending future
+                            // so this branch never becomes ready and never wins select!
+                            None => std::future::pending().await,
                         }
-                        None => {
-                            current_tuned_broadcaster_rx = None;
-                            tracing::debug!("Tuned out");
+                    } => {
+                        if let Err(e) = send_prepared(&mut sender, &msg).await {
+                            tracing::error!("Failed to forward broadcast: {}", e);
+                            break;
                         }
                     }
-                }
 
-                else => {
-                    tracing::debug!("Send task channel closed");
-                    break;
+                    // Global channel
+                    Ok(msg) = global_broadcast_rx.recv() => {
+                        if let Err(e) = send_prepared(&mut sender, &msg).await {
+                            tracing::error!("Failed to forward broadcast: {}", e);
+                            break;
+                        }
+                    }
+
+                    // Messages from the receive task
+                    Some(msg) = out_rx.recv() => {
+                        if let Err(e) = send_message(&mut sender, &msg).await {
+                            tracing::error!("Failed to send message: {}", e);
+                            break;
+                        }
+                    }
+
+                    // Change the channel we are listening on in the case of change
+                    Ok(()) = tuned_rx.changed() => {
+                        match tuned_rx.borrow().clone() {
+                            Some(broadcast_id) => {
+                                let tx = state_clone.broadcast_channels
+                                    .get(&broadcast_id)
+                                    .map(|r| r.clone());
+
+                                current_tuned_broadcaster_rx = tx.map(|t| t.subscribe());
+                                tracing::debug!(broadcaster_id = %broadcast_id, "Tuned in");
+                            }
+                            None => {
+                                current_tuned_broadcaster_rx = None;
+                                tracing::debug!("Tuned out");
+                            }
+                        }
+                    }
+
+                    else => {
+                        tracing::debug!("Send task channel closed");
+                        break;
+                    }
                 }
             }
         }
-    }.instrument(session_span.clone()));
+        .instrument(session_span.clone()),
+    );
 
     // Receive task
     let state_clone = state.clone();
     let validated_session_id_clone = validated_session_id.clone();
 
-    let mut receive_task = tokio::spawn(async move {
-        while let Some(msg_result) = receiver.next().await {
-            match msg_result {
-                Ok(Message::Text(text)) => {
-                    tracing::trace!("Received message: {}", text);
+    let mut receive_task = tokio::spawn(
+        async move {
+            while let Some(msg_result) = receiver.next().await {
+                match msg_result {
+                    Ok(Message::Text(text)) => {
+                        tracing::trace!("Received message: {}", text);
 
-                    match serde_json::from_str::<RadioMessage>(&text) {
-                        Ok(radio_msg) => {
-                            if let Err(e) = handle_client_message(
-                                radio_msg,
-                                &state_clone,
-                                &validated_session_id_clone,
-                                &out_tx,
-                                &tuned_tx,
-                                &heartbeat_limiter,
-                                &broadcast_limiter,
-                            )
-                            .await
-                            {
-                                tracing::error!("Failed to handle message: {}", e);
-                                // Send error to client
-                                let error_msg = create_error_message(&e);
-                                let _ = out_tx.send(error_msg).await;
+                        match serde_json::from_str::<RadioMessage>(&text) {
+                            Ok(radio_msg) => {
+                                if let Err(e) = handle_client_message(
+                                    radio_msg,
+                                    &state_clone,
+                                    &validated_session_id_clone,
+                                    &out_tx,
+                                    &tuned_tx,
+                                    &heartbeat_limiter,
+                                    &broadcast_limiter,
+                                )
+                                .await
+                                {
+                                    tracing::error!("Failed to handle message: {}", e);
+                                    // Send error to client
+                                    let error_msg = create_error_message(&e);
+                                    let _ = out_tx.send(error_msg).await;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to parse message: {}", e);
                             }
                         }
-                        Err(e) => {
-                            tracing::warn!("Failed to parse message: {}", e);
-                        }
                     }
+                    Ok(Message::Close(_)) => {
+                        tracing::info!("Client closed connection");
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::error!("WebSocket error: {}", e);
+                        break;
+                    }
+                    _ => {}
                 }
-                Ok(Message::Close(_)) => {
-                    tracing::info!("Client closed connection");
-                    break;
-                }
-                Err(e) => {
-                    tracing::error!("WebSocket error: {}", e);
-                    break;
-                }
-                _ => {}
             }
-        }
 
-        tracing::debug!("Receive task ended");
-    }.instrument(session_span));
+            tracing::debug!("Receive task ended");
+        }
+        .instrument(session_span),
+    );
 
     // Wait for either task to complete, then abort the other too
     tokio::select! {
@@ -241,7 +249,8 @@ async fn handle_client_message(
             tracing::info!(broadcaster_id = %session_id, "Client tuning in");
 
             // If already tuned to someone, remove from their listener set first
-            if let Some((_, old_broadcaster)) = state.session_tuned_to.remove(validated_session_id) {
+            if let Some((_, old_broadcaster)) = state.session_tuned_to.remove(validated_session_id)
+            {
                 if let Some(mut listeners) = state.broadcaster_listeners.get_mut(&old_broadcaster) {
                     listeners.remove(validated_session_id);
                 }
@@ -254,10 +263,9 @@ async fn handle_client_message(
                 .insert(validated_session_id.to_string());
 
             // Track reverse mapping for O(1) TuneOut
-            state.session_tuned_to.insert(
-                validated_session_id.to_string(),
-                broadcaster_id.clone(),
-            );
+            state
+                .session_tuned_to
+                .insert(validated_session_id.to_string(), broadcaster_id.clone());
 
             if let Some(mut broadcast) = state.broadcast_states.get_mut(&broadcaster_id) {
                 let count = state
@@ -348,12 +356,7 @@ async fn handle_client_message(
             // Ensure the requested song index exists in the playlist
             validate_song_index(song_index, state.playlist.len())?;
 
-            tracing::debug!(
-                song_index,
-                playback_time,
-                is_playing,
-                "Broadcast update"
-            );
+            tracing::debug!(song_index, playback_time, is_playing, "Broadcast update");
 
             // If the session isn't broadcasting don't update
             if !state.broadcast_states.contains_key(&broadcaster_id) {
@@ -382,7 +385,7 @@ async fn handle_client_message(
                 playback_time,
                 is_playing,
                 server_timestamp_ms: server_ts,
-                listener_count
+                listener_count,
             };
 
             state
@@ -430,6 +433,12 @@ async fn handle_client_message(
             }
 
             let server_ts = now_ms();
+
+            // Touch the session so passive listeners don't get cleaned up mid-song.
+            // Range requests fire on every seek so this naturally stays fresh during playback.
+            if let Some(mut session) = state.sessions.get_mut(session_id.as_str()) {
+                session.last_activity = std::time::Instant::now();
+            }
 
             // Update playback time for the broadcaster
             if let Some(mut broadcast) = state.broadcast_states.get_mut(&broadcaster_id) {
@@ -493,17 +502,10 @@ async fn handle_client_message(
                     "Already registered - updating state only (NOT incrementing counter)",
                 );
             } else {
-                tracing::debug!(
-                    "New broadcaster starting (incrementing counter)",
-                );
+                tracing::debug!("New broadcaster starting (incrementing counter)",);
             }
 
-            tracing::info!(
-                song_index,
-                playback_time,
-                is_playing,
-                "Starting broadcast"
-            );
+            tracing::info!(song_index, playback_time, is_playing, "Starting broadcast");
 
             let server_ts = now_ms();
 
@@ -540,9 +542,10 @@ async fn handle_client_message(
 
             // Send announcement through global channel, not the broadcaster's channel
             if !was_already_broadcasting {
-                let broadcasting_msg = Arc::new(PreparedMessage::new(&RadioMessage::BroadcasterOnline {
-                    broadcaster_id: broadcaster_id.clone(),
-                }));
+                let broadcasting_msg =
+                    Arc::new(PreparedMessage::new(&RadioMessage::BroadcasterOnline {
+                        broadcaster_id: broadcaster_id.clone(),
+                    }));
 
                 state
                     .global_broadcast_tx
@@ -562,7 +565,8 @@ async fn handle_client_message(
             ensure_same_session(&session_id, validated_session_id)?;
 
             // Check if this session is currently broadcasting, by making sure that the current session is both alive and broadcasting
-            let is_broadcasting = state.broadcast_states.contains_key(&session_id) && state.sessions.contains_key(&session_id);
+            let is_broadcasting = state.broadcast_states.contains_key(&session_id)
+                && state.sessions.contains_key(&session_id);
             let current_state = state.broadcast_states.get(&session_id).map(|b| b.clone());
 
             tracing::debug!(
@@ -665,7 +669,8 @@ pub fn broadcast_analytics_throttled(state: &SharedState) {
     }
 
     // compare_exchange prevents a thundering herd of concurrent updates all firing at once
-    if state.last_analytics_ms
+    if state
+        .last_analytics_ms
         .compare_exchange(last, now, Relaxed, Relaxed)
         .is_ok()
     {
