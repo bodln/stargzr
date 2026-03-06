@@ -1208,6 +1208,11 @@
           this.wakeLock = null;
           this.pageHiddenAt = null;
 
+          // Queued next song index received from AutoNext while listener's current
+          // track is still playing. Cleared once the local 'ended' event fires and
+          // we switch to the new song, or cancelled if a manual Sync arrives first.
+          this.pendingAutoNextIndex = null;
+
           // Reconnection state
           this.reconnectAttempts = 0;
           this.maxReconnectAttempts = 10;
@@ -1475,7 +1480,7 @@
             this.updateConnectionState("disconnected");
             this.removeWebSocketHandlers();
 
-            // When a WebSocket upgrade is rejected with a non-101 the browser fires onerror then onclose with code 1006.
+            // When a WebSocket upgrade is rejected with a non-101 the browser fires onerror then onclose with code 1006. 
             // We can't read the HTTP status from a WebSocket error directly, so piggyback on the existing session check endpoint in the onClose handler
             // Code 1006 means abnormal closure, could be a rejected upgrade.
             // Check if the session expired and reload if so rather than reconnecting forever.
@@ -1556,12 +1561,8 @@
           // Explicitly tell the server we're no longer listening before closing.
           // On mobile the OS may keep the TCP connection alive after the app exits,
           // so the server can't rely on socket close alone to clean up listener state.
-          if (
-            this.mode === "radio" &&
-            this.ws &&
-            this.ws.readyState === WebSocket.OPEN
-          ) {
-            this.ws.send(JSON.stringify({ type: "TuneOut" }));
+          if (this.mode === 'radio' && this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify({ type: 'TuneOut' }));
           }
 
           if (this.ws) {
@@ -1677,6 +1678,39 @@
             return;
           }
 
+          // Broadcaster's song ended naturally — queue the next song index so
+          // we can let our own track finish before switching, instead of being
+          // yanked forward by the normal Sync path.
+          if (msg.type === 'AutoNext') {
+            if (this.mode !== 'radio') return;
+
+            debugLog(`AutoNext received: queuing song index ${msg.next_song_index} for after current track ends`);
+            this.pendingAutoNextIndex = msg.next_song_index;
+
+            // When our current song finishes, switch to the queued song from the top
+            this.audio.addEventListener('ended', () => {
+              if (this.pendingAutoNextIndex === null) return;
+
+              const idx = this.pendingAutoNextIndex;
+              this.pendingAutoNextIndex = null;
+
+              const songId = window.playlistManager?.getSongIdByServerIndex(idx) ?? null;
+              this.audio.src = songId
+                ? `/stargzr/player/stream/id/${songId}`
+                : `/stargzr/player/stream/${idx}`;
+              this.audio.load();
+
+              this.audio.addEventListener('canplay', () => {
+                this.audio.currentTime = 0;
+                this.audio.play();
+              }, { once: true });
+
+              debugLog(`AutoNext: switched to song index ${idx} after local track ended`);
+            }, { once: true });
+
+            return;
+          }
+
           if (this.mode !== "radio") return;
 
           switch (msg.type) {
@@ -1693,11 +1727,24 @@
           const { song_index, playback_time, is_playing, server_timestamp_ms } =
             msg;
 
+          // Broadcaster already moved on via AutoNext, suppress the Sync for that song
+          // so we don't jump mid-track; we'll switch over when our own ended fires.
+          if (this.pendingAutoNextIndex !== null && msg.song_index === this.pendingAutoNextIndex) {
+            return;
+          }
+
+          // Any manual action by the broadcaster (seek, skip, pause) clears the
+          // pending AutoNext since we now need to hard-sync to their position.
+          if (this.pendingAutoNextIndex !== null && msg.song_index !== this.pendingAutoNextIndex) {
+            debugLog(`Manual broadcaster action cleared pendingAutoNextIndex (was ${this.pendingAutoNextIndex})`);
+            this.pendingAutoNextIndex = null;
+          }
+
           const currentIndex = this.getCurrentSongIndex();
 
           if (currentIndex !== song_index) {
             // Broadcaster switched to a different song.
-            // Load the new track and defer the seek until canplay fires —
+            // Load the new track and defer the seek until canplay fires,
             // seeking before the browser has buffered any data causes the
             // half-second skip at the start of every song change.
             debugLog(
@@ -1834,6 +1881,7 @@
 
           this.mode = "private";
           this.tunedBroadcaster = null;
+          this.pendingAutoNextIndex = null;
 
           modeDisplay.textContent = "Private Mode";
           modeDisplay.className = "mode-badge private";
@@ -1911,6 +1959,19 @@
           this.ws.send(JSON.stringify(msg));
         }
 
+        // Sends AutoNext to all listeners before advancing to the next song naturally.
+        // Lets listeners finish their own playback instead of being yanked forward by Sync.
+        sendAutoNext(nextSongIndex) {
+          if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+          debugLog(`Sending AutoNext: next song index ${nextSongIndex}`);
+          this.ws.send(JSON.stringify({
+            type: 'AutoNext',
+            broadcaster_id: this.sessionId,
+            next_song_index: nextSongIndex,
+            server_timestamp_ms: 0,
+          }));
+        }
+
         startBroadcasting() {
           if (this.isStartingBroadcast) {
             debugLog("Already starting broadcast, ignoring duplicate request");
@@ -1965,13 +2026,25 @@
             this.ws.send(JSON.stringify(msg));
           };
 
+          // Browsers fire 'pause' BEFORE 'ended' when a track finishes naturally
+          // (the spec pauses the element first, then queues the ended event).
+          // If we broadcast that pause, listeners receive a Sync with the old song
+          // at near-end position and get paused, cutting off their last second,
+          // before AutoNext even arrives at the server.
+          // We skip the BroadcastUpdate if the element has already ended.
+          // Intentional user pauses (audio.ended === false) still go through normally.
+          const sendPauseUpdate = () => {
+            if (this.audio.ended) return;
+            sendUpdate();
+          };
+
           // Store handlers for cleanup
           this.audioEventHandlers.set("play", sendUpdate);
-          this.audioEventHandlers.set("pause", sendUpdate);
+          this.audioEventHandlers.set("pause", sendPauseUpdate);
           this.audioEventHandlers.set("seeked", sendUpdate);
 
           this.audio.addEventListener("play", sendUpdate);
-          this.audio.addEventListener("pause", sendUpdate);
+          this.audio.addEventListener("pause", sendPauseUpdate);
           this.audio.addEventListener("seeked", sendUpdate);
 
           this.heartbeatInterval = setInterval(
@@ -2246,8 +2319,18 @@
       // Audio ended handler uses playlist manager
       audio.addEventListener("ended", () => {
         if (player.isInRadioMode()) {
-          debugLog("Track ended, but in radio mode, waiting for broadcaster");
+          debugLog("Track ended in radio mode, waiting for AutoNext or next Sync");
           return;
+        }
+
+        // If broadcasting, tell listeners the song ended naturally before we advance.
+        // This lets them finish their own playback instead of being yanked forward by Sync.
+        if (player.isBroadcasting) {
+          const nextSong = playlistManager.getNextSong();
+          if (nextSong) {
+            const nextIndex = playlistManager.getServerIndexById(nextSong.id);
+            player.sendAutoNext(nextIndex);
+          }
         }
 
         debugLog("Track ended, moving to next track");

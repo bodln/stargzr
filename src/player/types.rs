@@ -176,4 +176,13 @@ pub enum RadioMessage {
         is_broadcasting: bool,
         current_state: Option<BroadcastState>,
     },
+
+    /// Broadcaster's song ended naturally; listeners should finish their
+    /// current playback then start the next song from the beginning.
+    /// Suppresses the normal Sync jump so listeners don't lose their last few seconds.
+    AutoNext {
+        broadcaster_id: String,
+        next_song_index: usize,
+        server_timestamp_ms: u64,
+    },
 }

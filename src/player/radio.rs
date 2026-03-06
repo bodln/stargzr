@@ -587,6 +587,50 @@ async fn handle_client_message(
                 .map_err(|_| PlayerError::WebSocketError("Failed to send state response".into()))?;
         }
 
+        RadioMessage::AutoNext {
+            broadcaster_id,
+            next_song_index,
+            ..
+        } => {
+            crate::player::metrics::inc_messages("AutoNext");
+            ensure_same_session(&broadcaster_id, validated_session_id)?;
+
+            // Ensure the requested song index exists in the playlist
+            validate_song_index(next_song_index, state.playlist.len())?;
+
+            let server_ts = now_ms();
+
+            let song_name = state
+                .playlist
+                .get(next_song_index)
+                .map(|s| s.filename.clone())
+                .unwrap_or_else(|| format!("Unknown song #{}", next_song_index));
+
+            // Advance authoritative state so late-joining listeners get the right song
+            if let Some(mut broadcast) = state.broadcast_states.get_mut(&broadcaster_id) {
+                broadcast.song_index = next_song_index;
+                broadcast.song_name = song_name;
+                broadcast.playback_time = 0.0;
+                broadcast.server_timestamp_ms = server_ts;
+            }
+
+            // Fan out AutoNext as-is so listeners can handle it differently from Sync
+            let msg = Arc::new(PreparedMessage::new(&RadioMessage::AutoNext {
+                broadcaster_id: broadcaster_id.clone(),
+                next_song_index,
+                server_timestamp_ms: server_ts as u64,
+            }));
+
+            if let Some(tx) = state.broadcast_channels.get(&broadcaster_id) {
+                match tx.send(msg) {
+                    Ok(n)  => tracing::debug!(listeners = n, "AutoNext fanned out"),
+                    Err(_) => tracing::debug!("AutoNext sent but no active listeners"),
+                }
+            }
+
+            broadcast_analytics_throttled(state);
+        }
+
         _ => {
             // Any unexpected messages are logged but ignored
             tracing::warn!("Received unexpected message type");
