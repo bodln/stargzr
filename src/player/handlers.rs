@@ -178,7 +178,7 @@ pub async fn player_controls(
 // because tokio can resume the future on a different thread, entering/exiting on mismatched threads.
 // skip(state, headers) because they don't implement Debug and would otherwise cause a compile error.
 // fields() picks exactly what gets attached to the span, everything else is excluded.
-#[tracing::instrument(skip(state, headers), fields(song_id = %song_id, session_id = tracing::field::Empty))]
+#[tracing::instrument(skip(state, headers), fields(song_id = %song_id, session_id = tracing::field::Empty, ip = tracing::field::Empty))]
 pub async fn stream_audio_by_id(
     State(state): State<SharedState>,
     Path(song_id): Path<String>,
@@ -186,6 +186,13 @@ pub async fn stream_audio_by_id(
 ) -> Result<Response, StatusCode> {
     // Record the session so streaming logs are tied to who requested it
     let session_id = get_session_id(&headers);
+    
+    let ip = headers
+    .get("x-real-ip")
+    .and_then(|v| v.to_str().ok())
+    .unwrap_or("unknown");
+
+    tracing::Span::current().record("ip", ip);
     tracing::Span::current().record("session_id", &session_id.as_str());
 
     let song = state
@@ -203,7 +210,7 @@ pub async fn stream_audio_by_id(
 /// Stream audio by song index
 // Same async-safe span reasoning as stream_audio_by_id above.
 // skip(state, headers) because they don't implement Debug and we don't need them in the span.
-#[tracing::instrument(skip(state, headers), fields(index = tracing::field::Empty, session_id = tracing::field::Empty))]
+#[tracing::instrument(skip(state, headers), fields(index = tracing::field::Empty, session_id = tracing::field::Empty, ip = tracing::field::Empty))]
 pub async fn stream_audio_by_index(
     State(state): State<SharedState>,
     Path(index): Path<usize>,
@@ -211,6 +218,13 @@ pub async fn stream_audio_by_index(
 ) -> Result<Response, StatusCode> {
     // Record the session so streaming logs are tied to who requested it
     let session_id = get_session_id(&headers);
+    
+    let ip = headers
+    .get("x-real-ip")
+    .and_then(|v| v.to_str().ok())
+    .unwrap_or("unknown");
+
+    tracing::Span::current().record("ip", ip);
     tracing::Span::current().record("session_id", &session_id.as_str());
     tracing::Span::current().record("index", index);
 
@@ -254,7 +268,7 @@ fn parse_range_header(headers: &HeaderMap, file_size: u64) -> Option<(u64, u64)>
 // requested and what happened serving it.
 // debug level only: every seek during playback fires a range request so this would be
 // extremely noisy at info.
-#[tracing::instrument(skip(state, headers), fields(song = %song.filename, size = song.size))]
+#[tracing::instrument(skip(state, headers, session_id), fields(song = %song.filename, size = song.size))]
 pub async fn stream_audio_internal(
     state: &SharedState,
     song: &SongInfo,
@@ -395,7 +409,7 @@ pub async fn radio_websocket(
     tracing::info!(ip = %ip, "IP attempting to upgrade connection.");
 
     ws.on_upgrade(|socket| {
-        handle_radio_connection(socket, state, validated_session_id.into_inner())
+        handle_radio_connection(socket, state, validated_session_id.into_inner(), ip)
     })
 }
 

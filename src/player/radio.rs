@@ -24,6 +24,7 @@ pub async fn handle_radio_connection(
     socket: WebSocket,
     state: SharedState,
     validated_session_id: String,
+    ip: String,
 ) {
     let (mut sender, mut receiver) = socket.split();
 
@@ -49,6 +50,7 @@ pub async fn handle_radio_connection(
     let session_span = tracing::info_span!(
         "ws_session",
         session_id = %validated_session_id,
+        ip = %ip,
     );
 
     // Send task
