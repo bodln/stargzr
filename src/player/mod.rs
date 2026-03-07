@@ -12,7 +12,7 @@ pub mod reconnect;
 
 pub use types::{AppState, BroadcastState, RadioMessage, SharedState, SongInfo};
 
-use crate::player::handlers::{check_session, metrics_handler, radio_websocket};
+use crate::player::handlers::{admin_state, check_session, metrics_handler, radio_websocket};
 
 use self::logging::init_logging;
 use axum::Router;
@@ -94,6 +94,7 @@ pub fn create_player_router(state: Arc<AppState>) -> impl std::future::Future<Ou
             .route("/player/playlist", get(get_playlist))
             .route("/player/session/check", get(check_session))
             .route("/metrics", get(metrics_handler))
+            .route("/player/admin/state", get(admin_state)) // Information from the DashMaps in state
             .with_state(state.clone()); // Attach shared state
 
         // Nest the inner router under "/stargzr" so all routes are prefixed

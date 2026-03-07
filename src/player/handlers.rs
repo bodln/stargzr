@@ -1,8 +1,8 @@
 use axum::extract::{ConnectInfo, Path, Query, State, WebSocketUpgrade};
+use axum::http::header;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::http::header;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
@@ -11,8 +11,10 @@ use crate::player::PeerAddr;
 use crate::player::radio::handle_radio_connection;
 use crate::player::validation::SessionId;
 
-use super::session::{get_session_id, get_or_create_position, update_session_index, update_broadcast_index};
-use super::templates::{PlayerTemplate, PlayerControlsTemplate};
+use super::session::{
+    get_or_create_position, get_session_id, update_broadcast_index, update_session_index,
+};
+use super::templates::{PlayerControlsTemplate, PlayerTemplate};
 use super::types::{SharedState, SongInfo};
 
 /// Renders the main player page for the current user session.
@@ -40,7 +42,10 @@ pub async fn player_page(State(state): State<SharedState>, headers: HeaderMap) -
 }
 
 /// Advances the current session to the next song in the playlist.
-pub async fn next_song(State(state): State<SharedState>, headers: HeaderMap) -> PlayerControlsTemplate {
+pub async fn next_song(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> PlayerControlsTemplate {
     // Identify the user session
     let session_id = get_session_id(&headers);
 
@@ -78,7 +83,10 @@ pub async fn next_song(State(state): State<SharedState>, headers: HeaderMap) -> 
 }
 
 /// Moves the current session to the previous song in the playlist.
-pub async fn prev_song(State(state): State<SharedState>, headers: HeaderMap) -> PlayerControlsTemplate {
+pub async fn prev_song(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> PlayerControlsTemplate {
     // Identify the user session
     let session_id = get_session_id(&headers);
 
@@ -186,14 +194,13 @@ pub async fn stream_audio_by_id(
 ) -> Result<Response, StatusCode> {
     // Record the session so streaming logs are tied to who requested it
     let session_id = get_session_id(&headers);
-    
-    let ip = headers
-    .get("x-real-ip")
-    .and_then(|v| v.to_str().ok())
-    .unwrap_or("unknown");
-
-    tracing::Span::current().record("ip", ip);
     tracing::Span::current().record("session_id", &session_id.as_str());
+
+    let ip = headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown");
+    tracing::Span::current().record("ip", ip);
 
     let song = state
         .playlist
@@ -218,15 +225,14 @@ pub async fn stream_audio_by_index(
 ) -> Result<Response, StatusCode> {
     // Record the session so streaming logs are tied to who requested it
     let session_id = get_session_id(&headers);
-    
-    let ip = headers
-    .get("x-real-ip")
-    .and_then(|v| v.to_str().ok())
-    .unwrap_or("unknown");
-
-    tracing::Span::current().record("ip", ip);
     tracing::Span::current().record("session_id", &session_id.as_str());
     tracing::Span::current().record("index", index);
+
+    let ip = headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown");
+    tracing::Span::current().record("ip", ip);
 
     let song = state.playlist.get(index).ok_or_else(|| {
         tracing::warn!("Song not found at index: {}", index);
@@ -285,12 +291,10 @@ pub async fn stream_audio_internal(
     }
 
     if let Some((start, end)) = parse_range_header(headers, file_size) {
-        let mut file = File::open(&file_path)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to open file: {}", e);
-                StatusCode::NOT_FOUND
-            })?;
+        let mut file = File::open(&file_path).await.map_err(|e| {
+            tracing::error!("Failed to open file: {}", e);
+            StatusCode::NOT_FOUND
+        })?;
 
         file.seek(std::io::SeekFrom::Start(start))
             .await
@@ -329,12 +333,10 @@ pub async fn stream_audio_internal(
     // If there is no range specified just start from the beginning
     tracing::debug!("Serving full file");
 
-    let file = File::open(&file_path)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to open file: {}", e);
-            StatusCode::NOT_FOUND
-        })?;
+    let file = File::open(&file_path).await.map_err(|e| {
+        tracing::error!("Failed to open file: {}", e);
+        StatusCode::NOT_FOUND
+    })?;
 
     let stream = ReaderStream::with_capacity(file, 128 * 1024);
     let body = axum::body::Body::from_stream(stream);
@@ -429,14 +431,69 @@ pub async fn check_session(
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
         .and_then(|cookies| {
-            cookies.split(';').find_map(|c| c.trim().strip_prefix("player_session="))
+            cookies
+                .split(';')
+                .find_map(|c| c.trim().strip_prefix("player_session="))
         })
         .map(|id| state.sessions.contains_key(id))
         .unwrap_or(false);
-    if valid { StatusCode::OK } else { StatusCode::UNAUTHORIZED }
+    if valid {
+        StatusCode::OK
+    } else {
+        StatusCode::UNAUTHORIZED
+    }
 }
 
 /// Serves the Prometheus metrics scrape endpoint.
 pub async fn metrics_handler() -> impl IntoResponse {
     crate::player::metrics::render()
+}
+
+/// Snapshot of a single player session for the admin view.
+#[derive(Serialize)]
+pub struct AdminSession {
+    pub session_id: String,
+    /// Seconds since this session last did anything (range request, heartbeat, etc.)
+    pub idle_secs: u64,
+    /// Which broadcaster this session is tuned to, if any
+    pub tuned_to: Option<String>,
+}
+
+/// Full server state snapshot returned by the admin endpoint.
+#[derive(Serialize)]
+pub struct AdminState {
+    pub sessions: Vec<AdminSession>,
+    pub broadcaster_listeners: std::collections::HashMap<String, Vec<String>>,
+}
+
+/// Returns a full snapshot of all sessions, broadcasters, and listener relationships.
+/// Intended for the on-page admin panel.
+pub async fn admin_state(State(state): State<SharedState>) -> impl IntoResponse {
+    let now = std::time::Instant::now();
+
+    let sessions = state
+        .sessions
+        .iter()
+        .map(|entry| {
+            let session_id = entry.key().clone();
+            let tuned_to = state.session_tuned_to.get(&session_id).map(|v| v.clone());
+
+            AdminSession {
+                idle_secs: now.duration_since(entry.value().last_activity).as_secs(),
+                session_id,
+                tuned_to,
+            }
+        })
+        .collect();
+
+    let broadcaster_listeners = state
+        .broadcaster_listeners
+        .iter()
+        .map(|e| (e.key().clone(), e.value().iter().cloned().collect()))
+        .collect();
+
+    axum::Json(AdminState {
+        sessions,
+        broadcaster_listeners,
+    })
 }
