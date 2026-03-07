@@ -15,28 +15,6 @@ async fn main() {
 // DOCUMENT ENTIRE WORK FLOW WITH CODE SNIPPETS
 
 // TODO
-// maybe figure out a way to resolve the cutting off of the last few seconds of the song for the tunedin listener when he is that many seconds behind the broadcaster, 
-// and the broadcaster goes to the next song automatically when he completely finishes the song he is broadcasting
-
-
-// maybe the broadcaster should wait a second before autoomatically goingto the next song when the song he is listening to reaches the end, just to give time for the listeners to finish
-
-
-// or implement some special thing that gets sent when broadcaster does auto next meaning that the listeners should first finish their own file and then tune in to the broadcaster
-// (tho that doesnt solve missing song part, because then the listner will either be even more behind
-
-// (which might be feasible, in a way that the listeners are always behind and rmeember the broadcast update for the auto next song signal and jumps to that song at the beginning of it when its own song is finished, 
-// and the only time we actually follow the braodcast leader is when he seeks/pauses/ jumps to another song manually),
-
-// or would need to jump over the beginning of the next song to be exactly in sync with the broadcaster)
-
-
-
-
-
-
-
-// TODO
 // To the heartbead and broadcast statae add the utc time or some other globally acknowledge time, 
 // so when someone tunes in or receives update can add to the playback time the time, it is at the backend currently minus the time this was sent at from the frontend
 // this is an effort to decrease the difference in playback for broadcaster and its listeners
