@@ -2420,25 +2420,30 @@
       // the seek completes, causing an audible bump. This covers every call site.
       const originalPlay = audio.play.bind(audio);
       let seekPending = false;
-      let wasPlayingBeforeSeek = false;
+      let seekTarget = 0;
       audio.addEventListener("seeking", () => {
         seekPending = true;
-        // Pause immediately so the decode buffer stops draining old audio
-        // while the browser loads the new position. Without this, the old
-        // position bleeds through for a fraction of a second on seeks to
-        // unbuffered regions.
-        if (!audio.paused) {
-          wasPlayingBeforeSeek = true;
-          audio.pause();
-        }
+        seekTarget = audio.currentTime;
+        // Mute instantly synchronous with the audio renderer so old-position
+        // samples can't bleed through the pipeline while the seek is in flight.
+        audio.muted = true;
       });
       audio.addEventListener("seeked", () => {
         seekPending = false;
-        // Resume using originalPlay so we don't re-enter the seekPending guard
-        if (wasPlayingBeforeSeek) {
-          wasPlayingBeforeSeek = false;
-          originalPlay();
-        }
+        // 'seeked' fires when the browser knows the new position but the audio
+        // hardware pipeline may still be draining old samples. Wait for the first
+        // timeupdate that confirms playback has actually moved to the target before
+        // unmuting this is the earliest safe point.
+        const unmuteOnProgress = () => {
+          if (Math.abs(audio.currentTime - seekTarget) < 1.0) {
+            audio.muted = false;
+          } else {
+            audio.addEventListener("timeupdate", unmuteOnProgress, {
+              once: true,
+            });
+          }
+        };
+        audio.addEventListener("timeupdate", unmuteOnProgress, { once: true });
       });
       audio.play = () => {
         if (!seekPending) return originalPlay();
