@@ -690,7 +690,9 @@
     <div class="admin-container">
       <h3>
         🛠️ Server State
-        <button class="admin-refresh-btn" onclick="fetchAdminState()">↻ Refresh</button>
+        <button class="admin-refresh-btn" onclick="fetchAdminState()">
+          ↻ Refresh
+        </button>
       </h3>
 
       <div class="admin-section">
@@ -704,7 +706,9 @@
             </tr>
           </thead>
           <tbody id="admin-sessions-body">
-            <tr><td colspan="3" style="color:#6c757d">Loading...</td></tr>
+            <tr>
+              <td colspan="3" style="color: #6c757d">Loading...</td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -719,7 +723,9 @@
             </tr>
           </thead>
           <tbody id="admin-listeners-body">
-            <tr><td colspan="2" style="color:#6c757d">Loading...</td></tr>
+            <tr>
+              <td colspan="2" style="color: #6c757d">Loading...</td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -1601,7 +1607,7 @@
             this.updateConnectionState("disconnected");
             this.removeWebSocketHandlers();
 
-            // When a WebSocket upgrade is rejected with a non-101 the browser fires onerror then onclose with code 1006. 
+            // When a WebSocket upgrade is rejected with a non-101 the browser fires onerror then onclose with code 1006.
             // We can't read the HTTP status from a WebSocket error directly, so piggyback on the existing session check endpoint in the onClose handler
             // Code 1006 means abnormal closure, could be a rejected upgrade.
             // Check if the session expired and reload if so rather than reconnecting forever.
@@ -1682,8 +1688,12 @@
           // Explicitly tell the server we're no longer listening before closing.
           // On mobile the OS may keep the TCP connection alive after the app exits,
           // so the server can't rely on socket close alone to clean up listener state.
-          if (this.mode === 'radio' && this.ws && this.ws.readyState === WebSocket.OPEN) {
-            this.ws.send(JSON.stringify({ type: 'TuneOut' }));
+          if (
+            this.mode === "radio" &&
+            this.ws &&
+            this.ws.readyState === WebSocket.OPEN
+          ) {
+            this.ws.send(JSON.stringify({ type: "TuneOut" }));
           }
 
           if (this.ws) {
@@ -1802,36 +1812,49 @@
           // Broadcaster's song ended naturally — queue the next song index so
           // we can let our own track finish before switching, instead of being
           // yanked forward by the normal Sync path.
-          if (msg.type === 'AutoNext') {
-            if (this.mode !== 'radio') return;
+          if (msg.type === "AutoNext") {
+            if (this.mode !== "radio") return;
 
-            debugLog(`AutoNext received: queuing song index ${msg.next_song_index} for after current track ends`);
+            debugLog(
+              `AutoNext received: queuing song index ${msg.next_song_index} for after current track ends`,
+            );
             this.pendingAutoNextIndex = msg.next_song_index;
             this.pendingAutoNextTime = 0; // start from beginning unless broadcaster seeks
 
             // When our current song finishes, switch to the queued song at whatever
             // position the broadcaster is at (updated below if they seek before we finish)
-            this.audio.addEventListener('ended', () => {
-              if (this.pendingAutoNextIndex === null) return;
+            this.audio.addEventListener(
+              "ended",
+              () => {
+                if (this.pendingAutoNextIndex === null) return;
 
-              const idx = this.pendingAutoNextIndex;
-              const seekTo = this.pendingAutoNextTime;
-              this.pendingAutoNextIndex = null;
-              this.pendingAutoNextTime = 0;
+                const idx = this.pendingAutoNextIndex;
+                const seekTo = this.pendingAutoNextTime;
+                this.pendingAutoNextIndex = null;
+                this.pendingAutoNextTime = 0;
 
-              const songId = window.playlistManager?.getSongIdByServerIndex(idx) ?? null;
-              this.audio.src = songId
-                ? `/stargzr/player/stream/id/${songId}`
-                : `/stargzr/player/stream/${idx}`;
-              this.audio.load();
+                const songId =
+                  window.playlistManager?.getSongIdByServerIndex(idx) ?? null;
+                this.audio.src = songId
+                  ? `/stargzr/player/stream/id/${songId}`
+                  : `/stargzr/player/stream/${idx}`;
+                this.audio.load();
 
-              this.audio.addEventListener('canplay', () => {
-                this.audio.currentTime = seekTo;
-                this.audio.play();
-              }, { once: true });
+                this.audio.addEventListener(
+                  "canplay",
+                  () => {
+                    this.audio.currentTime = seekTo;
+                    this.audio.play();
+                  },
+                  { once: true },
+                );
 
-              debugLog(`AutoNext: switched to song index ${idx} at ${seekTo.toFixed(2)}s after local track ended`);
-            }, { once: true });
+                debugLog(
+                  `AutoNext: switched to song index ${idx} at ${seekTo.toFixed(2)}s after local track ended`,
+                );
+              },
+              { once: true },
+            );
 
             return;
           }
@@ -1854,16 +1877,26 @@
 
           // Broadcaster is still on the pending AutoNext song, don't switch yet,
           // but record their current position so if they seek we start at the right spot.
-          if (this.pendingAutoNextIndex !== null && msg.song_index === this.pendingAutoNextIndex) {
+          if (
+            this.pendingAutoNextIndex !== null &&
+            msg.song_index === this.pendingAutoNextIndex
+          ) {
             this.pendingAutoNextTime = playback_time;
-            debugLog(`AutoNext position updated to ${playback_time.toFixed(2)}s (broadcaster seeked before we finished)`);
+            debugLog(
+              `AutoNext position updated to ${playback_time.toFixed(2)}s (broadcaster seeked before we finished)`,
+            );
             return;
           }
 
           // Any manual action by the broadcaster (seek, skip, pause) clears the
           // pending AutoNext since we now need to hard-sync to their position.
-          if (this.pendingAutoNextIndex !== null && msg.song_index !== this.pendingAutoNextIndex) {
-            debugLog(`Manual broadcaster action cleared pendingAutoNextIndex (was ${this.pendingAutoNextIndex})`);
+          if (
+            this.pendingAutoNextIndex !== null &&
+            msg.song_index !== this.pendingAutoNextIndex
+          ) {
+            debugLog(
+              `Manual broadcaster action cleared pendingAutoNextIndex (was ${this.pendingAutoNextIndex})`,
+            );
             this.pendingAutoNextIndex = null;
           }
 
@@ -1917,8 +1950,11 @@
               { once: true },
             );
           } else {
+            // Pause before seeking to flush the decode buffer, preventing the
+            // old position audio from bleeding into the new position (seek overlap stutter).
+            this.audio.pause();
             this.audio.currentTime = playback_time;
-            if (is_playing && this.audio.paused) this.audio.play();
+            if (is_playing) this.audio.play();
             if (!is_playing && !this.audio.paused) this.audio.pause();
           }
         }
@@ -1936,7 +1972,9 @@
 
           if (drift > 0.25) {
             debugLog(`Drift: ${drift.toFixed(3)}s - correcting`);
+            this.audio.pause();
             this.audio.currentTime = this.targetTime;
+            this.audio.play();
           }
         }
 
@@ -2092,12 +2130,14 @@
         sendAutoNext(nextSongIndex) {
           if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
           debugLog(`Sending AutoNext: next song index ${nextSongIndex}`);
-          this.ws.send(JSON.stringify({
-            type: 'AutoNext',
-            broadcaster_id: this.sessionId,
-            next_song_index: nextSongIndex,
-            server_timestamp_ms: 0,
-          }));
+          this.ws.send(
+            JSON.stringify({
+              type: "AutoNext",
+              broadcaster_id: this.sessionId,
+              next_song_index: nextSongIndex,
+              server_timestamp_ms: 0,
+            }),
+          );
         }
 
         startBroadcasting() {
@@ -2366,8 +2406,12 @@
       // the seek completes, causing an audible bump. This covers every call site.
       const originalPlay = audio.play.bind(audio);
       let seekPending = false;
-      audio.addEventListener('seeking', () => { seekPending = true; });
-      audio.addEventListener('seeked',  () => { seekPending = false; });
+      audio.addEventListener("seeking", () => {
+        seekPending = true;
+      });
+      audio.addEventListener("seeked", () => {
+        seekPending = false;
+      });
       audio.play = () => {
         if (!seekPending) return originalPlay();
         // A seek is in flight, meaning currentTime was just set but the browser has
@@ -2376,9 +2420,13 @@
         // the bump. We return a promise that defers the actual play() call until
         // the seeked event confirms the engine has landed on the target position.
         return new Promise((resolve, reject) => {
-          audio.addEventListener('seeked', () => {
-            originalPlay().then(resolve).catch(reject);
-          }, { once: true });
+          audio.addEventListener(
+            "seeked",
+            () => {
+              originalPlay().then(resolve).catch(reject);
+            },
+            { once: true },
+          );
         });
       };
 
@@ -2469,7 +2517,9 @@
       // Audio ended handler uses playlist manager
       audio.addEventListener("ended", () => {
         if (player.isInRadioMode()) {
-          debugLog("Track ended in radio mode, waiting for AutoNext or next Sync");
+          debugLog(
+            "Track ended in radio mode, waiting for AutoNext or next Sync",
+          );
           return;
         }
 
@@ -2554,38 +2604,48 @@
           // Sessions table
           const sessionsBody = document.getElementById("admin-sessions-body");
           if (data.sessions.length === 0) {
-            sessionsBody.innerHTML = '<tr><td colspan="3" style="color:#6c757d">None</td></tr>';
+            sessionsBody.innerHTML =
+              '<tr><td colspan="3" style="color:#6c757d">None</td></tr>';
           } else {
-            sessionsBody.innerHTML = data.sessions.map(s => {
-              const isMe = s.session_id === sessionId ? "is-me" : "";
-              const tuned = s.tuned_to
-                ? `<span style="color:#007bff">${s.tuned_to}</span>`
-                : '<span style="color:#adb5bd">—</span>';
-              return `<tr class="${isMe}">
+            sessionsBody.innerHTML = data.sessions
+              .map((s) => {
+                const isMe = s.session_id === sessionId ? "is-me" : "";
+                const tuned = s.tuned_to
+                  ? `<span style="color:#007bff">${s.tuned_to}</span>`
+                  : '<span style="color:#adb5bd">—</span>';
+                return `<tr class="${isMe}">
                 <td>${s.session_id}</td>
                 <td>${s.idle_secs}s</td>
                 <td>${tuned}</td>
               </tr>`;
-            }).join("");
+              })
+              .join("");
           }
 
           // Listener map table
           const listenersBody = document.getElementById("admin-listeners-body");
           const entries = Object.entries(data.broadcaster_listeners);
           if (entries.length === 0) {
-            listenersBody.innerHTML = '<tr><td colspan="2" style="color:#6c757d">None</td></tr>';
+            listenersBody.innerHTML =
+              '<tr><td colspan="2" style="color:#6c757d">None</td></tr>';
           } else {
-            listenersBody.innerHTML = entries.map(([bid, listeners]) => {
-              const llist = listeners.length === 0
-                ? '<span style="color:#adb5bd">none</span>'
-                : listeners.map(l =>
-                    `<span style="${l === sessionId ? "color:#007bff;font-weight:bold" : ""}">${l}</span>`
-                  ).join("<br>");
-              return `<tr>
+            listenersBody.innerHTML = entries
+              .map(([bid, listeners]) => {
+                const llist =
+                  listeners.length === 0
+                    ? '<span style="color:#adb5bd">none</span>'
+                    : listeners
+                        .map(
+                          (l) =>
+                            `<span style="${l === sessionId ? "color:#007bff;font-weight:bold" : ""}">${l}</span>`,
+                        )
+                        .join("<br>");
+                return `<tr>
                 <td>${bid}</td>
                 <td>${llist}</td>
               </tr>`;
-            }).join("");
+              })
+              .join("");
           }
 
           document.getElementById("admin-last-updated").textContent =
