@@ -1958,9 +1958,6 @@
               { once: true },
             );
           } else {
-            // Pause before seeking to flush the decode buffer, preventing the
-            // old-position audio from bleeding into the new position (seek overlap stutter).
-            this.audio.pause();
             this.audio.currentTime = playback_time;
             if (is_playing) this.audio.play();
             if (!is_playing && !this.audio.paused) this.audio.pause();
@@ -2205,7 +2202,7 @@
                 `Broadcasting: song ${msg.song_index}, time ${msg.playback_time.toFixed(2)}s`,
               );
               this.ws.send(JSON.stringify(msg));
-            }, 80);
+            }, 150);
           };
 
           // Browsers fire 'pause' BEFORE 'ended' when a track finishes naturally
@@ -2415,35 +2412,15 @@
       // Initialize
       const audio = document.getElementById("audio-player");
 
-      // Patch audio.play to always wait for any in-progress seek to settle before
-      // starting playback. The browser plays a few ms from the old position before
-      // the seek completes, causing an audible bump. This covers every call site.
+      // Patch audio.play to defer if a seek is in flight, so play() called from
+      // the radio sync path doesn't fire before the browser has landed on the new position.
       const originalPlay = audio.play.bind(audio);
       let seekPending = false;
-      let seekTarget = 0;
       audio.addEventListener("seeking", () => {
         seekPending = true;
-        seekTarget = audio.currentTime;
-        // Mute instantly synchronous with the audio renderer so old-position
-        // samples can't bleed through the pipeline while the seek is in flight.
-        audio.muted = true;
       });
       audio.addEventListener("seeked", () => {
         seekPending = false;
-        // 'seeked' fires when the browser knows the new position but the audio
-        // hardware pipeline may still be draining old samples. Wait for the first
-        // timeupdate that confirms playback has actually moved to the target before
-        // unmuting this is the earliest safe point.
-        const unmuteOnProgress = () => {
-          if (Math.abs(audio.currentTime - seekTarget) < 1.0) {
-            audio.muted = false;
-          } else {
-            audio.addEventListener("timeupdate", unmuteOnProgress, {
-              once: true,
-            });
-          }
-        };
-        audio.addEventListener("timeupdate", unmuteOnProgress, { once: true });
       });
       audio.play = () => {
         if (!seekPending) return originalPlay();
