@@ -1355,6 +1355,10 @@
           // Connection state for UI
           this.connectionState = "disconnected";
 
+          // Debounce timer for incoming Sync messages discards all but the
+          // last message in a burst, preventing choppy multi-seek on rapid updates.
+          this.syncTimer = null;
+
           debugLog(`Initialized with session ID: ${sessionId}`);
 
           // Setup page visibility handling
@@ -1863,7 +1867,11 @@
 
           switch (msg.type) {
             case "Sync":
-              this.syncToBroadcaster(msg);
+              clearTimeout(this.syncTimer);
+              this.syncTimer = setTimeout(
+                () => this.syncToBroadcaster(msg),
+                80,
+              );
               break;
             case "Heartbeat":
               this.adjustForDrift(msg);
@@ -1951,7 +1959,7 @@
             );
           } else {
             // Pause before seeking to flush the decode buffer, preventing the
-            // old position audio from bleeding into the new position (seek overlap stutter).
+            // old-position audio from bleeding into the new position (seek overlap stutter).
             this.audio.pause();
             this.audio.currentTime = playback_time;
             if (is_playing) this.audio.play();
@@ -1972,9 +1980,7 @@
 
           if (drift > 0.25) {
             debugLog(`Drift: ${drift.toFixed(3)}s - correcting`);
-            this.audio.pause();
             this.audio.currentTime = this.targetTime;
-            this.audio.play();
           }
         }
 
@@ -2177,21 +2183,29 @@
           // Request wake lock to prevent screen from sleeping
           this.requestWakeLock();
 
+          let broadcastUpdateTimer = null;
           const sendUpdate = () => {
             if (!this.isBroadcasting) return;
             if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
-            const msg = {
-              type: "BroadcastUpdate",
-              broadcaster_id: this.sessionId,
-              song_index: this.getCurrentSongIndex(),
-              playback_time: this.audio.currentTime,
-              is_playing: !this.audio.paused,
-            };
-            debugLog(
-              `Broadcasting: song ${msg.song_index}, time ${msg.playback_time.toFixed(2)}s`,
-            );
-            this.ws.send(JSON.stringify(msg));
+            // Debounce: pause/seeked/play all fire within 100ms of a seek.
+            // Only send the final state once the burst settles.
+            clearTimeout(broadcastUpdateTimer);
+            broadcastUpdateTimer = setTimeout(() => {
+              if (!this.isBroadcasting) return;
+              if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+              const msg = {
+                type: "BroadcastUpdate",
+                broadcaster_id: this.sessionId,
+                song_index: this.getCurrentSongIndex(),
+                playback_time: this.audio.currentTime,
+                is_playing: !this.audio.paused,
+              };
+              debugLog(
+                `Broadcasting: song ${msg.song_index}, time ${msg.playback_time.toFixed(2)}s`,
+              );
+              this.ws.send(JSON.stringify(msg));
+            }, 80);
           };
 
           // Browsers fire 'pause' BEFORE 'ended' when a track finishes naturally
@@ -2406,11 +2420,25 @@
       // the seek completes, causing an audible bump. This covers every call site.
       const originalPlay = audio.play.bind(audio);
       let seekPending = false;
+      let wasPlayingBeforeSeek = false;
       audio.addEventListener("seeking", () => {
         seekPending = true;
+        // Pause immediately so the decode buffer stops draining old audio
+        // while the browser loads the new position. Without this, the old
+        // position bleeds through for a fraction of a second on seeks to
+        // unbuffered regions.
+        if (!audio.paused) {
+          wasPlayingBeforeSeek = true;
+          audio.pause();
+        }
       });
       audio.addEventListener("seeked", () => {
         seekPending = false;
+        // Resume using originalPlay so we don't re-enter the seekPending guard
+        if (wasPlayingBeforeSeek) {
+          wasPlayingBeforeSeek = false;
+          originalPlay();
+        }
       });
       audio.play = () => {
         if (!seekPending) return originalPlay();
