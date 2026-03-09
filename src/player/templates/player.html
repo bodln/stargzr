@@ -1371,6 +1371,10 @@
           this._pendingSeekTime = 0;
           this._pendingIsPlaying = false;
 
+          // Set to Date.now() when TuneIn is sent, cleared after the first Sync arrives.
+          // Used to compensate for server to listener transit on the initial sync.
+          this._tuneInSentAt = null;
+
           // Reconnection state
           this.reconnectAttempts = 0;
           this.maxReconnectAttempts = 10;
@@ -1904,15 +1908,28 @@
                 80,
               );
               break;
-            case "Heartbeat":
-              this.adjustForDrift(msg);
-              break;
           }
         }
 
         syncToBroadcaster(msg) {
-          const { song_index, playback_time, is_playing, server_timestamp_ms } =
+          let { song_index, playback_time, is_playing, server_timestamp_ms } =
             msg;
+
+          // On the first Sync after TuneIn, compensate for server to listener transit time.
+          // The backend already baked in broadcaster to server latency, this covers the other leg.
+          // Only applied once per TuneIn, ongoing corrections are handled server side.
+          if (this._tuneInSentAt !== null) {
+            const elapsed = (Date.now() - this._tuneInSentAt) / 1000;
+            this._tuneInSentAt = null;
+            const duration = isFinite(this.audio.duration)
+              ? this.audio.duration
+              : Infinity;
+            const adjusted = playback_time + elapsed;
+            if (adjusted < duration) playback_time = adjusted;
+            debugLog(
+              `TuneIn latency compensation: +${elapsed.toFixed(3)}s  to  ${playback_time.toFixed(2)}s`,
+            );
+          }
 
           // Broadcaster is still on the pending AutoNext song, don't switch yet,
           // but record their current position so if they seek we start at the right spot.
@@ -1941,7 +1958,7 @@
 
           const currentIndex = this.getCurrentSongIndex();
 
-          // A song change and immediate seek produces two Syncs. After the first one sets
+          // A song change immediate seek produces two Syncs. After the first one sets
           // audio.src, getCurrentSongIndex() returns song_index, so the second Sync lands
           // in the else branch and sets currentTime before the browser has buffered anything.
           // _loadingSongIndex guards this: any Sync for a song already being loaded only
@@ -1996,23 +2013,6 @@
           }
         }
 
-        adjustForDrift(msg) {
-          if (this.audio.paused) return;
-
-          const { playback_time, server_timestamp_ms } = msg;
-
-          const now = Date.now();
-          const elapsed = (now - server_timestamp_ms) / 1000;
-          this.targetTime = playback_time + elapsed;
-
-          const drift = Math.abs(this.audio.currentTime - this.targetTime);
-
-          if (drift > 0.25) {
-            debugLog(`Drift: ${drift.toFixed(3)}s - correcting`);
-            this.audio.currentTime = this.targetTime;
-          }
-        }
-
         tuneIn(broadcasterId) {
           if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
             debugLog("WebSocket not ready, connecting...");
@@ -2056,6 +2056,9 @@
             type: "TuneIn",
             broadcaster_id: broadcasterId,
           };
+
+          // Record send time so syncToBroadcaster can compensate for server to listener lag
+          this._tuneInSentAt = Date.now();
 
           debugLog(`Sending TuneIn: ${JSON.stringify(msg)}`);
           this.ws.send(JSON.stringify(msg));
@@ -2152,6 +2155,7 @@
             type: "Heartbeat",
             broadcaster_id: this.sessionId,
             playback_time: this.audio.currentTime,
+            client_timestamp_ms: Date.now(),
           };
 
           debugLog(
@@ -2229,6 +2233,7 @@
                 song_index: this.getCurrentSongIndex(),
                 playback_time: this.audio.currentTime,
                 is_playing: !this.audio.paused,
+                client_timestamp_ms: Date.now(),
               };
               debugLog(
                 `Broadcasting: song ${msg.song_index}, time ${msg.playback_time.toFixed(2)}s`,
@@ -2483,10 +2488,13 @@
       audio.addEventListener("seeked", () => {
         seekPending = false;
       });
+
       // 'playing' fires when the browser is ready to push audio safe to unmute
       audio.addEventListener("playing", () => btUnmuteOnPlaying());
+
       audio.play = () => {
         if (!seekPending) return originalPlay();
+        
         // A seek is in flight, meaning currentTime was just set but the browser has
         // not yet decoded and buffered audio at that position. Calling play() now
         // would start output from wherever the read head currently sits, producing

@@ -30,10 +30,13 @@ pub struct BroadcastState {
     pub song_index: usize,
     // We add this field so we can return the song name in analytics
     pub song_name: String,
-    pub playback_time: f64, // Current position in seconds
+    pub playback_time: f64, // Current position in seconds (raw, as reported by broadcaster)
     pub is_playing: bool,
     pub server_timestamp_ms: u128, // When this state was recorded
     pub listener_count: usize,
+    // Estimated one way broadcaster to server latency from client_timestamp_ms on incoming messages.
+    // Used to adjust playback_time in outgoing Sync messages so listeners stay in sync.
+    pub transmission_latency_ms: u64,
 }
 
 /// A message that has been serialized once at the broadcast site.
@@ -45,8 +48,7 @@ pub struct PreparedMessage {
 impl PreparedMessage {
     pub fn new(msg: &RadioMessage) -> Self {
         Self {
-            json: serde_json::to_string(msg)
-                .expect("RadioMessage serialization is infallible"),
+            json: serde_json::to_string(msg).expect("RadioMessage serialization is infallible"),
         }
     }
 }
@@ -108,10 +110,13 @@ pub enum RadioMessage {
         server_timestamp_ms: u128,
     },
 
-    /// Broadcaster sends this every 2-3 seconds
+    /// Broadcaster sends this every 2-3 seconds.
+    /// client_timestamp_ms is the frontend's Date.now() at send time used by the server
+    /// to estimate broadcaster to server latency for playback-time compensation
     Heartbeat {
         broadcaster_id: String,
         playback_time: f64,
+        client_timestamp_ms: u64,
     },
 
     /// Listener sends this for initial tune in to broadcaster, gets Sync back
@@ -122,12 +127,15 @@ pub enum RadioMessage {
     /// Listener tune out
     TuneOut,
 
-    /// Broadcaster sends this on play/pause/seek/next/prev, and server sends Sync to all tuned in
+    /// Broadcaster sends this on play/pause/seek/next/prev, and server sends Sync to all tuned in.
+    /// client_timestamp_ms is the frontend's Date.now() at send time; used by the server
+    /// to estimate broadcaster to server latency for playback-time compensation.
     BroadcastUpdate {
         broadcaster_id: String,
         song_index: usize,
         playback_time: f64,
         is_playing: bool,
+        client_timestamp_ms: u64,
     },
 
     Error {

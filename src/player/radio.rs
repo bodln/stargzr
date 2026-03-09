@@ -285,18 +285,32 @@ async fn handle_client_message(
                 .map(|b| b.clone());
 
             if let Some(b_state) = maybe_state {
+                // Estimate the broadcaster's real position at this moment:
+                //   stored_playback_time        - position when last heartbeat/update was sent
+                //   + time_since_last_update    - playback has continued since then (only if playing)
+                //   + transmission_latency_ms   - broadcaster->server lag in that measurement
+                // The frontend then adds the server->listener leg via _tuneInSentAt.
+                let time_since_last_update_secs = if b_state.is_playing {
+                    (now_ms().saturating_sub(b_state.server_timestamp_ms)) as f64 / 1000.0
+                } else {
+                    0.0
+                };
+                let adjusted_playback_time = b_state.playback_time
+                    + time_since_last_update_secs
+                    + (b_state.transmission_latency_ms as f64 / 1000.0);
+
                 // Send a Sync message with the current state to the newly tuned client
                 tracing::debug!(
                     broadcaster_id = %broadcaster_id,
                     song_index = b_state.song_index,
-                    playback_time = b_state.playback_time,
+                    playback_time = adjusted_playback_time,
                     "Sending initial sync"
                 );
 
                 let sync_msg = RadioMessage::Sync {
                     broadcaster_id: broadcaster_id.clone(),
                     song_index: b_state.song_index,
-                    playback_time: b_state.playback_time,
+                    playback_time: adjusted_playback_time,
                     is_playing: b_state.is_playing,
                     server_timestamp_ms: now_ms(),
                 };
@@ -345,6 +359,7 @@ async fn handle_client_message(
             song_index,
             playback_time,
             is_playing,
+            client_timestamp_ms,
         } => {
             crate::player::metrics::inc_messages("BroadcastUpdate");
             ensure_same_session(&broadcaster_id, validated_session_id)?;
@@ -365,6 +380,23 @@ async fn handle_client_message(
                 return Err(PlayerError::BroadcasterNotFound(broadcaster_id));
             }
 
+            // Estimate broadcaster→server one-way latency from the client's send timestamp
+            let latency_ms = (now_ms() as u64).saturating_sub(client_timestamp_ms);
+
+            // Only compensate on seek/play/pause (same song). Song switches start from 0
+            // on the listener side intentionally, so adding latency would skip the intro.
+            let is_same_song = state
+                .broadcast_states
+                .get(&broadcaster_id)
+                .map(|b| b.song_index == song_index)
+                .unwrap_or(false);
+
+            let adjusted_playback_time = if is_same_song {
+                playback_time + (latency_ms as f64 / 1000.0)
+            } else {
+                playback_time
+            };
+
             let listener_count = state
                 .broadcaster_listeners
                 .get(&broadcaster_id)
@@ -379,15 +411,16 @@ async fn handle_client_message(
                 .map(|song| song.filename.clone())
                 .unwrap_or_else(|| format!("Unknown song #{}", song_index));
 
-            // Update the server-side broadcast state
+            // Update the server-side broadcast state (raw playback_time, not adjusted)
             let new_state = BroadcastState {
                 broadcaster_id: broadcaster_id.clone(),
                 song_index,
                 song_name,
-                playback_time,
+                playback_time, // store raw so TuneIn can apply latency consistently
                 is_playing,
                 server_timestamp_ms: server_ts,
                 listener_count,
+                transmission_latency_ms: latency_ms,
             };
 
             state
@@ -395,10 +428,11 @@ async fn handle_client_message(
                 .insert(broadcaster_id.clone(), new_state);
 
             // Serialize once here, all N listeners share the same Arc<PreparedMessage>
+            // Sync carries the latency adjusted time so listeners land near the right position.
             let sync_msg = Arc::new(PreparedMessage::new(&RadioMessage::Sync {
                 broadcaster_id: broadcaster_id.clone(),
                 song_index,
-                playback_time,
+                playback_time: adjusted_playback_time,
                 is_playing,
                 server_timestamp_ms: server_ts,
             }));
@@ -422,6 +456,7 @@ async fn handle_client_message(
         RadioMessage::Heartbeat {
             broadcaster_id,
             playback_time,
+            client_timestamp_ms,
         } => {
             crate::player::metrics::inc_messages("Heartbeat");
 
@@ -436,18 +471,22 @@ async fn handle_client_message(
 
             let server_ts = now_ms();
 
+            // Keep latency estimate fresh between BroadcastUpdates
+            let latency_ms = (server_ts as u64).saturating_sub(client_timestamp_ms);
+
             // Touch the session so passive listeners don't get cleaned up mid-song.
             // Range requests fire on every seek so this naturally stays fresh during playback.
             if let Some(mut session) = state.sessions.get_mut(session_id.as_str()) {
                 session.last_activity = std::time::Instant::now();
             }
 
-            // Update playback time for the broadcaster
+            // Update playback time and latency estimate for the broadcaster
             if let Some(mut broadcast) = state.broadcast_states.get_mut(&broadcaster_id) {
                 broadcast.playback_time = playback_time;
                 broadcast.server_timestamp_ms = server_ts;
+                broadcast.transmission_latency_ms = latency_ms;
 
-                tracing::trace!(broadcaster_id = %session_id, playback_time, "Heartbeat");
+                tracing::trace!(broadcaster_id = %session_id, playback_time, latency_ms, "Heartbeat");
             }
         }
 
@@ -517,7 +556,7 @@ async fn handle_client_message(
                 .map(|song| song.filename.clone())
                 .unwrap_or_else(|| format!("Unknown song #{}", song_index));
 
-            // Update the server-side broadcast state
+            // Latency unknown at start, first BroadcastUpdate/Heartbeat will calibrate it
             let new_state = BroadcastState {
                 broadcaster_id: broadcaster_id.clone(),
                 song_index,
@@ -526,6 +565,7 @@ async fn handle_client_message(
                 is_playing,
                 server_timestamp_ms: server_ts,
                 listener_count: 0,
+                transmission_latency_ms: 0,
             };
 
             state
@@ -614,6 +654,8 @@ async fn handle_client_message(
                 broadcast.song_name = song_name;
                 broadcast.playback_time = 0.0;
                 broadcast.server_timestamp_ms = server_ts;
+                // Reset latency on song change it will be recalibrated by the next Heartbeat/BroadcastUpdate
+                broadcast.transmission_latency_ms = 0;
             }
 
             // Fan out AutoNext as-is so listeners can handle it differently from Sync
