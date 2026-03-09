@@ -195,9 +195,9 @@ pub async fn initialize(path_buf: PathBuf) {
         #[cfg(unix)]
         let terminate = async {
             signal::unix::signal(signal::unix::SignalKind::terminate())
-                .await
                 .recv()
-                .expect("Failed to install SIGTERM handler");
+                .expect("Failed to install SIGTERM handler")
+                .await;
         };
 
         // On Windows, SIGTERM doesn't exist only wait for Ctrl+C
