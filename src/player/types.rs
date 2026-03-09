@@ -193,4 +193,10 @@ pub enum RadioMessage {
         next_song_index: usize,
         server_timestamp_ms: u64,
     },
+
+    /// Server is shutting down cleanly. Client should keep trying to reconnect
+    /// since this may just be a restart.
+    ServerShutdown {
+        message: String,
+    },
 }

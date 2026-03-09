@@ -210,6 +210,15 @@ pub async fn initialize(path_buf: PathBuf) {
 
         tracing::info!("Notifying all active broadcasters before shutdown...");
 
+        let shutdown_msg = Arc::new(PreparedMessage::new(&RadioMessage::ServerShutdown {
+            message: "Server is restarting, reconnecting automatically...".to_string(),
+        }));
+
+        match state.global_broadcast_tx.send(shutdown_msg) {
+            Ok(count) => tracing::info!(clients = count, "Sent ServerShutdown to all clients"),
+            Err(_) => tracing::debug!("No clients connected at shutdown"),
+        }
+
         // Collect broadcaster IDs first to avoid holding DashMap refs across awaits
         let broadcaster_ids: Vec<String> = state
             .broadcast_states

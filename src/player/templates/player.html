@@ -1898,6 +1898,17 @@
             return;
           }
 
+          if (msg.type === "ServerShutdown") {
+            debugLog(`Server shutting down: ${msg.message}`);
+
+            // Show a non blocking status update don't alert, don't stop reconnecting
+            const text = document.getElementById("connection-text");
+            text.textContent = msg.message;
+            text.style.color = "#ffc107";
+
+            return;
+          }
+
           if (this.mode !== "radio") return;
 
           switch (msg.type) {
@@ -2494,7 +2505,7 @@
 
       audio.play = () => {
         if (!seekPending) return originalPlay();
-        
+
         // A seek is in flight, meaning currentTime was just set but the browser has
         // not yet decoded and buffered audio at that position. Calling play() now
         // would start output from wherever the read head currently sits, producing
