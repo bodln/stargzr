@@ -286,10 +286,10 @@ async fn handle_client_message(
 
             if let Some(b_state) = maybe_state {
                 // Estimate the broadcaster's real position at this moment:
-                //   stored_playback_time        - position when last heartbeat/update was sent
-                //   + time_since_last_update    - playback has continued since then (only if playing)
-                //   + transmission_latency_ms   - broadcaster->server lag in that measurement
-                // The frontend then adds the server->listener leg via _tuneInSentAt.
+                //   stored_playback_time - position when last heartbeat/update was sent
+                //   + time_since_last_update - playback has continued since then (only if playing)
+                //   + transmission_latency_ms - broadcaster to server lag in that measurement
+                // The frontend then adds the server to listener leg via _tuneInSentAt.
                 let time_since_last_update_secs = if b_state.is_playing {
                     (now_ms().saturating_sub(b_state.server_timestamp_ms)) as f64 / 1000.0
                 } else {
@@ -370,8 +370,9 @@ async fn handle_client_message(
                 return Err(e);
             }
 
-            // Ensure the requested song index exists in the playlist
-            validate_song_index(song_index, state.playlist.len())?;
+            // Acquire a read lock, get the playlist length, then drop the guard before any await
+            let playlist_len = state.playlist.read().await.len();
+            validate_song_index(song_index, playlist_len)?;
 
             tracing::debug!(song_index, playback_time, is_playing, "Broadcast update");
 
@@ -380,7 +381,7 @@ async fn handle_client_message(
                 return Err(PlayerError::BroadcasterNotFound(broadcaster_id));
             }
 
-            // Estimate broadcaster→server one-way latency from the client's send timestamp
+            // Estimate broadcaster to server one way latency from the client's send timestamp
             let latency_ms = (now_ms() as u64).saturating_sub(client_timestamp_ms);
 
             // Only compensate on seek/play/pause (same song). Song switches start from 0
@@ -405,11 +406,14 @@ async fn handle_client_message(
 
             let server_ts = now_ms();
 
-            let song_name = state
-                .playlist
-                .get(song_index)
-                .map(|song| song.filename.clone())
-                .unwrap_or_else(|| format!("Unknown song #{}", song_index));
+            // Acquire a read lock, get the song name, then drop the guard before any await
+            let song_name = {
+                let playlist = state.playlist.read().await;
+                playlist
+                    .get(song_index)
+                    .map(|song| song.filename.clone())
+                    .unwrap_or_else(|| format!("Unknown song #{}", song_index))
+            };
 
             // Update the server-side broadcast state (raw playback_time, not adjusted)
             let new_state = BroadcastState {
@@ -533,8 +537,9 @@ async fn handle_client_message(
                 return Err(e);
             }
 
-            // Ensure the requested song index exists in the playlist
-            validate_song_index(song_index, state.playlist.len())?;
+            // Acquire a read lock, get the playlist length, then drop the guard before any await
+            let playlist_len = state.playlist.read().await.len();
+            validate_song_index(song_index, playlist_len)?;
 
             let was_already_broadcasting = state.broadcast_states.contains_key(&broadcaster_id);
 
@@ -550,11 +555,14 @@ async fn handle_client_message(
 
             let server_ts = now_ms();
 
-            let song_name = state
-                .playlist
-                .get(song_index)
-                .map(|song| song.filename.clone())
-                .unwrap_or_else(|| format!("Unknown song #{}", song_index));
+            // Acquire a read lock, get the song name, then drop the guard before any await
+            let song_name = {
+                let playlist = state.playlist.read().await;
+                playlist
+                    .get(song_index)
+                    .map(|song| song.filename.clone())
+                    .unwrap_or_else(|| format!("Unknown song #{}", song_index))
+            };
 
             // Latency unknown at start, first BroadcastUpdate/Heartbeat will calibrate it
             let new_state = BroadcastState {
@@ -601,7 +609,7 @@ async fn handle_client_message(
         }
 
         // On a page visibility reload checks if our session is alive and broadcasting,
-        // if it is, returns the state so the sessions can resume its braodcating (this is used for mobile visibility mode)
+        // if it is, returns the state so the sessions can resume its broadcasting (this is used for mobile visibility mode)
         RadioMessage::QueryBroadcastState { session_id } => {
             crate::player::metrics::inc_messages("QueryBroadcastState");
             ensure_same_session(&session_id, validated_session_id)?;
@@ -637,16 +645,20 @@ async fn handle_client_message(
             crate::player::metrics::inc_messages("AutoNext");
             ensure_same_session(&broadcaster_id, validated_session_id)?;
 
-            // Ensure the requested song index exists in the playlist
-            validate_song_index(next_song_index, state.playlist.len())?;
+            // Acquire a read lock, get the playlist length, then drop the guard before any await
+            let playlist_len = state.playlist.read().await.len();
+            validate_song_index(next_song_index, playlist_len)?;
 
             let server_ts = now_ms();
 
-            let song_name = state
-                .playlist
-                .get(next_song_index)
-                .map(|s| s.filename.clone())
-                .unwrap_or_else(|| format!("Unknown song #{}", next_song_index));
+            // Acquire a read lock, get the song name, then drop the guard before any await
+            let song_name = {
+                let playlist = state.playlist.read().await;
+                playlist
+                    .get(next_song_index)
+                    .map(|s| s.filename.clone())
+                    .unwrap_or_else(|| format!("Unknown song #{}", next_song_index))
+            };
 
             // Advance authoritative state so late-joining listeners get the right song
             if let Some(mut broadcast) = state.broadcast_states.get_mut(&broadcaster_id) {
@@ -654,7 +666,7 @@ async fn handle_client_message(
                 broadcast.song_name = song_name;
                 broadcast.playback_time = 0.0;
                 broadcast.server_timestamp_ms = server_ts;
-                // Reset latency on song change it will be recalibrated by the next Heartbeat/BroadcastUpdate
+                // Reset latency on song change, it will be recalibrated by the next Heartbeat/BroadcastUpdate
                 broadcast.transmission_latency_ms = 0;
             }
 
