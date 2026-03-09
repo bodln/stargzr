@@ -196,6 +196,7 @@ pub async fn initialize(path_buf: PathBuf) {
         let terminate = async {
             signal::unix::signal(signal::unix::SignalKind::terminate())
                 .await
+                .recv()
                 .expect("Failed to install SIGTERM handler");
         };
 
