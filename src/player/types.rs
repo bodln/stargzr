@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, RwLock};
 
 use super::rate_limit::RateLimiter;
 
@@ -60,16 +60,19 @@ impl PreparedMessage {
     }
 }
 
-// DashMap shards the map across multiple independent RwLocks (one per shard, ~4× cpu count),
+// DashMap shards the map across multiple independent RwLocks (one per shard, ~4x cpu count),
 // so concurrent operations on different keys never block each other, unlike a single
 // RwLock<HashMap> where every heartbeat, TuneIn, and BroadcastUpdate serialises globally.
 pub struct AppState {
-    pub playlist: Arc<Vec<SongInfo>>,
+    // Wrapped in RwLock so the upload handler can insert new songs at runtime.
+    // All read paths (streaming, playlist fetch, radio) acquire a read guard.
+    // The upload handler acquires the write guard only during the insert.
+    pub playlist: Arc<RwLock<Vec<SongInfo>>>,
     pub music_folder: Arc<PathBuf>,
 
     pub sessions: DashMap<String, PlayerSession>,
 
-    /// Maps broadcaster_id(session id) -> their current state
+    /// Maps broadcaster_id (session id) to their current state
     pub broadcast_states: DashMap<String, BroadcastState>,
 
     /// Global broadcast channel for system-wide announcements.
@@ -86,7 +89,7 @@ pub struct AppState {
     /// Per broadcaster listener count
     pub broadcaster_listeners: DashMap<String, HashSet<String>>,
 
-    /// Reverse map: session_id -> broadcaster_id they are currently tuned to.
+    /// Reverse map: session_id to broadcaster_id they are currently tuned to.
     /// Makes TuneOut O(1) instead of scanning every broadcaster's listener set.
     pub session_tuned_to: DashMap<String, String>,
 
@@ -99,6 +102,10 @@ pub struct AppState {
 
     /// Per-IP rate limiter for WebSocket upgrade requests.
     pub ws_rate_limiter: RateLimiter,
+
+    /// Tracks how many bytes each IP has uploaded this server session.
+    /// Resets on server restart. No persistence needed, acts as a soft abuse limit.
+    pub upload_quotas: DashMap<String, u64>,
 }
 
 /// Helper type for cleaner function signatures
