@@ -200,3 +200,20 @@ pub enum RadioMessage {
         message: String,
     },
 }
+
+/// Snapshot of a single player session for the admin view.
+#[derive(Serialize)]
+pub struct AdminSession {
+    pub session_id: String,
+    /// Seconds since this session last did anything (range request, heartbeat, etc.)
+    pub idle_secs: u64,
+    /// Which broadcaster this session is tuned to, if any
+    pub tuned_to: Option<String>,
+}
+
+/// Full server state snapshot returned by the admin endpoint.
+#[derive(Serialize)]
+pub struct AdminState {
+    pub sessions: Vec<AdminSession>,
+    pub broadcaster_listeners: std::collections::HashMap<String, Vec<String>>,
+}

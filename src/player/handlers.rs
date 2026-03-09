@@ -2,13 +2,14 @@ use axum::extract::{ConnectInfo, Path, Query, State, WebSocketUpgrade};
 use axum::http::header;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 
 use crate::player::PeerAddr;
 use crate::player::radio::handle_radio_connection;
+use crate::player::types::{AdminSession, AdminState};
 use crate::player::validation::SessionId;
 
 use super::session::{
@@ -447,23 +448,6 @@ pub async fn check_session(
 /// Serves the Prometheus metrics scrape endpoint.
 pub async fn metrics_handler() -> impl IntoResponse {
     crate::player::metrics::render()
-}
-
-/// Snapshot of a single player session for the admin view.
-#[derive(Serialize)]
-pub struct AdminSession {
-    pub session_id: String,
-    /// Seconds since this session last did anything (range request, heartbeat, etc.)
-    pub idle_secs: u64,
-    /// Which broadcaster this session is tuned to, if any
-    pub tuned_to: Option<String>,
-}
-
-/// Full server state snapshot returned by the admin endpoint.
-#[derive(Serialize)]
-pub struct AdminState {
-    pub sessions: Vec<AdminSession>,
-    pub broadcaster_listeners: std::collections::HashMap<String, Vec<String>>,
 }
 
 /// Returns a full snapshot of all sessions, broadcasters, and listener relationships.
