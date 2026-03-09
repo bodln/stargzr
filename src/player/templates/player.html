@@ -633,6 +633,67 @@
         color: #6c757d;
         margin-top: 6px;
       }
+
+      /* Search bar for filtering playlist items */
+      .search-row {
+        position: relative;
+        margin-bottom: 10px;
+      }
+
+      #playlist-search {
+        width: 100%;
+        padding: 8px 12px;
+        border: 1px solid #ced4da;
+        border-radius: 4px;
+        font-size: 14px;
+        box-sizing: border-box;
+      }
+
+      #playlist-search:focus {
+        outline: none;
+        border-color: #007bff;
+        box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.15);
+      }
+
+      /* Dropdown results list anchored below the search input */
+      .search-results {
+        position: absolute;
+        top: 100%;
+        left: 0;
+        right: 0;
+        background: white;
+        border: 1px solid #ced4da;
+        border-top: none;
+        border-radius: 0 0 4px 4px;
+        max-height: 220px;
+        overflow-y: auto;
+        z-index: 200;
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+      }
+
+      .search-result-item {
+        padding: 9px 12px;
+        cursor: pointer;
+        font-size: 13px;
+        color: #212529;
+        border-bottom: 1px solid #f0f0f0;
+      }
+
+      .search-result-item:last-child {
+        border-bottom: none;
+      }
+
+      .search-result-item:hover {
+        background: #e7f3ff;
+        color: #007bff;
+      }
+
+      /* Brief highlight ring after scrolling to a search result */
+      .search-highlight {
+        outline: 2px solid #007bff;
+        outline-offset: 1px;
+        transition: outline 0.3s;
+      }
     </style>
   </head>
   <body>
@@ -804,6 +865,16 @@
         >
           🔄 Reset to Default Order
         </button>
+        <!-- Search bar, filters playlist by filename and scrolls to the selected item -->
+        <div class="search-row" style="margin-top: 10px">
+          <input
+            type="text"
+            id="playlist-search"
+            placeholder="🔍 Search songs..."
+            autocomplete="off"
+          />
+          <div id="search-results" class="search-results hidden"></div>
+        </div>
       </div>
       <div id="playlist-display">
         <div class="loading">Loading playlist...</div>
@@ -2958,6 +3029,74 @@
 
       fetchAdminState();
       setInterval(fetchAdminState, 5000);
+
+      // Search bar: filters playlist songs by filename and scrolls to the chosen item.
+      // Results close on outside click or after selecting an item.
+      const searchInput = document.getElementById("playlist-search");
+      const searchResultsEl = document.getElementById("search-results");
+
+      searchInput.addEventListener("input", () => {
+        const query = searchInput.value.trim().toLowerCase();
+        if (!query) {
+          searchResultsEl.classList.add("hidden");
+          return;
+        }
+
+        const matches = playlistManager.songs.filter((s) =>
+          s.filename.toLowerCase().includes(query),
+        );
+
+        if (matches.length === 0) {
+          searchResultsEl.classList.add("hidden");
+          return;
+        }
+
+        searchResultsEl.innerHTML = matches
+          .map(
+            (s) =>
+              `<div class="search-result-item" data-song-id="${s.id}">${s.filename}</div>`,
+          )
+          .join("");
+        searchResultsEl.classList.remove("hidden");
+
+        // Attach click handlers to each result item
+        searchResultsEl
+          .querySelectorAll(".search-result-item")
+          .forEach((item) => {
+            item.addEventListener("click", () => {
+              const songId = item.dataset.songId;
+              searchResultsEl.classList.add("hidden");
+              searchInput.value = "";
+
+              // Scroll to the matching row inside the playlist container
+              const container = document.getElementById("playlist-display");
+              const el = container.querySelector(`[data-song-id="${songId}"]`);
+              if (!el) return;
+
+              const cRect = container.getBoundingClientRect();
+              const iRect = el.getBoundingClientRect();
+              const targetScrollTop =
+                container.scrollTop + (iRect.top - cRect.top) - 16;
+              container.scrollTo({
+                top: Math.max(0, targetScrollTop),
+                behavior: "smooth",
+              });
+
+              // Briefly highlight the row so the user can spot it easily
+              el.classList.add("search-highlight");
+              setTimeout(() => el.classList.remove("search-highlight"), 1500);
+
+              debugLog(`Search scrolled to: ${item.textContent}`);
+            });
+          });
+      });
+
+      // Close the dropdown when the user clicks anywhere outside the search row
+      document.addEventListener("click", (e) => {
+        if (!e.target.closest(".search-row")) {
+          searchResultsEl.classList.add("hidden");
+        }
+      });
 
       // Make globally accessible
       window.player = player;
