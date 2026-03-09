@@ -2456,8 +2456,10 @@
       };
       const btUnmuteOnPlaying = () => {
         if (!btMuted) return;
+        setTimeout(() => {
         btMuted = false;
         audio.muted = false;
+        }, 100);
       };
 
       // Seek: mute immediately, unmute once browser is actually outputting new position
