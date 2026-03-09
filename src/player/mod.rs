@@ -12,17 +12,18 @@ pub mod validation;
 
 pub use types::{AppState, BroadcastState, RadioMessage, SharedState, SongInfo};
 
-use crate::player::handlers::{admin_state, check_session, metrics_handler, radio_websocket};
+use crate::player::handlers::{admin_state, check_session, metrics_handler, radio_websocket, upload_file};
 use crate::player::types::PreparedMessage;
 
 use self::logging::init_logging;
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
 use handlers::{
@@ -64,17 +65,18 @@ async fn init_player_state(music_folder: PathBuf) -> SharedState {
 
     // Return the shared application state wrapped in Arc for multi-threaded use
     Arc::new(AppState {
-        playlist: Arc::new(playlist),
+        playlist: Arc::new(RwLock::new(playlist)),
         music_folder: Arc::new(music_folder),
-        sessions: DashMap::new(),           // tracks client sessions
-        broadcast_states: DashMap::new(),   // tracks broadcaster states
-        broadcast_channels: DashMap::new(), // tracks broadcaster channels
+        sessions: DashMap::new(),
+        broadcast_states: DashMap::new(),
+        broadcast_channels: DashMap::new(),
         broadcaster_listeners: DashMap::new(),
         session_tuned_to: DashMap::new(),
-        global_broadcast_tx, // used to send Sync messages to listeners
+        global_broadcast_tx,
         active_connections: AtomicUsize::new(0),
         last_analytics_ms: AtomicU64::new(0),
         ws_rate_limiter: RateLimiter::for_websocket(),
+        upload_quotas: DashMap::new(),
     })
 }
 
@@ -94,6 +96,12 @@ pub fn create_player_router(state: Arc<AppState>) -> impl std::future::Future<Ou
             .route("/player/controls", get(player_controls)) // Return current controls/status
             .route("/player/playlist", get(get_playlist))
             .route("/player/session/check", get(check_session))
+            // Override the default 2 MB body limit for the upload route only.
+            // The outer DefaultBodyLimit still applies to every other route.
+            .route(
+                "/player/upload",
+                post(upload_file).layer(DefaultBodyLimit::max(200 * 1024 * 1024)),
+            )
             .route("/metrics", get(metrics_handler))
             .route("/player/admin/state", get(admin_state)) // Information from the DashMaps in state
             .with_state(state.clone()); // Attach shared state
