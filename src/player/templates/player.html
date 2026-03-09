@@ -2483,8 +2483,6 @@
       audio.addEventListener("seeked", () => {
         seekPending = false;
       });
-      // New song: mute on load, unmute once it's actually playing
-      audio.addEventListener("loadstart", () => btMute());
       // 'playing' fires when the browser is ready to push audio safe to unmute
       audio.addEventListener("playing", () => btUnmuteOnPlaying());
       audio.play = () => {
