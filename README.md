@@ -13,11 +13,16 @@ Stream your local MP3 library from any device on your network, or broadcast what
 - **Live Radio Broadcasting** — start a broadcast and share your session ID; listeners sync to your playback in real time over WebSocket
 - **Drift Correction** — listeners receive periodic heartbeats and automatically correct position drift to stay in sync with the broadcaster
 - **Drag-and-Drop Playlist** — reorder songs in the browser; custom order is saved to localStorage and persists across sessions
+- **Playlist Search** — filter songs by filename with a live search bar; clicking a result scrolls the playlist to that song and briefly highlights it
+- **Play Next** — queue any song to the position immediately after the current one directly from the playlist row
+- **MP3 Upload** — upload MP3 files directly from the browser; the server enforces a 5 GB total library cap and a 200 MB per-IP quota per server session; uploaded files are inserted into the live playlist in alphabetical order without a restart
 - **Live Analytics** — active connections, broadcasters, and listener counts pushed to all clients in real time
+- **Admin Panel** — on-page admin view showing all live sessions, their idle time, who each session is tuned to, and the full broadcaster-to-listener map
 - **Auto-cleanup** — stale broadcaster sessions and player sessions are automatically evicted on the server
 - **Rate Limiting** — heartbeat, broadcast update, and WebSocket upgrade endpoints are rate-limited per IP to prevent abuse
 - **Per-IP WebSocket Rate Limiting** — WebSocket upgrade requests are limited per client IP; behind a reverse proxy requires `X-Real-IP` header forwarding
 - **Session Validation** — expired sessions are detected on page load and WebSocket upgrade, triggering an automatic reload to issue a fresh session
+- **Bluetooth Mode** — optional toggle that mutes audio during seeks and song changes to prevent glitches on Bluetooth DSP pipelines; unmutes once the browser confirms audio output has resumed
 - **Prometheus Metrics** — active connections, broadcasters, listeners, message rates, rate limit hits, session creation and cleanup counts exposed at `/stargzr/metrics`
 - **Structured Tracing** — per-session spans propagate `session_id` through all log lines automatically; audio streaming spans are nested under request spans
 - **Mobile Support** — touch drag-and-drop for playlist reordering, Wake Lock API support to keep the screen on while broadcasting, mobile battery-aware reconnection
@@ -47,7 +52,7 @@ src/
   player/
     mod.rs          — server init, router, TCP listener, playlist scanning
     types.rs        — AppState, RadioMessage, SongInfo, BroadcastState
-    handlers.rs     — HTTP route handlers (page, next, prev, stream, playlist, metrics)
+    handlers.rs     — HTTP route handlers (page, next, prev, stream, playlist, upload, metrics, admin)
     radio.rs        — WebSocket lifecycle, radio protocol, analytics
     session.rs      — session helpers, timestamp utils, stale session cleanup
     templates.rs    — Askama template structs and IntoResponse impls
@@ -121,6 +126,24 @@ Edit the path in `main.rs` to point to your music folder before running.
 5. Their playback syncs to yours — play, pause, and seek updates propagate in real time
 
 Listeners receive an initial `Sync` on tune-in, then periodic `Heartbeat` messages for drift correction. If a broadcaster disconnects, all tuned listeners are notified automatically.
+
+---
+
+## Uploading Music
+
+Songs can be added to the library at runtime without restarting the server.
+
+1. Click **Upload MP3** at the bottom of the player page
+2. Select one or more `.mp3` files
+3. The server validates the file type, checks the per-IP and total folder quotas, writes the file to disk, and inserts it into the live playlist in alphabetical order
+
+Upload limits (reset on server restart):
+
+| Limit | Value |
+|---|---|
+| Total library size | 5 GB |
+| Per-IP upload quota | 200 MB |
+| Accepted file types | `.mp3` only |
 
 ---
 
