@@ -1,13 +1,15 @@
-use axum::extract::{ConnectInfo, Path, Query, State, WebSocketUpgrade};
+use axum::extract::{ConnectInfo, Multipart, Path, Query, State, WebSocketUpgrade};
 use axum::http::header;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use serde::{Deserialize};
+use serde::Deserialize;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
+use uuid::Uuid;
 
 use crate::player::PeerAddr;
+use crate::player::error::PlayerError;
 use crate::player::radio::handle_radio_connection;
 use crate::player::types::{AdminSession, AdminState};
 use crate::player::validation::SessionId;
@@ -18,6 +20,11 @@ use super::session::{
 use super::templates::{PlayerControlsTemplate, PlayerTemplate};
 use super::types::{SharedState, SongInfo};
 
+// 5 GB total folder cap
+const MAX_FOLDER_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+// 200 MB per IP per server session
+const MAX_IP_QUOTA_BYTES: u64 = 200 * 1024 * 1024;
+
 /// Renders the main player page for the current user session.
 pub async fn player_page(State(state): State<SharedState>, headers: HeaderMap) -> PlayerTemplate {
     // Identify the user session (cookie-based, falls back to UUID)
@@ -26,18 +33,21 @@ pub async fn player_page(State(state): State<SharedState>, headers: HeaderMap) -
     // Fetch or initialize the session's current playlist index
     let current_index = get_or_create_position(&state, &session_id);
 
-    // Resolve the filename for the current song, if any
-    let current_song = state
-        .playlist
-        .get(current_index)
-        .map(|s| s.filename.clone())
-        .unwrap_or_else(|| "No songs found".to_string());
+    // Acquire a read lock, clone what we need, then drop the guard before any await
+    let (current_song, total_songs) = {
+        let playlist = state.playlist.read().await;
+        let song = playlist
+            .get(current_index)
+            .map(|s| s.filename.clone())
+            .unwrap_or_else(|| "No songs found".to_string());
+        (song, playlist.len())
+    };
 
     // Render the full player page
     PlayerTemplate {
         current_song,
         current_index,
-        total_songs: state.playlist.len(),
+        total_songs,
         session_id,
     }
 }
@@ -53,21 +63,22 @@ pub async fn next_song(
     // Get the current position for this session
     let current_index = get_or_create_position(&state, &session_id);
 
-    // Move forward one song, clamped to the last valid index
-    let new_index = (current_index + 1).min(state.playlist.len().saturating_sub(1));
+    // Acquire a read lock, compute new index and song name, then drop the guard
+    let (new_index, current_song, total_songs) = {
+        let playlist = state.playlist.read().await;
+        let new_index = (current_index + 1).min(playlist.len().saturating_sub(1));
+        let song = playlist
+            .get(new_index)
+            .map(|s| s.filename.clone())
+            .unwrap_or_else(|| "No songs found".to_string());
+        (new_index, song, playlist.len())
+    };
 
     // Update private playback position
     update_session_index(&state, &session_id, new_index);
 
     // If this session is a broadcaster, propagate the change to listeners
     update_broadcast_index(&state, &session_id, new_index);
-
-    // Resolve the new current song
-    let current_song = state
-        .playlist
-        .get(new_index)
-        .map(|s| s.filename.clone())
-        .unwrap_or_else(|| "No songs found".to_string());
 
     // Touch the session so passive listeners don't get cleaned up mid-song.
     // Range requests fire on every seek so this naturally stays fresh during playback.
@@ -79,7 +90,7 @@ pub async fn next_song(
     PlayerControlsTemplate {
         current_song,
         current_index: new_index,
-        total_songs: state.playlist.len(),
+        total_songs,
     }
 }
 
@@ -94,21 +105,22 @@ pub async fn prev_song(
     // Get the current position for this session
     let current_index = get_or_create_position(&state, &session_id);
 
-    // Move back one song, clamping at index 0
-    let new_index = current_index.saturating_sub(1);
+    // Acquire a read lock, compute new index and song name, then drop the guard
+    let (new_index, current_song, total_songs) = {
+        let playlist = state.playlist.read().await;
+        let new_index = current_index.saturating_sub(1);
+        let song = playlist
+            .get(new_index)
+            .map(|s| s.filename.clone())
+            .unwrap_or_else(|| "No songs found".to_string());
+        (new_index, song, playlist.len())
+    };
 
     // Update private playback position
     update_session_index(&state, &session_id, new_index);
 
     // If this session is a broadcaster, propagate the change to listeners
     update_broadcast_index(&state, &session_id, new_index);
-
-    // Resolve the new current song
-    let current_song = state
-        .playlist
-        .get(new_index)
-        .map(|s| s.filename.clone())
-        .unwrap_or_else(|| "No songs found".to_string());
 
     // Touch the session so passive listeners don't get cleaned up mid-song.
     // Range requests fire on every seek so this naturally stays fresh during playback.
@@ -120,7 +132,7 @@ pub async fn prev_song(
     PlayerControlsTemplate {
         current_song,
         current_index: new_index,
-        total_songs: state.playlist.len(),
+        total_songs,
     }
 }
 
@@ -144,21 +156,27 @@ pub async fn player_controls(
 ) -> PlayerControlsTemplate {
     // If a broadcaster ID is provided, attempt to mirror its playback state
     if let Some(broadcaster_id) = query.broadcaster {
-        // Broadcast state is shared, read-only, and authoritative for listeners
-        if let Some(broadcast) = state.broadcast_states.get(&broadcaster_id) {
-            let index = broadcast.song_index;
+        // Extract the song index without holding the DashMap ref across an await
+        let maybe_index = state
+            .broadcast_states
+            .get(&broadcaster_id)
+            .map(|b| b.song_index);
 
-            let song = state
-                .playlist
-                .get(index)
-                .map(|s| s.filename.clone())
-                .unwrap_or_else(|| "No songs found".to_string());
+        if let Some(index) = maybe_index {
+            let (current_song, total_songs) = {
+                let playlist = state.playlist.read().await;
+                let song = playlist
+                    .get(index)
+                    .map(|s| s.filename.clone())
+                    .unwrap_or_else(|| "No songs found".to_string());
+                (song, playlist.len())
+            };
 
             // Return controls reflecting the broadcaster's state
             return PlayerControlsTemplate {
-                current_song: song,
+                current_song,
                 current_index: index,
-                total_songs: state.playlist.len(),
+                total_songs,
             };
         }
     }
@@ -168,16 +186,19 @@ pub async fn player_controls(
     let session_id = get_session_id(&headers);
     let index = get_or_create_position(&state, &session_id);
 
-    let song = state
-        .playlist
-        .get(index)
-        .map(|s| s.filename.clone())
-        .unwrap_or_else(|| "No songs found".to_string());
+    let (current_song, total_songs) = {
+        let playlist = state.playlist.read().await;
+        let song = playlist
+            .get(index)
+            .map(|s| s.filename.clone())
+            .unwrap_or_else(|| "No songs found".to_string());
+        (song, playlist.len())
+    };
 
     PlayerControlsTemplate {
-        current_song: song,
+        current_song,
         current_index: index,
-        total_songs: state.playlist.len(),
+        total_songs,
     }
 }
 
@@ -203,16 +224,20 @@ pub async fn stream_audio_by_id(
         .unwrap_or("unknown");
     tracing::Span::current().record("ip", ip);
 
-    let song = state
-        .playlist
-        .iter()
-        .find(|s| s.id == song_id)
-        .ok_or_else(|| {
-            tracing::warn!("Song not found for id: {}", song_id);
-            StatusCode::NOT_FOUND
-        })?;
+    // Clone the song out before the guard drops so no reference crosses an await point
+    let song = {
+        let playlist = state.playlist.read().await;
+        playlist
+            .iter()
+            .find(|s| s.id == song_id)
+            .cloned()
+            .ok_or_else(|| {
+                tracing::warn!("Song not found for id: {}", song_id);
+                StatusCode::NOT_FOUND
+            })?
+    };
 
-    stream_audio_internal(&state, song, &headers, &session_id).await
+    stream_audio_internal(&state, &song, &headers, &session_id).await
 }
 
 /// Stream audio by song index
@@ -235,16 +260,20 @@ pub async fn stream_audio_by_index(
         .unwrap_or("unknown");
     tracing::Span::current().record("ip", ip);
 
-    let song = state.playlist.get(index).ok_or_else(|| {
-        tracing::warn!("Song not found at index: {}", index);
-        StatusCode::NOT_FOUND
-    })?;
+    // Clone the song out before the guard drops so no reference crosses an await point
+    let song = {
+        let playlist = state.playlist.read().await;
+        playlist.get(index).cloned().ok_or_else(|| {
+            tracing::warn!("Song not found at index: {}", index);
+            StatusCode::NOT_FOUND
+        })?
+    };
 
-    stream_audio_internal(&state, song, &headers, &session_id).await
+    stream_audio_internal(&state, &song, &headers, &session_id).await
 }
 
 /// Parses a "bytes=start-end" range header into (start, end) byte offsets.
-/// Returns None if the header is missing or unparseable callers fall back to full file.
+/// Returns None if the header is missing or unparseable, callers fall back to full file.
 /// The previous code silently falls through and serves the full file instead of returning a 416 Range Not Satisfiable error.
 /// This change is purely about making the fallthrough behavior explicit and readable if anything fails,
 /// None is returned and you know exactly why.
@@ -352,8 +381,6 @@ pub async fn stream_audio_internal(
         .unwrap())
 }
 
-// Upgrade with WebRTC? to have p2p
-
 /// WebSocket entrypoint for the radio synchronization system.
 /// No state is modified here; it exists purely as a thin Axum integration
 /// layer for the radio protocol.
@@ -418,8 +445,9 @@ pub async fn radio_websocket(
 
 /// Returns the full playlist with song IDs for client-side management
 pub async fn get_playlist(State(state): State<SharedState>) -> impl IntoResponse {
-    let playlist: Vec<SongInfo> = state.playlist.iter().cloned().collect();
-    axum::Json(playlist)
+    let playlist = state.playlist.read().await;
+    let songs: Vec<SongInfo> = playlist.iter().cloned().collect();
+    axum::Json(songs)
 }
 
 /// Returns 200 if session cookie maps to a live session, 401 otherwise.
@@ -480,4 +508,152 @@ pub async fn admin_state(State(state): State<SharedState>) -> impl IntoResponse 
         sessions,
         broadcaster_listeners,
     })
+}
+
+/// Accepts MP3 uploads, enforces a 5 GB total folder cap and a 200 MB per-IP cap
+/// (tracked in memory, resets on server restart), then writes the file and inserts
+/// it into the live playlist in sorted order.
+pub async fn upload_file(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<impl IntoResponse, PlayerError> {
+    // Prefer X-Real-IP set by a reverse proxy so the quota tracks the real client
+    let ip = headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Check the total folder size before accepting any data
+    let folder_size = dir_size(&state.music_folder).await?;
+    if folder_size >= MAX_FOLDER_BYTES {
+        return Err(PlayerError::UploadFailed(
+            "Server library is full (5 GB limit reached)".into(),
+        ));
+    }
+
+    // Read per-IP usage from the DashMap without holding the ref across an await
+    let ip_used = state.upload_quotas.get(&ip).map(|v| *v).unwrap_or(0u64);
+
+    if ip_used >= MAX_IP_QUOTA_BYTES {
+        return Err(PlayerError::UploadFailed(format!(
+            "Your upload quota is full ({} MB used out of 200 MB, resets on server restart)",
+            ip_used / 1024 / 1024
+        )));
+    }
+
+    let remaining_quota = MAX_IP_QUOTA_BYTES.saturating_sub(ip_used);
+    let remaining_folder = MAX_FOLDER_BYTES.saturating_sub(folder_size);
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| PlayerError::UploadFailed(e.to_string()))?
+    {
+        let raw_name = field
+            .file_name()
+            .ok_or_else(|| PlayerError::UploadFailed("Missing filename in upload".into()))?
+            .to_string();
+
+        if !raw_name.to_lowercase().ends_with(".mp3") {
+            return Err(PlayerError::UploadFailed(
+                "Only MP3 files are accepted".into(),
+            ));
+        }
+
+        let safe_name = sanitize_filename(&raw_name);
+
+        // Buffer the whole file so we can check size before writing to disk
+        let data = field
+            .bytes()
+            .await
+            .map_err(|e| PlayerError::UploadFailed(e.to_string()))?;
+
+        let file_size = data.len() as u64;
+
+        if file_size > remaining_quota {
+            return Err(PlayerError::UploadFailed(format!(
+                "'{}' is too large, you have {} MB of upload quota remaining",
+                safe_name,
+                remaining_quota / 1024 / 1024
+            )));
+        }
+
+        if file_size > remaining_folder {
+            return Err(PlayerError::UploadFailed(
+                "Not enough space on the server for this file".into(),
+            ));
+        }
+
+        let dest = state.music_folder.join(&safe_name);
+        if dest.exists() {
+            return Err(PlayerError::UploadFailed(format!(
+                "'{}' already exists in the library",
+                safe_name
+            )));
+        }
+
+        tokio::fs::write(&dest, &data).await?;
+
+        tracing::info!(
+            ip = %ip,
+            filename = %safe_name,
+            bytes = file_size,
+            "File uploaded"
+        );
+
+        // Increment the in-memory quota counter for this IP
+        *state.upload_quotas.entry(ip.clone()).or_insert(0) += file_size;
+
+        // Insert the new song into the live playlist in alphabetical order.
+        // Write lock is held only for the insert, then released immediately.
+        let new_song = SongInfo {
+            id: Uuid::new_v4().to_string(),
+            filename: safe_name.clone(),
+            size: file_size,
+        };
+
+        {
+            let mut playlist = state.playlist.write().await;
+            let pos = playlist.partition_point(|s| s.filename <= safe_name);
+            playlist.insert(pos, new_song);
+            tracing::info!(
+                filename = %safe_name,
+                position = pos,
+                "Inserted new song into playlist"
+            );
+        }
+    }
+
+    Ok(StatusCode::OK)
+}
+
+/// Strips path separators and special characters from an upload filename.
+/// Keeps letters, digits, spaces, dashes, underscores, and dots.
+/// Takes only the last path component so paths like ../../etc/passwd
+/// are reduced to just the filename portion before sanitizing.
+fn sanitize_filename(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+
+    base.chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | ' ' | '-' | '_' | '.' => c,
+            _ => '_',
+        })
+        .collect()
+}
+
+/// Sums the sizes of all files directly inside a directory (non-recursive).
+async fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {
+    let mut total = 0u64;
+    let mut entries = tokio::fs::read_dir(path).await?;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if let Ok(meta) = entry.metadata().await {
+            if meta.is_file() {
+                total += meta.len();
+            }
+        }
+    }
+    Ok(total)
 }

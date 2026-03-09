@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 hyper = { version = "1.8.1", features = ["full"] }
 tokio = { version = "1.49.0", features = ["full"] }
-axum = { version = "0.8.8", features = ["ws"] }
+axum = { version = "0.8.8", features = ["ws", "multipart"] }
 askama = "0.15.4"
 tokio-util = "0.7.18"
 uuid = { version = "1.20.0", features = ["v4", "fast-rng"] }
