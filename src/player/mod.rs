@@ -1,18 +1,19 @@
+pub mod error;
 mod handlers;
+mod logging;
+pub mod metrics;
+pub mod radio;
+pub mod rate_limit;
+pub mod reconnect;
 mod session;
 mod templates;
 mod types;
-mod logging;
-pub mod error;
-pub mod metrics;
-pub mod radio;
 pub mod validation;
-pub mod rate_limit;
-pub mod reconnect;
 
 pub use types::{AppState, BroadcastState, RadioMessage, SharedState, SongInfo};
 
 use crate::player::handlers::{admin_state, check_session, metrics_handler, radio_websocket};
+use crate::player::types::PreparedMessage;
 
 use self::logging::init_logging;
 use axum::Router;
@@ -29,7 +30,7 @@ use handlers::{
     stream_audio_by_index,
 };
 use rate_limit::RateLimiter;
-use session::{cleanup_stale_sessions};
+use session::cleanup_stale_sessions;
 
 /// Initializes the shared player state by scanning the music folder,
 /// building a playlist, and setting up broadcast channels and session tracking.
@@ -65,8 +66,8 @@ async fn init_player_state(music_folder: PathBuf) -> SharedState {
     Arc::new(AppState {
         playlist: Arc::new(playlist),
         music_folder: Arc::new(music_folder),
-        sessions: DashMap::new(), // tracks client sessions
-        broadcast_states: DashMap::new(), // tracks broadcaster states
+        sessions: DashMap::new(),           // tracks client sessions
+        broadcast_states: DashMap::new(),   // tracks broadcaster states
         broadcast_channels: DashMap::new(), // tracks broadcaster channels
         broadcaster_listeners: DashMap::new(),
         session_tuned_to: DashMap::new(),
@@ -141,7 +142,9 @@ impl axum::serve::Listener for NodeDelayListener {
 #[derive(Clone)]
 pub struct PeerAddr(pub std::net::SocketAddr);
 
-impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, NodeDelayListener>> for PeerAddr {
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, NodeDelayListener>>
+    for PeerAddr
+{
     fn connect_info(target: axum::serve::IncomingStream<'_, NodeDelayListener>) -> Self {
         // IncomingStream wraps the (TcpStream, SocketAddr) pair that NodeDelayListener::accept returns.
         // remote_addr() gives us the peer's address which is then stored in ConnectInfo<PeerAddr>
@@ -167,10 +170,7 @@ pub async fn initialize(path_buf: PathBuf) {
 
     let addr = listener.local_addr().unwrap();
 
-    tracing::info!(
-        "✓ MP3 Player listening on http://{}/stargzr",
-        addr
-    );
+    tracing::info!("✓ MP3 Player listening on http://{}/stargzr", addr);
 
     // Initialize the shared state asynchronously
     let state = init_player_state(path_buf).await;
@@ -181,16 +181,79 @@ pub async fn initialize(path_buf: PathBuf) {
     // Task for cleaning up old sessions both player and broadcast
     tokio::spawn(cleanup_stale_sessions(state.clone()));
 
-    // TODO: Add graceful shutdown handling:
-    // Set up signal handler for Ctrl+C and shutdown_rx channel
-    // Use: axum::serve(listener, router).with_graceful_shutdown(async { shutdown_rx.await.ok(); })
+    async fn shutdown_signal(state: SharedState) {
+        use tokio::signal;
+
+        // SIGINT works on all platforms
+        let ctrl_c = async {
+            signal::ctrl_c()
+                .await
+                .expect("Failed to install Ctrl+C handler");
+        };
+
+        // SIGTERM Docker stop, systemctl stop, etc. (Unix only)
+        #[cfg(unix)]
+        let terminate = async {
+            signal::unix::signal(signal::unix::SignalKind::terminate())
+                .await
+                .expect("Failed to install SIGTERM handler");
+        };
+
+        // On Windows, SIGTERM doesn't exist only wait for Ctrl+C
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+
+        tokio::select! {
+            _ = ctrl_c => { tracing::info!("Received Ctrl+C") },
+            _ = terminate => { tracing::info!("Received SIGTERM") },
+        }
+
+        tracing::info!("Notifying all active broadcasters before shutdown...");
+
+        // Collect broadcaster IDs first to avoid holding DashMap refs across awaits
+        let broadcaster_ids: Vec<String> = state
+            .broadcast_states
+            .iter()
+            .map(|e| e.key().clone())
+            .collect();
+
+        for broadcaster_id in broadcaster_ids {
+            state.broadcast_states.remove(&broadcaster_id);
+            state.broadcast_channels.remove(&broadcaster_id);
+
+            let offline_msg = Arc::new(PreparedMessage::new(&RadioMessage::BroadcasterOffline {
+                broadcaster_id: broadcaster_id.clone(),
+            }));
+
+            match state.global_broadcast_tx.send(offline_msg) {
+                Ok(count) => tracing::info!(
+                    broadcaster_id = %broadcaster_id,
+                    listeners = count,
+                    "Sent BroadcasterOffline"
+                ),
+                Err(_) => tracing::debug!(
+                    broadcaster_id = %broadcaster_id,
+                    "No listeners to notify"
+                ),
+            }
+        }
+
+        // Give the WebSocket send tasks time to flush BroadcasterOffline to clients
+        // before Axum starts dropping connections
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+        tracing::info!("Shutdown cleanup complete, draining HTTP connections...");
+    }
 
     // into_make_service_with_connect_info propagates the peer address into handlers.
-    // PeerAddr instead of SocketAddr because of the orphan rule - see Connected impl above.
+    // PeerAddr instead of SocketAddr because of the orphan rule, see Connected impl above.
     axum::serve(
         NodeDelayListener(listener),
         router.into_make_service_with_connect_info::<PeerAddr>(),
     )
+    // Once shutdown_signal() resolves, Axum knows to start shutting down
+    // Axum stops accepting new TCP connections but keeps existing ones alive until the response completes.
+    .with_graceful_shutdown(shutdown_signal(state.clone()))
     .await
     .expect("Server failed");
 }
