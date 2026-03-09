@@ -15,8 +15,6 @@ pub struct SongInfo {
     pub size: u64,
 }
 
-// TODO all the Strings that are cloned could maybe be replaced by some Arc<str> or something else so we dont need to clone them everywhere
-
 /// Represents a single user's PRIVATE player state
 pub struct PlayerSession {
     pub current_index: usize,
@@ -28,6 +26,15 @@ pub struct PlayerSession {
 pub struct BroadcastState {
     pub broadcaster_id: String,
     pub song_index: usize,
+    // TODO: here and in filename in SongInfo could be changed to Arc<str> so we dont copy them around needlessly
+    // we use Arc<str> isntead of Arc<String> because, Arc<String> is two heap allocations, the Arc points to a String header (ptr + len + capacity), 
+    // which points to the actual bytes. You pay for two pointer dereferences and two allocations.
+    // Arc<str> is a single allocation. It's a fat pointer (data ptr + length) pointing directly at the bytes, with the Arc refcount living right before them in the same block. 
+    // No intermediate String header, no wasted capacity field.
+    // 
+    // There's also a semantic point that String implies mutable and growable. 
+    // Once a filename is in an Arc you're never mutating it, so the capacity tracking (keeping track how more can fit in it) that String carries is pure waste. 
+
     // We add this field so we can return the song name in analytics
     pub song_name: String,
     pub playback_time: f64, // Current position in seconds (raw, as reported by broadcaster)
