@@ -440,6 +440,28 @@
         cursor: not-allowed;
       }
 
+      /* Play next button, queues the song to play after the current one */
+      .play-next-btn {
+        padding: 6px 10px;
+        font-size: 12px;
+        background: #fd7e14;
+        border: none;
+        color: white;
+        border-radius: 4px;
+        cursor: pointer;
+        white-space: nowrap;
+        flex-shrink: 0;
+      }
+
+      .play-next-btn:hover {
+        background: #e8590c;
+      }
+
+      .play-next-btn:disabled {
+        background: #6c757d;
+        cursor: not-allowed;
+      }
+
       .loading {
         text-align: center;
         color: #6c757d;
@@ -1013,6 +1035,12 @@
                 <span class="drag-handle">⋮⋮</span>
                 <span class="song-number">${index + 1}.</span>
                 <span class="song-name"><span class="song-text">${song.filename}</span></span>
+                <button class="play-next-btn"
+                        onclick="playlistManager.playNext_queue('${song.id}')"
+                        title="Play after current song"
+                        ${player.isInRadioMode() ? "disabled" : ""}>
+                  ⏩ After current
+                </button>
                 <button class="play-song-btn" 
                         onclick="playlistManager.playSong('${song.id}')"
                         ${player.isInRadioMode() ? "disabled" : ""}>
@@ -1315,6 +1343,12 @@
                 <span class="drag-handle">⋮⋮</span>
                 <span class="song-number">${index + 1}.</span>
                 <span class="song-name"><span class="song-text">${song.filename}</span></span>
+                <button class="play-next-btn"
+                        onclick="playlistManager.playNext_queue('${song.id}')"
+                        title="Play after current song"
+                        ${player.isInRadioMode() ? "disabled" : ""}>
+                  ⏩ Next
+                </button>
                 <button class="play-song-btn"
                         onclick="playlistManager.playSong('${song.id}')"
                         ${player.isInRadioMode() ? "disabled" : ""}>
@@ -1353,6 +1387,35 @@
 
           this.render();
           debugLog(`Playing: ${song ? song.filename : songId}`);
+        }
+
+        // Moves a song to the slot immediately after the currently playing song.
+        // Saves the new order and re-renders so the change is visible right away.
+        playNext_queue(songId) {
+          if (player.isInRadioMode()) {
+            alert("Cannot change queue while in radio mode");
+            return;
+          }
+
+          const fromIndex = this.songs.findIndex((s) => s.id === songId);
+          if (fromIndex === -1) return;
+
+          const currentIndex = this.getCurrentIndex();
+          let insertAt = currentIndex + 1;
+
+          // Already the next song, nothing to do
+          if (fromIndex === insertAt) return;
+
+          const song = this.songs[fromIndex];
+          this.songs.splice(fromIndex, 1);
+
+          // Adjust target if the removed item was before the insertion point
+          if (fromIndex < insertAt) insertAt--;
+
+          this.songs.splice(insertAt, 0, song);
+          this.saveCustomOrder();
+          this.render(true);
+          debugLog(`Queued "${song.filename}" to play next`);
         }
 
         getSongById(songId) {
