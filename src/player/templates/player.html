@@ -599,6 +599,25 @@
         <span id="connection-text">Connecting...</span>
       </div>
 
+      <div class="connection-status" style="margin-top: 6px">
+        <label
+          style="
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            font-size: 13px;
+          "
+        >
+          <input
+            type="checkbox"
+            id="bt-mode-toggle"
+            style="width: 16px; height: 16px; cursor: pointer"
+          />
+          <span>🎧 Bluetooth mode (mute on seek which makes for a smoother seeking experience)</span>
+        </label>
+      </div>
+
       <div class="session-id-display">
         <strong>Your Session ID:</strong>
         <span id="my-session-id">{{ session_id }}</span>
@@ -1355,7 +1374,7 @@
           // Connection state for UI
           this.connectionState = "disconnected";
 
-          // Debounce timer for incoming Sync messages discards all but the
+          // Debounce timer for incoming Sync messages, discards all but the
           // last message in a burst, preventing choppy multi-seek on rapid updates.
           this.syncTimer = null;
 
@@ -2185,7 +2204,7 @@
             if (!this.isBroadcasting) return;
             if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
-            // Debounce: pause/seeked/play all fire within 100ms of a seek.
+            // Debounce: pause/seeked/play all fire within 150ms of a seek.
             // Only send the final state once the burst settles.
             clearTimeout(broadcastUpdateTimer);
             broadcastUpdateTimer = setTimeout(() => {
@@ -2416,12 +2435,43 @@
       // the radio sync path doesn't fire before the browser has landed on the new position.
       const originalPlay = audio.play.bind(audio);
       let seekPending = false;
+
+      // Bluetooth mode: mute during seeks and song changes to prevent the BT DSP
+      // pipeline from producing a glitch when audio cuts out briefly.
+      // Unmute is deferred until the 'playing' event the earliest point the browser
+      // has actually decoded and is about to push audio out of the pipeline.
+      // Persisted in localStorage so it survives page reload.
+      const btToggle = document.getElementById("bt-mode-toggle");
+      btToggle.checked = localStorage.getItem("bt_mode") === "true";
+      btToggle.addEventListener("change", () => {
+        localStorage.setItem("bt_mode", btToggle.checked);
+        debugLog(`Bluetooth mode ${btToggle.checked ? "enabled" : "disabled"}`);
+      });
+
+      let btMuted = false;
+      const btMute = () => {
+        if (!btToggle.checked) return;
+        btMuted = true;
+        audio.muted = true;
+      };
+      const btUnmuteOnPlaying = () => {
+        if (!btMuted) return;
+        btMuted = false;
+        audio.muted = false;
+      };
+
+      // Seek: mute immediately, unmute once browser is actually outputting new position
       audio.addEventListener("seeking", () => {
         seekPending = true;
+        btMute();
       });
       audio.addEventListener("seeked", () => {
         seekPending = false;
       });
+      // New song: mute on load, unmute once it's actually playing
+      audio.addEventListener("loadstart", () => btMute());
+      // 'playing' fires when the browser is ready to push audio safe to unmute
+      audio.addEventListener("playing", () => btUnmuteOnPlaying());
       audio.play = () => {
         if (!seekPending) return originalPlay();
         // A seek is in flight, meaning currentTime was just set but the browser has
