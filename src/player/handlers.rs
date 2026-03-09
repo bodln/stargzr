@@ -620,7 +620,7 @@ pub async fn upload_file(
             playlist.insert(pos, new_song);
             tracing::info!(
                 filename = %safe_name,
-                position = pos,
+                position = pos + 1,
                 "Inserted new song into playlist"
             );
         }
