@@ -396,7 +396,7 @@
         flex: 1;
         font-size: 14px;
         color: #212529;
-        /* min-width: 0 lets flex children shrink below their content size —
+        /* min-width: 0 lets flex children shrink below their content size,
            without this the text pushes the Play button off-screen */
         min-width: 0;
         overflow: hidden;
@@ -471,6 +471,69 @@
         color: #6c757d;
         margin-top: 4px;
         display: block;
+      }
+
+      /* Upload section */
+      .upload-container {
+        background: #f8f9fa;
+        padding: 15px;
+        border-radius: 8px;
+        margin-top: 20px;
+        margin-bottom: 20px;
+        border: 1px solid #dee2e6;
+      }
+
+      .upload-container h3 {
+        margin: 0 0 10px 0;
+        font-size: 16px;
+        color: #495057;
+      }
+
+      .upload-row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+
+      #upload-input {
+        flex: 1;
+        padding: 8px;
+        border: 1px solid #dee2e6;
+        border-radius: 4px;
+        font-size: 14px;
+        min-width: 0;
+      }
+
+      #upload-btn {
+        padding: 8px 16px;
+        font-size: 14px;
+        flex-shrink: 0;
+      }
+
+      #upload-status {
+        margin-top: 8px;
+        font-size: 13px;
+        color: #495057;
+        min-height: 18px;
+      }
+
+      #upload-progress {
+        margin-top: 6px;
+      }
+
+      .upload-bar-outer {
+        background: #dee2e6;
+        border-radius: 4px;
+        height: 6px;
+      }
+
+      #upload-bar {
+        background: #28a745;
+        height: 100%;
+        width: 0%;
+        border-radius: 4px;
+        transition: width 0.2s;
       }
 
       /* Admin panel */
@@ -687,6 +750,26 @@
     <div class="controls">
       <button id="prev-btn">⏮️ Previous</button>
       <button id="next-btn">Next ⏭️</button>
+    </div>
+
+    <!-- Upload Section -->
+    <div class="upload-container">
+      <h3>⬆️ Upload MP3</h3>
+      <div class="upload-row">
+        <input
+          type="file"
+          id="upload-input"
+          accept=".mp3"
+          multiple
+        />
+        <button id="upload-btn">Upload</button>
+      </div>
+      <div id="upload-status"></div>
+      <div id="upload-progress" style="display:none;">
+        <div class="upload-bar-outer">
+          <div id="upload-bar"></div>
+        </div>
+      </div>
     </div>
 
     <!-- Playlist Display -->
@@ -972,7 +1055,7 @@
             });
           });
 
-          // Mobile: touch events only on the ⋮⋮ handle so the rest of the
+          // Mobile: touch events only on the handle so the rest of the
           // row remains scrollable on phones
           document.querySelectorAll(".drag-handle").forEach((handle) => {
             handle.addEventListener(
@@ -1000,7 +1083,7 @@
           });
         }
 
-        // ── Desktop drag handlers ──────────────────────────────────────────
+        // Desktop drag handlers
 
         handleDragStart(e) {
           this.draggedElement = e.currentTarget;
@@ -1037,10 +1120,10 @@
           this.draggedElement = null;
         }
 
-        // ── Mobile touch handlers ──────────────────────────────────────────
+        // Mobile touch handlers
 
         handleTouchStart(e) {
-          // e.currentTarget is the ⋮⋮ handle, walk up to the row
+          // e.currentTarget is the handle, walk up to the row
           const row = e.currentTarget.closest(".playlist-item");
           if (!row) return;
 
@@ -1848,7 +1931,7 @@
             return;
           }
 
-          // Broadcaster's song ended naturally — queue the next song index so
+          // Broadcaster's song ended naturally, queue the next song index so
           // we can let our own track finish before switching, instead of being
           // yanked forward by the normal Sync path.
           if (msg.type === "AutoNext") {
@@ -1901,7 +1984,7 @@
           if (msg.type === "ServerShutdown") {
             debugLog(`Server shutting down: ${msg.message}`);
 
-            // Show a non blocking status update don't alert, don't stop reconnecting
+            // Show a non blocking status update, don't alert, don't stop reconnecting
             const text = document.getElementById("connection-text");
             text.textContent = msg.message;
             text.style.color = "#ffc107";
@@ -2467,7 +2550,7 @@
 
       // Bluetooth mode: mute during seeks and song changes to prevent the BT DSP
       // pipeline from producing a glitch when audio cuts out briefly.
-      // Unmute is deferred until the 'playing' event the earliest point the browser
+      // Unmute is deferred until the 'playing' event, the earliest point the browser
       // has actually decoded and is about to push audio out of the pipeline.
       // Persisted in localStorage so it survives page reload.
       const btToggle = document.getElementById("bt-mode-toggle");
@@ -2500,7 +2583,7 @@
         seekPending = false;
       });
 
-      // 'playing' fires when the browser is ready to push audio safe to unmute
+      // 'playing' fires when the browser is ready to push audio, safe to unmute
       audio.addEventListener("playing", () => btUnmuteOnPlaying());
 
       audio.play = () => {
@@ -2685,6 +2768,69 @@
         } catch (_) {
           // Network error, do not block playback
         }
+      });
+
+      // File Upload
+      document.getElementById("upload-btn").addEventListener("click", async () => {
+        const input = document.getElementById("upload-input");
+        const status = document.getElementById("upload-status");
+        const progressDiv = document.getElementById("upload-progress");
+        const bar = document.getElementById("upload-bar");
+
+        if (!input.files.length) {
+          status.textContent = "No files selected.";
+          status.style.color = "#495057";
+          return;
+        }
+
+        const form = new FormData();
+        for (const file of input.files) {
+          form.append("file", file);
+        }
+
+        status.textContent = "Uploading...";
+        status.style.color = "#495057";
+        progressDiv.style.display = "block";
+        bar.style.width = "0%";
+
+        // Use XMLHttpRequest so we get upload progress events
+        await new Promise((resolve) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open("POST", "/stargzr/player/upload");
+
+          xhr.upload.addEventListener("progress", (e) => {
+            if (e.lengthComputable) {
+              bar.style.width = ((e.loaded / e.total) * 100) + "%";
+            }
+          });
+
+          xhr.addEventListener("load", () => {
+            if (xhr.status === 200) {
+              status.textContent = "Upload successful, refreshing playlist...";
+              status.style.color = "#28a745";
+              bar.style.width = "100%";
+              input.value = "";
+              // Reload the playlist so the new song appears immediately
+              playlistManager.loadPlaylist();
+            } else {
+              status.textContent = xhr.responseText || "Upload failed.";
+              status.style.color = "#dc3545";
+            }
+            setTimeout(() => {
+              progressDiv.style.display = "none";
+              bar.style.width = "0%";
+            }, 2000);
+            resolve();
+          });
+
+          xhr.addEventListener("error", () => {
+            status.textContent = "Network error during upload.";
+            status.style.color = "#dc3545";
+            resolve();
+          });
+
+          xhr.send(form);
+        });
       });
 
       // Admin state panel, polls every 5 seconds and highlights the current session
