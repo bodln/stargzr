@@ -614,7 +614,10 @@
             id="bt-mode-toggle"
             style="width: 16px; height: 16px; cursor: pointer"
           />
-          <span>🎧 Bluetooth mode (mute on seek which makes for a smoother seeking experience)</span>
+          <span
+            >🎧 Bluetooth mode (mute on seek which makes for a smoother seeking
+            experience by adding a second of silence to them)</span
+          >
         </label>
       </div>
 
@@ -1359,6 +1362,15 @@
           // finishing our current track, so a seek or pause after AutoNext is respected.
           this.pendingAutoNextTime = 0;
 
+          // Song index currently being loaded into the audio element.
+          // Prevents a second Sync for the same song-change from registering
+          // a duplicate canplay handler with a stale closure value.
+          this._loadingSongIndex = null;
+          // Most recent seek target and play state for the in-flight load.
+          // Updated by any Sync that arrives before canplay fires.
+          this._pendingSeekTime = 0;
+          this._pendingIsPlaying = false;
+
           // Reconnection state
           this.reconnectAttempts = 0;
           this.maxReconnectAttempts = 10;
@@ -1929,54 +1941,55 @@
 
           const currentIndex = this.getCurrentSongIndex();
 
-          if (currentIndex !== song_index) {
-            // Broadcaster switched to a different song.
-            // Load the new track and defer the seek until canplay fires
-            // seeking before the browser has buffered any data causes the
-            // half-second skip at the start of every song change.
-            debugLog(
-              `Switching from song ${currentIndex} to song ${song_index}`,
-            );
+          // A song change and immediate seek produces two Syncs. After the first one sets
+          // audio.src, getCurrentSongIndex() returns song_index, so the second Sync lands
+          // in the else branch and sets currentTime before the browser has buffered anything.
+          // _loadingSongIndex guards this: any Sync for a song already being loaded only
+          // updates the pending seek target, keeping a single canplay handler that always
+          // reads the most recent values.
+          if (
+            currentIndex !== song_index ||
+            this._loadingSongIndex === song_index
+          ) {
+            this._pendingSeekTime = playback_time;
+            this._pendingIsPlaying = is_playing;
 
-            const songId = window.playlistManager
-              ? window.playlistManager.getSongIdByServerIndex(song_index)
-              : null;
+            if (this._loadingSongIndex !== song_index) {
+              debugLog(
+                `Switching from song ${currentIndex} to song ${song_index}`,
+              );
+              this._loadingSongIndex = song_index;
 
-            if (songId) {
-              this.audio.src = `/stargzr/player/stream/id/${songId}`;
-            } else {
-              // Fall back to numeric index if playlist manager isn't ready yet
-              this.audio.src = `/stargzr/player/stream/${song_index}`;
+              const songId = window.playlistManager
+                ? window.playlistManager.getSongIdByServerIndex(song_index)
+                : null;
+
+              if (songId) {
+                this.audio.src = `/stargzr/player/stream/id/${songId}`;
+              } else {
+                this.audio.src = `/stargzr/player/stream/${song_index}`;
+              }
+              this.audio.load();
+
+              // Single handler reads _pendingSeekTime at fire time so a later
+              // Sync arriving before canplay silently wins without a second handler.
+              this.audio.addEventListener(
+                "canplay",
+                () => {
+                  this._loadingSongIndex = null;
+                  const seekTo =
+                    this._pendingSeekTime < 1.0 ? 0 : this._pendingSeekTime;
+                  debugLog(
+                    `canplay, seeking to ${seekTo.toFixed(2)}s (broadcaster at ${this._pendingSeekTime.toFixed(2)}s)`,
+                  );
+                  this.audio.currentTime = seekTo;
+                  if (this._pendingIsPlaying) this.audio.play();
+                },
+                { once: true },
+              );
             }
-            this.audio.load();
-
-            // Recalculate target time fresh inside canplay so network latency
-            // between the Sync message arriving and the browser being ready to
-            // seek is accounted for.
-            // Exception: if the broadcaster's playback_time is near 0, the song
-            // just started, adding latency compensation would skip the opening
-            // notes, so we just seek to 0 instead.
-            this.audio.addEventListener(
-              "canplay",
-              () => {
-                let seekTo;
-                if (playback_time < 1.0) {
-                  // Song just started on broadcaster side, begin from the top
-                  seekTo = 0;
-                } else {
-                  seekTo = playback_time;
-                }
-
-                debugLog(
-                  `canplay, seeking to ${seekTo.toFixed(2)}s (broadcaster at ${playback_time.toFixed(2)}s)`,
-                );
-
-                this.audio.currentTime = seekTo;
-                if (is_playing) this.audio.play();
-              },
-              { once: true },
-            );
           } else {
+            this._loadingSongIndex = null;
             this.audio.currentTime = playback_time;
             if (is_playing) this.audio.play();
             if (!is_playing && !this.audio.paused) this.audio.pause();
@@ -2457,9 +2470,9 @@
       const btUnmuteOnPlaying = () => {
         if (!btMuted) return;
         setTimeout(() => {
-        btMuted = false;
-        audio.muted = false;
-        }, 100);
+          btMuted = false;
+          audio.muted = false;
+        }, 1000);
       };
 
       // Seek: mute immediately, unmute once browser is actually outputting new position
