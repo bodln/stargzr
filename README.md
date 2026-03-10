@@ -22,7 +22,7 @@ Stream your local MP3 library from any device on your network, or broadcast what
 - **Rate Limiting** — heartbeat, broadcast update, and WebSocket upgrade endpoints are rate-limited per IP to prevent abuse
 - **Per-IP WebSocket Rate Limiting** — WebSocket upgrade requests are limited per client IP; behind a reverse proxy requires `X-Real-IP` header forwarding
 - **Session Validation** — expired sessions are detected on page load and WebSocket upgrade, triggering an automatic reload to issue a fresh session
-- **Bluetooth Mode** — optional toggle that mutes audio during seeks and song changes to prevent glitches on Bluetooth DSP pipelines; unmutes once the browser confirms audio output has resumed
+- **Bluetooth Mode** — optional toggle that mutes audio during seeks and song changes to prevent glitches on Bluetooth DSP pipelines; unmutes once the browser confirms audio output has resumed;
 - **Prometheus Metrics** — active connections, broadcasters, listeners, message rates, rate limit hits, session creation and cleanup counts exposed at `/stargzr/metrics`
 - **Structured Tracing** — per-session spans propagate `session_id` through all log lines automatically; audio streaming spans are nested under request spans
 - **Mobile Support** — touch drag-and-drop for playlist reordering, Wake Lock API support to keep the screen on while broadcasting, mobile battery-aware reconnection
@@ -36,7 +36,7 @@ Stream your local MP3 library from any device on your network, or broadcast what
 | Web framework | [Axum](https://github.com/tokio-rs/axum) |
 | Async runtime | [Tokio](https://tokio.rs) |
 | Templates | [Askama](https://github.com/djc/askama) |
-| Frontend | [HTMX](https://htmx.org) |
+| Frontend | Vanilla JS + CSS (split into separate static files served by tower-http) |
 | Concurrent state | [DashMap](https://github.com/xacrimon/dashmap) |
 | Real-time sync | WebSocket (`tokio::sync::broadcast`) |
 | Session IDs | UUID v4 |
@@ -62,8 +62,20 @@ src/
     metrics.rs      — Prometheus metrics registry and helper functions
     logging.rs      — tracing-subscriber initialization
     reconnect.rs    — reconnection logic
+    static/
+      css/
+        player.css        — all player styles
+      js/
+        utils.js          — debugLog, copySessionId
+        playlist.js       — PlaylistManager class
+        radio-player.js   — RadioPlayer class
+        analytics.js      — updateAnalyticsDisplay, tuneInToBroadcaster
+        upload.js         — upload button handler
+        admin.js          — admin panel polling
+        search.js         — playlist search bar
+        main.js           — audio setup, instantiation, all event bindings
     templates/
-      player.html         — full player page with radio UI and playlist
+      player.html         — full player page, references external CSS and JS
       player_controls.html — HTMX partial for control updates
   main.rs
 music/                  — your MP3 files go here
@@ -296,6 +308,8 @@ https://random-name.trycloudflare.com
 ## Docker Image
 
 Available at `omersadikovic/stargzr:latest` on Docker Hub.
+
+The Docker image is built using a two-stage build. The builder stage compiles a fully static binary targeting `x86_64-unknown-linux-musl` using `musl-tools`, which eliminates any dependency on the host system's glibc version. The runtime stage is Alpine Linux with just `ca-certificates` added. Static CSS and JS files are copied from the builder into the final image at the path baked in by `CARGO_MANIFEST_DIR` at compile time.
 
 ---
 
