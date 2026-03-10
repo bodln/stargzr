@@ -11,19 +11,40 @@ use uuid::Uuid;
 use crate::player::PeerAddr;
 use crate::player::error::PlayerError;
 use crate::player::radio::handle_radio_connection;
-use crate::player::types::{AdminSession, AdminState};
+use crate::player::types::{AdminSession, AdminState, MediaType};
+use crate::player::types::media_type_for;
 use crate::player::validation::SessionId;
 
 use super::session::{
     get_or_create_position, get_session_id, update_broadcast_index, update_session_index,
 };
 use super::templates::{PlayerControlsTemplate, PlayerTemplate};
-use super::types::{SharedState, SongInfo};
+use super::types::{SharedState, MediaInfo};
 
 // 5 GB total folder cap
 const MAX_FOLDER_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 // 200 MB per IP per server session
 const MAX_IP_QUOTA_BYTES: u64 = 200 * 1024 * 1024;
+
+/// Maps a filename extension to the correct HTTP Content-Type.
+/// Browsers use this to decide how to handle the response, incorrect values
+/// will cause the browser to refuse to play the file even if the bytes are valid.
+/// Video uploads are always converted to MP4 on ingest, so only video/mp4 is needed here.
+/// MKV, MOV, and AVI are accepted as uploads but never stored or served,
+/// they are replaced by a converted .mp4 before the playlist entry is created.
+fn content_type_for(filename: &str) -> &'static str {
+    let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "mp3"  => "audio/mpeg",
+        "m4a"  => "audio/mp4",
+        "ogg"  => "audio/ogg",
+        "wav"  => "audio/wav",
+        "flac" => "audio/flac",
+        "mp4"  => "video/mp4",
+        "webm" => "video/webm",
+        _      => "application/octet-stream",
+    }
+}
 
 /// Renders the main player page for the current user session.
 pub async fn player_page(State(state): State<SharedState>, headers: HeaderMap) -> PlayerTemplate {
@@ -307,7 +328,7 @@ fn parse_range_header(headers: &HeaderMap, file_size: u64) -> Option<(u64, u64)>
 #[tracing::instrument(skip(state, headers, session_id), fields(song = %song.filename, size = song.size))]
 pub async fn stream_audio_internal(
     state: &SharedState,
-    song: &SongInfo,
+    song: &MediaInfo,
     headers: &HeaderMap,
     session_id: &str,
 ) -> Result<Response, StatusCode> {
@@ -319,6 +340,9 @@ pub async fn stream_audio_internal(
     if let Some(mut session) = state.sessions.get_mut(session_id) {
         session.last_activity = std::time::Instant::now();
     }
+
+    // Derived from the file extension so audio and video files both get the right MIME type
+    let content_type = content_type_for(&song.filename);
 
     if let Some((start, end)) = parse_range_header(headers, file_size) {
         let mut file = File::open(&file_path).await.map_err(|e| {
@@ -337,12 +361,12 @@ pub async fn stream_audio_internal(
         tracing::debug!(start, end, length, "Serving range request");
 
         let limited_file = file.take(length);
-        let stream = ReaderStream::with_capacity(limited_file, 128 * 1024); // we read 128 kilobytes at a time
+        let stream = ReaderStream::with_capacity(limited_file, 512 * 1024); // we read 128 kilobytes at a time
         let body = axum::body::Body::from_stream(stream);
 
         return Ok(Response::builder()
             .status(StatusCode::PARTIAL_CONTENT)
-            .header(header::CONTENT_TYPE, "audio/mpeg")
+            .header(header::CONTENT_TYPE, content_type)
             // We tell the browser that this server supports range requests on this resource,
             // which enables the seeking functionality in the HTML5 audio player.
             .header(header::ACCEPT_RANGES, "bytes") // required for partial content responses
@@ -368,12 +392,12 @@ pub async fn stream_audio_internal(
         StatusCode::NOT_FOUND
     })?;
 
-    let stream = ReaderStream::with_capacity(file, 128 * 1024);
+    let stream = ReaderStream::with_capacity(file, 512 * 1024);
     let body = axum::body::Body::from_stream(stream);
 
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "audio/mpeg")
+        .header(header::CONTENT_TYPE, content_type)
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, file_size.to_string())
         .header(header::CACHE_CONTROL, "public, max-age=31536000")
@@ -446,7 +470,7 @@ pub async fn radio_websocket(
 /// Returns the full playlist with song IDs for client-side management
 pub async fn get_playlist(State(state): State<SharedState>) -> impl IntoResponse {
     let playlist = state.playlist.read().await;
-    let songs: Vec<SongInfo> = playlist.iter().cloned().collect();
+    let songs: Vec<MediaInfo> = playlist.iter().cloned().collect();
     axum::Json(songs)
 }
 
