@@ -321,6 +321,11 @@ class RadioPlayer {
         this.pendingAutoNextTime  = 0;
 
         const songId = window.playlistManager?.getSongIdByServerIndex(idx) ?? null;
+
+        // Switch to the correct element before loading the next song
+        const nextSong = songId ? window.playlistManager?.getSongById(songId) : window.playlistManager?.originalSongs[idx];
+        window.switchMediaElement?.(nextSong?.media_type === "video");
+
         this.audio.src = songId ? `/stargzr/player/stream/id/${songId}` : `/stargzr/player/stream/${idx}`;
         this.audio.load();
 
@@ -386,7 +391,12 @@ class RadioPlayer {
         debugLog(`Switching from song ${currentIndex} to song ${song_index}`);
         this._loadingSongIndex = song_index;
 
-        const songId = window.playlistManager?.getSongIdByServerIndex(song_index) ?? null;
+        const songId   = window.playlistManager?.getSongIdByServerIndex(song_index) ?? null;
+        const nextSong = songId ? window.playlistManager?.getSongById(songId) : window.playlistManager?.originalSongs[song_index];
+
+        // Switch media element before loading so the browser targets the right one
+        window.switchMediaElement?.(nextSong?.media_type === "video");
+
         this.audio.src = songId ? `/stargzr/player/stream/id/${songId}` : `/stargzr/player/stream/${song_index}`;
         this.audio.load();
 
@@ -421,11 +431,15 @@ class RadioPlayer {
 
     // Snapshot private playback state before entering radio mode for the first time
     if (this.mode !== "radio") {
+      const snapSongId = window.playlistManager?.currentSongId ?? null;
+      const snapSong   = snapSongId ? window.playlistManager?.getSongById(snapSongId) : null;
       this.preRadioSnapshot = {
         src:         this.audio.src || this.audio.querySelector?.("source")?.getAttribute("src") || null,
         currentTime: this.audio.currentTime,
         paused:      this.audio.paused,
-        songId:      window.playlistManager?.currentSongId ?? null,
+        songId:      snapSongId,
+        // Remember whether the pre-radio song was video so tuneOut can restore the right element
+        isVideo:     snapSong?.media_type === "video",
       };
       debugLog(`Saved pre-radio state: ${this.preRadioSnapshot.src} @ ${this.preRadioSnapshot.currentTime.toFixed(2)}s`);
     }
@@ -471,6 +485,8 @@ class RadioPlayer {
 
       if (snap.src) {
         debugLog(`Restoring pre-radio state: ${snap.src} @ ${snap.currentTime.toFixed(2)}s`);
+        // Restore the correct element type for the pre-radio song
+        window.switchMediaElement?.(snap.isVideo);
         this.audio.src = snap.src;
         this.audio.load();
         this.audio.addEventListener("canplay", () => {
