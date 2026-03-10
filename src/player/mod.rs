@@ -107,6 +107,77 @@ pub fn create_player_router(state: Arc<AppState>) -> impl std::future::Future<Ou
             )
             .route("/metrics", get(metrics_handler))
             .route("/player/admin/state", get(admin_state)) // Information from the DashMaps in state
+//             ## Why Static File Serving Is This Complicated
+
+// To really understand why all of this is necessary, you need to understand what a web server actually is at a fundamental level, because most people's mental model of it is subtly wrong in a way that makes this whole topic confusing.
+
+// ### The wrong mental model
+
+// Most people think of a web server as something like a file browser — you put files somewhere on a machine, point a server at them, and the server exposes them at URLs that mirror the folder structure. Apache and Nginx work roughly this way by default, which is where that mental model comes from. You drop an `index.html` in a folder and it just appears at `/index.html`. This feels natural and intuitive.
+
+// Axum doesn't work this way at all, and understanding *why* is the key to everything.
+
+// ### What Axum actually is
+
+// Axum is a **request router**, not a file server. Its entire job is to look at an incoming HTTP request, pattern-match the URL path against a list of routes you registered, and call the corresponding Rust function. That's it. It has no concept of a filesystem. It doesn't know where your binary lives, it doesn't scan directories, it doesn't expose anything automatically. When a request comes in for `/stargzr/css/player.css`, Axum walks through your route list looking for a match, and if it finds nothing it returns a 404. The file sitting on your disk at `src/player/static/css/player.css` is completely invisible — the disk and the HTTP server are two entirely separate worlds that have no connection unless you explicitly wire them together.
+
+// This is actually the correct design for a production web framework. You don't want your server accidentally exposing files it shouldn't. You get to explicitly declare every single URL your server responds to, which gives you complete control over what's accessible.
+
+// ### Why the browser needs those files separately
+
+// When your Axum handler serves the HTML page, it sends the entire HTML document as a single HTTP response. The browser receives that HTML, parses it, and then encounters tags like `<link rel="stylesheet" href="/stargzr/static/css/player.css">` and `<script src="/stargzr/static/js/main.js">`. These tags are instructions to the browser to go fetch additional resources — the browser doesn't receive them embedded in the HTML, it makes completely separate HTTP requests for each one. So after the initial page load, the browser fires off eight more requests for your JS files and one for the CSS. Each of those hits your Axum server as a fresh HTTP request, and each one gets a 404 unless you have a route registered for it.
+
+// ### What ServeDir does
+
+// `ServeDir` is the bridge between the URL world and the filesystem world. It's not part of Axum itself — it lives in `tower-http`, which is a collection of HTTP middleware utilities built on Tower, the underlying service abstraction layer that Axum sits on top of. When you write:
+
+// ```rust
+// .nest_service("/static/css", ServeDir::new("src/player/static/css"))
+// ```
+
+// You're telling Axum: "any request whose URL starts with `/static/css` should be handed off to this `ServeDir` service." `ServeDir` then strips the URL prefix, takes whatever remains, and looks for a file with that name in the directory you gave it. So a request for `/static/css/player.css` becomes a filesystem lookup for `player.css` inside `src/player/static/css`. If the file exists, `ServeDir` reads it and streams it back as an HTTP response with the appropriate `Content-Type` header. If not, it returns a 404. That's the entire mechanism.
+
+// The reason you need `--features fs` when adding `tower-http` is that it's a large crate with many optional capabilities — file serving, compression, CORS headers, request logging, and more. Cargo features let you opt into only what you need so you're not compiling code you don't use.
+
+// ### Why the path is so fragile
+
+// The path you pass to `ServeDir::new()` is a **relative filesystem path**, resolved from wherever the process's current working directory is at runtime. This is a standard operating system concept — every running process has a "current directory" and relative paths are resolved against it. The problem is that this current directory is not fixed. When you run `cargo run` from your project root, the current directory is your project root. When you run the compiled binary directly from somewhere else, it's wherever you ran it from. When Docker runs it, it depends entirely on the `WORKDIR` instruction in your Dockerfile.
+
+// This is why `"src/player/static/css"` works on your machine when running with `cargo run` from `D:\Skola\.projekti\stargzr` — that path resolves to `D:\Skola\.projekti\stargzr\src\player\static\css`, which is exactly where your files are. But in Docker, if your `WORKDIR` is `/app` and your binary is at `/app/stargzr`, then that same relative path resolves to `/app/src/player/static/css`, which may or may not exist depending on how you structured your Docker image.
+
+// ### Why CARGO_MANIFEST_DIR fixes it
+
+// `env!("CARGO_MANIFEST_DIR")` is a Rust compile-time macro that expands to the absolute path of the directory containing your `Cargo.toml` — in your case, `D:\Skola\.projekti\stargzr`. Crucially, this is baked into the binary at compile time, so it's an absolute path that never changes regardless of what the current working directory is at runtime. The `concat!` macro then glues it together with the rest of the path into a single string literal.
+
+// The catch, which is why Docker needs careful handling, is that this absolute path is the path *on the machine where the binary was compiled*. If you compile on your Windows machine and the path is `D:\Skola\.projekti\stargzr\src\player\static\css`, that path is baked into the binary — but that path doesn't exist inside a Linux Docker container. So for Docker you need to make sure the static files are copied into the image at a path that matches what's baked into the binary, or you need a different strategy like embedding the files directly into the binary using `include_str!` or the `rust-embed` crate, which would eliminate the runtime filesystem dependency entirely and make the whole question moot.
+
+
+// And w eneed to change the docker file becuse ---------------------------------------------------------------------------------
+
+// ## Why We Changed the Dockerfile in the First Place
+
+// The original Dockerfile had two separate problems that were both silently wrong, and understanding each one requires understanding something fundamental about how Docker and compiled binaries work.
+
+// ### Problem One: The glibc Version Mismatch
+
+// Your original Dockerfile used `debian:bookworm-slim` as the runtime image and compiled the binary inside `rust:latest` as the builder image. These two images run different versions of Debian under the hood, and that difference is what caused the crash.
+
+// When Rust compiles your binary on the builder image, it doesn't bundle the entire C standard library into the binary. Instead it produces a binary that says, at a very low level, "when you run me, go find glibc on this system and use that." This is called dynamic linking — the binary and the library stay separate, and the library is loaded from the host system at runtime. This is efficient because every program on a Linux machine can share one copy of glibc in memory rather than each carrying their own copy. But it creates a fragility: the binary was compiled against a specific version of glibc, and it will only run correctly on a system that has that version or newer.
+
+// The `rust:latest` builder image is based on a newer Debian that ships glibc 2.38. Your `debian:bookworm-slim` runtime image has an older glibc. So when Docker starts the container, the OS looks at your binary, sees it requires symbols introduced in glibc 2.38, checks what it has available, finds those symbols missing, and refuses to run the binary entirely. That's the crash you were seeing — not a bug in your code, just an incompatibility between where the binary was compiled and where it was being run.
+
+// The fix is to switch from dynamic linking to static linking using musl. Instead of the binary saying "go find this library at runtime," a musl-compiled binary has everything it needs bundled inside it. It becomes completely self-contained and the host system's glibc version becomes entirely irrelevant, because the binary never even looks for it.
+
+// ### Problem Two: The Missing Static Files
+
+// The second problem is more subtle. Your CSS and JS files live on your development machine at `src/player/static/`, and your Rust code references them using `CARGO_MANIFEST_DIR`, which gets baked in at compile time as an absolute path. When you compile inside the Docker builder container, that absolute path becomes `/app/src/player/static` — the path inside the container where the build happened.
+
+// The original Dockerfile never copied those files into the final image. It only copied the compiled binary. So at runtime, the binary would start up, try to serve a request for `player.css`, look for the file at `/app/src/player/static/css/player.css`, find nothing there, and return a 404. The static files existed during the build stage but were silently left behind when the final image was assembled. Docker images only contain what you explicitly put in them — nothing is carried over from the build stage unless you have a `COPY --from=builder` line for it.
+
+// ### Why Both Problems Existed Together
+
+// Both of these problems stem from the same root cause: the Dockerfile was written assuming a simple "compile and copy" workflow, without accounting for the fact that the runtime environment is completely different from the build environment. The builder container has the Rust toolchain, your source code, and a specific version of glibc. The runtime container has none of those things — it's just a stripped-down Linux with your binary dropped into it. Anything the binary needs at runtime, whether that's a specific glibc version or static asset files, has to be explicitly provided. The Dockerfile is the document that specifies exactly what goes into that runtime environment, and the original version simply didn't account for those two dependencies.
+
             .nest_service(
                 "/static/css",
                 ServeDir::new(concat!(
