@@ -10,6 +10,7 @@ mod templates;
 mod types;
 pub mod validation;
 
+use tower_http::services::ServeDir;
 pub use types::{AppState, BroadcastState, RadioMessage, SharedState, SongInfo};
 
 use crate::player::handlers::{
@@ -106,6 +107,17 @@ pub fn create_player_router(state: Arc<AppState>) -> impl std::future::Future<Ou
             )
             .route("/metrics", get(metrics_handler))
             .route("/player/admin/state", get(admin_state)) // Information from the DashMaps in state
+            .nest_service(
+                "/static/css",
+                ServeDir::new(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/src/player/static/css"
+                )),
+            )
+            .nest_service(
+                "/static/js",
+                ServeDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/player/static/js")),
+            )
             .with_state(state.clone()); // Attach shared state
 
         // Nest the inner router under "/stargzr" so all routes are prefixed
@@ -190,6 +202,30 @@ pub async fn initialize(path_buf: PathBuf) {
 
     // Task for cleaning up old sessions both player and broadcast
     tokio::spawn(cleanup_stale_sessions(state.clone()));
+
+    // When you call `axum::serve(listener, router)` with a plain `TcpListener` — as in
+
+    // let addr = listener.local_addr().unwrap();
+
+    // let router = create_player_router(state.clone()).await;
+
+    // axum::serve(listener, router).await.expect("Server failed");
+
+    // Axum takes ownership of that listener and runs its own internal accept loop. Concretely, Axum spawns a Tokio task that sits in a `loop`, calls `listener.accept().await` on each iteration, and for each accepted connection it spawns *another* task to handle that specific connection. Inside that per-connection task, Axum runs the full HTTP state machine: it reads bytes off the socket, parses the HTTP request line and headers, constructs a `Request<Body>`, walks the router to find a matching handler, calls that handler, serializes the `Response`, and writes it back to the socket. All of this happens entirely inside Axum's internals. You handed it the listener at the start and you never touch the process again. The socket goes straight from the OS kernel into Axum's machinery without passing through any code you wrote.
+
+    // That's fine for basic use, but it means there's no configuration point on the socket itself. TCP has options — like `TCP_NODELAY` — that you set directly on the socket file descriptor after it's been accepted but before it's actively used. With the plain setup above, Axum accepts the socket and immediately starts using it, and you simply have no opportunity to call `set_nodelay(true)` in between. You're locked out.
+
+    // `NoDelayListener` solves this by making you the accept loop instead of Axum. Axum's `serve()` function doesn't actually require a `TcpListener` specifically — it requires anything that implements its `Listener` trait. That trait has one core method: `accept()`, which must yield a `(socket, address)` pair. When you wrap your `TcpListener` in `NoDelayListener` and implement `Listener` on that wrapper, Axum calls *your* `accept()` on every iteration of its loop instead of reaching into a raw listener directly. Your implementation then manually delegates to the inner listener's `.accept()`, which gives you that socket in your own hands — however briefly — before you return it upward to Axum. That gap, between receiving the socket from the OS and handing it back to Axum, is where `set_nodelay(true)` lives. The wrapper isn't adding complex new logic; it's inserting a seam into a process that would otherwise be completely opaque to you. Every socket that Axum ever sees has already been configured, and because this happens inside the accept method itself, it's structurally impossible to miss a connection.
+
+    // Once `NoDelayListener::accept()` returns that `(TcpStream, SocketAddr)` pair, Axum doesn't use those values raw. It bundles them together into a type called `IncomingStream<'_, NoDelayListener>`. Think of `IncomingStream` as Axum's internal envelope for a freshly accepted connection — it carries both the socket (needed for reading and writing bytes) and the peer address (needed for knowing *who* connected) as a single unit that can be passed around through Axum's middleware and service layers. The generic parameter `NoDelayListener` is significant: it tells Axum what the concrete `Io` and `Addr` types are inside the envelope, since different listener implementations could yield different socket types. The `IncomingStream` is what gets handed to the `Connected` trait, which brings us to the second problem.
+
+    // Axum has a mechanism called `ConnectInfo<T>` that allows handlers to receive per-connection metadata as an extractor argument. If a handler function declares `ConnectInfo<PeerAddr>` among its parameters, Axum will automatically inject the client's address into that handler when it's called. For this to work, Axum needs to know how to produce a `T` from an `IncomingStream` at connection time — that's expressed through the `Connected` trait. You implement `Connected<IncomingStream<'_, YourListener>>` for your chosen `T`, and inside that impl you extract whatever information you want from the stream. Without any of this — as in the simplified code above — you simply can't access the peer address inside a handler at all. `axum::serve(listener, router)` with no `into_make_service_with_connect_info` means Axum never runs any `Connected` impl and never stores any `ConnectInfo` in the request extensions. A handler trying to extract `ConnectInfo<SocketAddr>` would get nothing.
+
+    // The natural fix would be to implement `Connected<IncomingStream<'_, NoDelayListener>>` for `std::net::SocketAddr` directly — after all, that's exactly the type you want. But Rust's orphan rule prohibits this. The rule states that you can only implement a trait for a type if at least one of them is defined in your own crate. `Connected` is defined in Axum, and `SocketAddr` is defined in the standard library. Both are foreign types, so the compiler refuses the impl outright. There's no way around this with the types as they are.
+
+    // The fix is a newtype: a local struct `PeerAddr(pub std::net::SocketAddr)` that wraps `SocketAddr`. Because `PeerAddr` is defined in your crate, it satisfies the orphan rule and gives the `Connected` impl a legal home. Inside that impl, you call `target.remote_addr()` on the `IncomingStream` to pull out the `SocketAddr`, and you rewrap it in `PeerAddr` before returning. Then `router.into_make_service_with_connect_info::<PeerAddr>()` tells Axum to call that impl for every accepted connection and store the resulting `ConnectInfo<PeerAddr>` in the request's extension map. A handler that declares `ConnectInfo<PeerAddr>` as an argument gets the peer address injected automatically and can reach the inner `SocketAddr` through `peer.0`. The newtype has zero runtime cost — it compiles to exactly the same memory layout as a bare `SocketAddr` — but it gives the type system a locally-owned name to anchor the impl.
+
+    // The deeper pattern worth internalizing is that both wrappers are doing the same structural thing for completely different reasons. `NoDelayListener` exists because you need your own code to run at a specific moment in the connection lifecycle — you're inserting a behavioral seam. `PeerAddr` exists because the type system needs a locally-owned name to make an impl legal — you're inserting a compiler seam. But the mechanism is identical in both cases: take a foreign type, wrap it in a struct you own, implement the relevant trait on that wrapper, and you suddenly own a step in Axum's pipeline that was previously closed off to you entirely.
 
     // into_make_service_with_connect_info propagates the peer address into handlers.
     // PeerAddr instead of SocketAddr because of the orphan rule, see Connected impl above.
