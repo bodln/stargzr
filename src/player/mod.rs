@@ -12,7 +12,9 @@ pub mod validation;
 
 pub use types::{AppState, BroadcastState, RadioMessage, SharedState, SongInfo};
 
-use crate::player::handlers::{admin_state, check_session, metrics_handler, radio_websocket, upload_file};
+use crate::player::handlers::{
+    admin_state, check_session, metrics_handler, radio_websocket, upload_file,
+};
 use crate::player::types::PreparedMessage;
 
 use self::logging::init_logging;
@@ -23,7 +25,7 @@ use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 use uuid::Uuid;
 
 use handlers::{
@@ -116,9 +118,9 @@ pub fn create_player_router(state: Arc<AppState>) -> impl std::future::Future<Ou
 /// outgoing data packets into fewer, larger packets before transmission.
 /// Small WebSocket frames are sent immediately
 /// instead of being held in the kernel buffer waiting to be batched.
-struct NodeDelayListener(tokio::net::TcpListener);
+struct NoDelayListener(tokio::net::TcpListener);
 
-impl axum::serve::Listener for NodeDelayListener {
+impl axum::serve::Listener for NoDelayListener {
     type Io = tokio::net::TcpStream;
     type Addr = std::net::SocketAddr;
 
@@ -150,11 +152,11 @@ impl axum::serve::Listener for NodeDelayListener {
 #[derive(Clone)]
 pub struct PeerAddr(pub std::net::SocketAddr);
 
-impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, NodeDelayListener>>
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, NoDelayListener>>
     for PeerAddr
 {
-    fn connect_info(target: axum::serve::IncomingStream<'_, NodeDelayListener>) -> Self {
-        // IncomingStream wraps the (TcpStream, SocketAddr) pair that NodeDelayListener::accept returns.
+    fn connect_info(target: axum::serve::IncomingStream<'_, NoDelayListener>) -> Self {
+        // IncomingStream wraps the (TcpStream, SocketAddr) pair that NoDelayListener::accept returns.
         // remote_addr() gives us the peer's address which is then stored in ConnectInfo<PeerAddr>
         // and made available to handlers via the ConnectInfo extractor - used by the WS rate limiter.
         PeerAddr(*target.remote_addr())
@@ -189,84 +191,10 @@ pub async fn initialize(path_buf: PathBuf) {
     // Task for cleaning up old sessions both player and broadcast
     tokio::spawn(cleanup_stale_sessions(state.clone()));
 
-    async fn shutdown_signal(state: SharedState) {
-        use tokio::signal;
-
-        // SIGINT works on all platforms
-        let ctrl_c = async {
-            signal::ctrl_c()
-                .await
-                .expect("Failed to install Ctrl+C handler");
-        };
-
-        // SIGTERM Docker stop, systemctl stop, etc. (Unix only)
-        #[cfg(unix)]
-        let terminate = async {
-            signal::unix::signal(signal::unix::SignalKind::terminate())
-                .expect("Failed to install SIGTERM handler")
-                .recv()
-                .await;
-        };
-
-        // On Windows, SIGTERM doesn't exist only wait for Ctrl+C
-        #[cfg(not(unix))]
-        let terminate = std::future::pending::<()>();
-
-        tokio::select! {
-            _ = ctrl_c => { tracing::info!("Received Ctrl+C") },
-            _ = terminate => { tracing::info!("Received SIGTERM") },
-        }
-
-        tracing::info!("Notifying all active broadcasters before shutdown...");
-
-        let shutdown_msg = Arc::new(PreparedMessage::new(&RadioMessage::ServerShutdown {
-            message: "Server is restarting, reconnecting automatically...".to_string(),
-        }));
-
-        match state.global_broadcast_tx.send(shutdown_msg) {
-            Ok(count) => tracing::info!(clients = count, "Sent ServerShutdown to all clients"),
-            Err(_) => tracing::debug!("No clients connected at shutdown"),
-        }
-
-        // Collect broadcaster IDs first to avoid holding DashMap refs across awaits
-        let broadcaster_ids: Vec<String> = state
-            .broadcast_states
-            .iter()
-            .map(|e| e.key().clone())
-            .collect();
-
-        for broadcaster_id in broadcaster_ids {
-            state.broadcast_states.remove(&broadcaster_id);
-            state.broadcast_channels.remove(&broadcaster_id);
-
-            let offline_msg = Arc::new(PreparedMessage::new(&RadioMessage::BroadcasterOffline {
-                broadcaster_id: broadcaster_id.clone(),
-            }));
-
-            match state.global_broadcast_tx.send(offline_msg) {
-                Ok(count) => tracing::info!(
-                    broadcaster_id = %broadcaster_id,
-                    listeners = count,
-                    "Sent BroadcasterOffline"
-                ),
-                Err(_) => tracing::debug!(
-                    broadcaster_id = %broadcaster_id,
-                    "No listeners to notify"
-                ),
-            }
-        }
-
-        // Give the WebSocket send tasks time to flush BroadcasterOffline to clients
-        // before Axum starts dropping connections
-        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-
-        tracing::info!("Shutdown cleanup complete, draining HTTP connections...");
-    }
-
     // into_make_service_with_connect_info propagates the peer address into handlers.
     // PeerAddr instead of SocketAddr because of the orphan rule, see Connected impl above.
     axum::serve(
-        NodeDelayListener(listener),
+        NoDelayListener(listener),
         router.into_make_service_with_connect_info::<PeerAddr>(),
     )
     // Once shutdown_signal() resolves, Axum knows to start shutting down
@@ -274,6 +202,80 @@ pub async fn initialize(path_buf: PathBuf) {
     .with_graceful_shutdown(shutdown_signal(state.clone()))
     .await
     .expect("Server failed");
+}
+
+async fn shutdown_signal(state: SharedState) {
+    use tokio::signal;
+
+    // SIGINT works on all platforms
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+    };
+
+    // SIGTERM Docker stop, systemctl stop, etc. (Unix only)
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    // On Windows, SIGTERM doesn't exist only wait for Ctrl+C
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => { tracing::info!("Received Ctrl+C") },
+        _ = terminate => { tracing::info!("Received SIGTERM") },
+    }
+
+    tracing::info!("Notifying all active broadcasters before shutdown...");
+
+    let shutdown_msg = Arc::new(PreparedMessage::new(&RadioMessage::ServerShutdown {
+        message: "Server is restarting, reconnecting automatically...".to_string(),
+    }));
+
+    match state.global_broadcast_tx.send(shutdown_msg) {
+        Ok(count) => tracing::info!(clients = count, "Sent ServerShutdown to all clients"),
+        Err(_) => tracing::debug!("No clients connected at shutdown"),
+    }
+
+    // Collect broadcaster IDs first to avoid holding DashMap refs across awaits
+    let broadcaster_ids: Vec<String> = state
+        .broadcast_states
+        .iter()
+        .map(|e| e.key().clone())
+        .collect();
+
+    for broadcaster_id in broadcaster_ids {
+        state.broadcast_states.remove(&broadcaster_id);
+        state.broadcast_channels.remove(&broadcaster_id);
+
+        let offline_msg = Arc::new(PreparedMessage::new(&RadioMessage::BroadcasterOffline {
+            broadcaster_id: broadcaster_id.clone(),
+        }));
+
+        match state.global_broadcast_tx.send(offline_msg) {
+            Ok(count) => tracing::info!(
+                broadcaster_id = %broadcaster_id,
+                listeners = count,
+                "Sent BroadcasterOffline"
+            ),
+            Err(_) => tracing::debug!(
+                broadcaster_id = %broadcaster_id,
+                "No listeners to notify"
+            ),
+        }
+    }
+
+    // Give the WebSocket send tasks time to flush BroadcasterOffline to clients
+    // before Axum starts dropping connections
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+    tracing::info!("Shutdown cleanup complete, draining HTTP connections...");
 }
 
 async fn _add_ngrok_header(
