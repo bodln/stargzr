@@ -4,15 +4,38 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, Semaphore, broadcast};
 
 use super::rate_limit::RateLimiter;
 
+/// Whether a playlist entry is audio or video.
+/// Stored on MediaInfo so handlers and the frontend can make format-aware
+/// decisions without re-inspecting the filename extension on every request.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaType {
+    Audio,
+    Video,
+}
+
+/// Returns the MediaType for a given filename, or None if the extension is unsupported.
+/// Single source of truth for what the server accepts and serves.
+pub fn media_type_for(filename: &str) -> Option<MediaType> {
+    let ext = filename.rsplit('.').next()?.to_lowercase();
+    match ext.as_str() {
+        "mp3" | "m4a" | "wav" | "flac" => Some(MediaType::Audio),
+        "mp4" | "webm" | "mkv" | "mov" | "avi"  => Some(MediaType::Video),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
-pub struct SongInfo {
+pub struct MediaInfo {
     pub id: String,
     pub filename: String,
     pub size: u64,
+    /// Serialized to JSON and read by the frontend to decide which media element to use
+    pub media_type: MediaType,
 }
 
 /// Represents a single user's PRIVATE player state
@@ -26,14 +49,14 @@ pub struct PlayerSession {
 pub struct BroadcastState {
     pub broadcaster_id: String,
     pub song_index: usize,
-    // TODO: here and in filename in SongInfo could be changed to Arc<str> so we dont copy them around needlessly
-    // we use Arc<str> isntead of Arc<String> because, Arc<String> is two heap allocations, the Arc points to a String header (ptr + len + capacity), 
+    // TODO: here and in filename in MediaInfo could be changed to Arc<str> so we dont copy them around needlessly
+    // we use Arc<str> isntead of Arc<String> because, Arc<String> is two heap allocations, the Arc points to a String header (ptr + len + capacity),
     // which points to the actual bytes. You pay for two pointer dereferences and two allocations.
-    // Arc<str> is a single allocation. It's a fat pointer (data ptr + length) pointing directly at the bytes, with the Arc refcount living right before them in the same block. 
+    // Arc<str> is a single allocation. It's a fat pointer (data ptr + length) pointing directly at the bytes, with the Arc refcount living right before them in the same block.
     // No intermediate String header, no wasted capacity field.
-    // 
-    // There's also a semantic point that String implies mutable and growable. 
-    // Once a filename is in an Arc you're never mutating it, so the capacity tracking (keeping track how more can fit in it) that String carries is pure waste. 
+    //
+    // There's also a semantic point that String implies mutable and growable.
+    // Once a filename is in an Arc you're never mutating it, so the capacity tracking (keeping track how more can fit in it) that String carries is pure waste.
 
     // We add this field so we can return the song name in analytics
     pub song_name: String,
@@ -67,7 +90,7 @@ pub struct AppState {
     // Wrapped in RwLock so the upload handler can insert new songs at runtime.
     // All read paths (streaming, playlist fetch, radio) acquire a read guard.
     // The upload handler acquires the write guard only during the insert.
-    pub playlist: Arc<RwLock<Vec<SongInfo>>>,
+    pub playlist: Arc<RwLock<Vec<MediaInfo>>>,
     pub music_folder: Arc<PathBuf>,
 
     pub sessions: DashMap<String, PlayerSession>,
@@ -106,6 +129,9 @@ pub struct AppState {
     /// Tracks how many bytes each IP has uploaded this server session.
     /// Resets on server restart. No persistence needed, acts as a soft abuse limit.
     pub upload_quotas: DashMap<String, u64>,
+
+    /// Makes sure only one video file can be converted with ffmpeg to prevent clogging the CPU
+    pub conversion_semaphore: Arc<Semaphore>,
 }
 
 /// Helper type for cleaner function signatures
