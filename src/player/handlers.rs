@@ -654,18 +654,20 @@ pub async fn upload_file(
                 // Semaphore to make sure only one video can be converted to teh appropriate type at a time
                 let _permit = state.conversion_semaphore.acquire().await.unwrap();
 
-                // Re-encode video to H.264 (not just copy) so any source codec works,
-                // VP9, HEVC, AV1, etc. are not supported by browsers in MP4.
-                // -ac 2 downmixes to stereo to avoid the AAC 5.1 PCE issue that causes
-                // silent playback in Chrome/Firefox.
-                // -movflags +faststart moves the moov atom to the front so playback can
-                // begin before the full file is downloaded (essential for streaming).
+                // Re-encode video to H.264 so any source codec (VP9, HEVC, AV1) works in browsers.
+                // -crf 23 targets constant quality; -maxrate 2M/-bufsize 4M caps bitrate spikes
+                // that cause buffer underruns during streaming. -ac 2 avoids the AAC 5.1 PCE
+                // issue (silent playback in Chrome/Firefox). -movflags +faststart moves the moov
+                // atom to the front so playback starts before the full file is downloaded.
                 let output = tokio::process::Command::new("ffmpeg")
                     .args([
                         "-i",  dest.to_str().unwrap(),
                         "-map", "0:v:0",
                         "-map", "0:a:0",
                         "-c:v", "libx264",
+                        "-crf", "23",
+                        "-maxrate", "2M",
+                        "-bufsize", "4M",
                         "-c:a", "aac",
                         "-b:a", "192k",
                         "-ac",  "2",
