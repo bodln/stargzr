@@ -31,7 +31,14 @@ button {
 button:hover { background: #0056b3; }
 button:disabled { background: #6c757d; cursor: not-allowed; }
 
-audio { width: 100%; margin-top: 20px; }
+/* Audio and video share the same layout slot — only one is visible at a time */
+audio, video { width: 100%; margin-top: 20px; }
+
+video {
+  max-height: 450px;
+  background: #000;
+  border-radius: 4px;
+}
 
 .song-info { font-size: 18px; margin-bottom: 10px; }
 
@@ -128,10 +135,23 @@ audio { width: 100%; margin-top: 20px; }
 .playlist-item.dragging { opacity: 0.5; }
 .playlist-item.current-playing { background: #e7f3ff; border-color: #007bff; font-weight: 600; }
 
+/* Video items get a left accent so they're visually distinct from audio in the list */
+.playlist-item.is-video { border-left: 3px solid #6f42c1; }
+.playlist-item.is-video.current-playing { background: #f3eeff; border-color: #6f42c1; }
+
 .drag-handle { font-size: 18px; cursor: grab; color: #6c757d; touch-action: none; user-select: none; padding: 4px 2px; }
 .drag-handle:active { cursor: grabbing; }
 
 .song-number { font-weight: bold; color: #6c757d; min-width: 30px; font-size: 14px; }
+
+/* Small badge shown next to each filename indicating audio or video */
+.media-badge {
+  font-size: 10px; font-weight: bold; padding: 2px 5px; border-radius: 3px;
+  flex-shrink: 0; text-transform: uppercase; letter-spacing: 0.05em;
+}
+.media-badge.audio { background: #d4edda; color: #155724; }
+.media-badge.video { background: #e2d9f3; color: #4a1f8c; }
+
 .song-name {
   flex: 1; font-size: 14px; color: #212529; min-width: 0;
   overflow: hidden; white-space: nowrap; text-overflow: ellipsis; cursor: default;

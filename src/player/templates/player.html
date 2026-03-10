@@ -1,11 +1,11 @@
 <!doctype html>
 <html>
   <head>
-    <title>MP3 Player</title>
+    <title>stargzr</title>
     <link rel="stylesheet" href="/stargzr/static/css/player.css" />
   </head>
   <body>
-    <h1>MP3 Player</h1>
+    <h1>stargzr</h1>
 
     <!-- Live Statistics -->
     <div class="analytics-container">
@@ -126,6 +126,7 @@
       <div>Track {{ current_index + 1 }} of {{ total_songs }}</div>
     </div>
 
+    <!-- Audio element: default, shown for audio files -->
     <audio id="audio-player" controls>
       <source
         src="/stargzr/player/stream/{{ current_index }}"
@@ -134,6 +135,12 @@
       Your browser doesn't support audio playback.
     </audio>
 
+    <!-- Video element: hidden until a video file is played.
+         Both elements share the same layout slot in CSS. -->
+    <video id="video-player" controls class="hidden">
+      Your browser doesn't support video playback.
+    </video>
+
     <div class="controls">
       <button id="prev-btn">⏮️ Previous</button>
       <button id="next-btn">Next ⏭️</button>
@@ -141,9 +148,10 @@
 
     <!-- Upload -->
     <div class="upload-container">
-      <h3>⬆️ Upload MP3</h3>
+      <h3>⬆️ Upload Media</h3>
       <div class="upload-row">
-        <input type="file" id="upload-input" accept=".mp3" multiple />
+        <!-- Accept all supported audio and video formats -->
+        <input type="file" id="upload-input" accept=".mp3,.m4a,.ogg,.wav,.flac,.mp4,.webm,.mkv,.mov,.avi" multiple />
         <button id="upload-btn">Upload</button>
       </div>
       <div id="upload-status"></div>
