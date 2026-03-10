@@ -534,9 +534,13 @@ pub async fn admin_state(State(state): State<SharedState>) -> impl IntoResponse 
     })
 }
 
-/// Accepts MP3 uploads, enforces a 5 GB total folder cap and a 200 MB per-IP cap
+/// Accepts media uploads, enforces a 5 GB total folder cap and a 200 MB per-IP cap
 /// (tracked in memory, resets on server restart), then writes the file and inserts
 /// it into the live playlist in sorted order.
+///
+/// Video uploads (mkv, mov, avi, webm, mp4) are converted to H.264/AAC stereo MP4
+/// via ffmpeg before being added to the playlist. The original file is deleted after
+/// a successful conversion. Audio files are stored as-is.
 pub async fn upload_file(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -580,11 +584,12 @@ pub async fn upload_file(
             .ok_or_else(|| PlayerError::UploadFailed("Missing filename in upload".into()))?
             .to_string();
 
-        if !raw_name.to_lowercase().ends_with(".mp3") {
-            return Err(PlayerError::UploadFailed(
-                "Only MP3 files are accepted".into(),
-            ));
-        }
+        // Accept all supported audio and video formats
+        let upload_media_type = media_type_for(&raw_name).ok_or_else(|| {
+            PlayerError::UploadFailed(
+                "Unsupported file type. Accepted: mp3, m4a, ogg, wav, flac, mp4, webm, mkv, mov, avi".into(),
+            )
+        })?;
 
         let safe_name = sanitize_filename(&raw_name);
 
@@ -627,25 +632,96 @@ pub async fn upload_file(
             "File uploaded"
         );
 
-        // Increment the in-memory quota counter for this IP
+        // Quota is tracked against the upload size, not the converted size,
+        // so users can't game the quota by uploading large files.
         *state.upload_quotas.entry(ip.clone()).or_insert(0) += file_size;
 
-        // Insert the new song into the live playlist in alphabetical order.
+        // Video files are converted to browser-compatible H.264/AAC MP4.
+        // Audio files are stored as is, browsers handle mp3/ogg/flac/wav natively.
+        let (final_name, final_media_type, final_size) = match upload_media_type {
+            MediaType::Video => {
+                let stem = safe_name.rsplit_once('.').map(|(s, _)| s).unwrap_or(&safe_name);
+                let mp4_name = format!("{}.mp4", stem);
+                let mp4_dest = state.music_folder.join(&mp4_name);
+
+                tracing::info!(
+                    ip = %ip,
+                    input = %safe_name,
+                    output = %mp4_name,
+                    "Starting ffmpeg conversion"
+                );
+
+                // Semaphore to make sure only one video can be converted to teh appropriate type at a time
+                let _permit = state.conversion_semaphore.acquire().await.unwrap();
+
+                // Re-encode video to H.264 (not just copy) so any source codec works,
+                // VP9, HEVC, AV1, etc. are not supported by browsers in MP4.
+                // -ac 2 downmixes to stereo to avoid the AAC 5.1 PCE issue that causes
+                // silent playback in Chrome/Firefox.
+                // -movflags +faststart moves the moov atom to the front so playback can
+                // begin before the full file is downloaded (essential for streaming).
+                let output = tokio::process::Command::new("ffmpeg")
+                    .args([
+                        "-i",  dest.to_str().unwrap(),
+                        "-map", "0:v:0",
+                        "-map", "0:a:0",
+                        "-c:v", "libx264",
+                        "-c:a", "aac",
+                        "-b:a", "192k",
+                        "-ac",  "2",
+                        "-movflags", "+faststart",
+                        mp4_dest.to_str().unwrap(),
+                    ])
+                    .output()
+                    .await
+                    .map_err(|e| PlayerError::UploadFailed(format!("ffmpeg not found: {}", e)))?;
+
+                // Always remove the original regardless of outcome to avoid orphaned files
+                tokio::fs::remove_file(&dest).await.ok();
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    tracing::error!(stderr = %stderr, "ffmpeg conversion failed");
+                    return Err(PlayerError::UploadFailed(
+                        "Video conversion failed — is the file a valid video?".into(),
+                    ));
+                }
+
+                // Use the actual converted file size for the playlist entry
+                let converted_size = tokio::fs::metadata(&mp4_dest)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(file_size);
+
+                tracing::info!(
+                    ip = %ip,
+                    filename = %mp4_name,
+                    bytes = converted_size,
+                    "ffmpeg conversion complete"
+                );
+
+                (mp4_name, MediaType::Video, converted_size)
+            }
+            MediaType::Audio => (safe_name.clone(), MediaType::Audio, file_size),
+        };
+
+        // Insert the new entry into the live playlist in alphabetical order.
         // Write lock is held only for the insert, then released immediately.
-        let new_song = SongInfo {
+        let new_song = MediaInfo {
             id: Uuid::new_v4().to_string(),
-            filename: safe_name.clone(),
-            size: file_size,
+            filename: final_name.clone(),
+            size: final_size,
+            media_type: final_media_type,
         };
 
         {
             let mut playlist = state.playlist.write().await;
-            let pos = playlist.partition_point(|s| s.filename <= safe_name);
+            let pos = playlist.partition_point(|s| s.filename <= final_name);
             playlist.insert(pos, new_song);
             tracing::info!(
-                filename = %safe_name,
+                filename = %final_name,
                 position = pos + 1,
-                "Inserted new song into playlist"
+                "Inserted new entry into playlist"
             );
         }
     }
