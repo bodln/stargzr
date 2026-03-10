@@ -13,3 +13,11 @@ async fn main() {
     player::initialize(PathBuf::from(music_path)).await;
 }
 // DOCUMENT ENTIRE WORK FLOW WITH CODE SNIPPETS
+
+// TODO
+// Change names in here, bacause just changing stuff from mucic to media somehow broke the playlist
+
+
+// TODO
+// When broadcasting from mobile and swtich between media thats different types the listeners dont makethat change, example listening a song and then start a video - the listener still listens to the song 
+// this problem isnt there when broadcasting from pc
