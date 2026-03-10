@@ -29,6 +29,11 @@ class PlaylistManager {
     }
   }
 
+  // Returns true if the given song should use the video element
+  isVideo(song) {
+    return song?.media_type === "video";
+  }
+
   // Sets currentSongId by reading the audio element's current src.
   // Must be called after originalSongs is populated so index lookups work.
   syncCurrentFromAudio() {
@@ -116,13 +121,17 @@ class PlaylistManager {
     container.innerHTML = this.songs
       .map((song, index) => {
         const isPlaying = song.id === this.currentSongId;
+        const isVid     = this.isVideo(song);
+        // Small badge so the user can tell audio and video apart at a glance
+        const badge     = `<span class="media-badge ${isVid ? "video" : "audio"}">${isVid ? "🎬" : "🎵"}</span>`;
         return `
-          <div class="playlist-item ${isPlaying ? "current-playing" : ""}"
+          <div class="playlist-item ${isPlaying ? "current-playing" : ""} ${isVid ? "is-video" : ""}"
                draggable="true"
                data-song-id="${song.id}"
                data-index="${index}">
             <span class="drag-handle">⋮⋮</span>
             <span class="song-number">${index + 1}.</span>
+            ${badge}
             <span class="song-name"><span class="song-text">${song.filename}</span></span>
             <button class="play-next-btn"
                     onclick="window.playlistManager.playNext_queue('${song.id}')"
@@ -335,13 +344,16 @@ class PlaylistManager {
     container.innerHTML = this.songs
       .map((song, index) => {
         const isPlaying = song.id === this.currentSongId;
+        const isVid     = this.isVideo(song);
+        const badge     = `<span class="media-badge ${isVid ? "video" : "audio"}">${isVid ? "🎬" : "🎵"}</span>`;
         return `
-          <div class="playlist-item ${isPlaying ? "current-playing" : ""} ${index === activeDragIndex ? "dragging" : ""}"
+          <div class="playlist-item ${isPlaying ? "current-playing" : ""} ${isVid ? "is-video" : ""} ${index === activeDragIndex ? "dragging" : ""}"
                draggable="true"
                data-song-id="${song.id}"
                data-index="${index}">
             <span class="drag-handle">⋮⋮</span>
             <span class="song-number">${index + 1}.</span>
+            ${badge}
             <span class="song-name"><span class="song-text">${song.filename}</span></span>
             <button class="play-next-btn"
                     onclick="window.playlistManager.playNext_queue('${song.id}')"
@@ -366,12 +378,15 @@ class PlaylistManager {
       alert("Cannot change songs while in radio mode");
       return;
     }
-    const audio = document.getElementById("audio-player");
     this.currentSongId = songId;
     const song = this.songs.find((s) => s.id === songId);
 
-    audio.src = `/stargzr/player/stream/id/${songId}`;
-    audio.play();
+    // Switch to the correct media element before setting src
+    window.switchMediaElement?.(this.isVideo(song));
+
+    const active = document.getElementById(this.isVideo(song) ? "video-player" : "audio-player");
+    active.src = `/stargzr/player/stream/id/${songId}`;
+    active.play();
 
     if (song) {
       const songIndex = this.songs.findIndex((s) => s.id === songId);
@@ -380,7 +395,7 @@ class PlaylistManager {
     }
 
     this.render();
-    debugLog(`Playing: ${song ? song.filename : songId}`);
+    debugLog(`Playing: ${song ? song.filename : songId} (${this.isVideo(song) ? "video" : "audio"})`);
   }
 
   // Moves a song to the slot immediately after the currently playing song
@@ -414,9 +429,10 @@ class PlaylistManager {
   playPrev() { if (!window.player?.isInRadioMode()) { const s = this.getPrevSong(); if (s) this.playSong(s.id); } }
 
   updateCurrentFromAudioSrc() {
-    const audio      = document.getElementById("audio-player");
-    const idMatch    = audio.src.match(/\/stream\/id\/([^/?]+)/);
-    const indexMatch = audio.src.match(/\/stream\/(\d+)(?:\?|$)/);
+    // Read from whichever element is currently active
+    const el         = window._activeMedia ?? document.getElementById("audio-player");
+    const idMatch    = el.src.match(/\/stream\/id\/([^/?]+)/);
+    const indexMatch = el.src.match(/\/stream\/(\d+)(?:\?|$)/);
 
     if (idMatch) {
       this.currentSongId = idMatch[1];
