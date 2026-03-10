@@ -20,7 +20,15 @@ const btUnmuteOnPlaying = () => {
   setTimeout(() => { btMuted = false; audio.muted = false; }, 1000);
 };
 
-audio.addEventListener("seeking", () => { seekPending = true; btMute(); });
+audio.addEventListener("seeking", () => {
+  seekPending = true;
+  // audio.currentTime still holds the old position when seeking fires.
+  // Deferring with setTimeout(0) lets the browser update currentTime to the
+  // seek target first, so we can accurately skip muting when seeking to the start.
+  setTimeout(() => {
+    if (audio.currentTime > 0.5) btMute();
+  }, 0);
+});
 audio.addEventListener("seeked",  () => { seekPending = false; });
 audio.addEventListener("playing", () => btUnmuteOnPlaying());
 
