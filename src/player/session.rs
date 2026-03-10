@@ -68,7 +68,7 @@ pub fn update_broadcast_index(state: &AppState, session_id: &str, new_index: usi
     // Only acquire write lock if we know they're broadcasting
     if let Some(mut broadcast) = state.broadcast_states.get_mut(session_id) {
         // Update authoritative state
-        broadcast.song_index = new_index;
+        broadcast.media_index = new_index;
         broadcast.playback_time = 0.0;
         broadcast.server_timestamp_ms = server_ts;
     }

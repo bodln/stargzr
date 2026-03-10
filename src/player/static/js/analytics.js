@@ -30,12 +30,12 @@ function updateAnalyticsDisplay(analytics) {
         <div class="${cardClass}">
           <div class="broadcaster-info-card">
             <div class="broadcaster-id">${b.broadcaster_id}</div>
-            <div class="broadcaster-song">
+            <div class="broadcaster-media">
               <span class="play-status">${b.is_playing ? "▶️" : "⏸️"}</span>
-              <span>${b.song_name}</span>
+              <span>${b.media_name}</span>
             </div>
             <div class="broadcaster-time">
-              Track ${b.song_index + 1} • ${timeStr} •
+              Track ${b.media_index + 1} • ${timeStr} •
               <strong>${b.listener_count || 0} 👥</strong>
             </div>
           </div>

@@ -120,10 +120,10 @@
 
     <!-- Player -->
     <div id="player-controls">
-      <div class="song-info">
-        <strong>Now Playing:</strong> {{ current_song }}
+      <div class="media-info">
+        <strong>Now Playing:</strong> {{ current_media }}
       </div>
-      <div>Track {{ current_index + 1 }} of {{ total_songs }}</div>
+      <div>Track {{ current_index + 1 }} of {{ total_medias }}</div>
     </div>
 
     <!-- Audio element: default, shown for audio files -->
@@ -174,7 +174,7 @@
           <input
             type="text"
             id="playlist-search"
-            placeholder="🔍 Search songs..."
+            placeholder="🔍 Search medias..."
             autocomplete="off"
           />
           <div id="search-results" class="search-results hidden"></div>

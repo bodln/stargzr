@@ -6,18 +6,18 @@ use hyper::StatusCode;
 #[derive(Template)]
 #[template(path = "player.html")]
 pub struct PlayerTemplate {
-    pub current_song: String,
+    pub current_media: String,
     pub current_index: usize,
-    pub total_songs: usize,
+    pub total_medias: usize,
     pub session_id: String,
 }
 
 #[derive(Template)]
 #[template(path = "player_controls.html")]
 pub struct PlayerControlsTemplate {
-    pub current_song: String,
+    pub current_media: String,
     pub current_index: usize,
-    pub total_songs: usize,
+    pub total_medias: usize,
 }
 
 /// Makes returning PlayerTemplate returnable as an axum response

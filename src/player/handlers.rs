@@ -55,26 +55,26 @@ pub async fn player_page(State(state): State<SharedState>, headers: HeaderMap) -
     let current_index = get_or_create_position(&state, &session_id);
 
     // Acquire a read lock, clone what we need, then drop the guard before any await
-    let (current_song, total_songs) = {
+    let (current_media, total_medias) = {
         let playlist = state.playlist.read().await;
-        let song = playlist
+        let media = playlist
             .get(current_index)
             .map(|s| s.filename.clone())
-            .unwrap_or_else(|| "No songs found".to_string());
-        (song, playlist.len())
+            .unwrap_or_else(|| "No medias found".to_string());
+        (media, playlist.len())
     };
 
     // Render the full player page
     PlayerTemplate {
-        current_song,
+        current_media,
         current_index,
-        total_songs,
+        total_medias,
         session_id,
     }
 }
 
-/// Advances the current session to the next song in the playlist.
-pub async fn next_song(
+/// Advances the current session to the next media in the playlist.
+pub async fn next_media(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> PlayerControlsTemplate {
@@ -84,15 +84,15 @@ pub async fn next_song(
     // Get the current position for this session
     let current_index = get_or_create_position(&state, &session_id);
 
-    // Acquire a read lock, compute new index and song name, then drop the guard
-    let (new_index, current_song, total_songs) = {
+    // Acquire a read lock, compute new index and media name, then drop the guard
+    let (new_index, current_media, total_medias) = {
         let playlist = state.playlist.read().await;
         let new_index = (current_index + 1).min(playlist.len().saturating_sub(1));
-        let song = playlist
+        let media = playlist
             .get(new_index)
             .map(|s| s.filename.clone())
-            .unwrap_or_else(|| "No songs found".to_string());
-        (new_index, song, playlist.len())
+            .unwrap_or_else(|| "No medias found".to_string());
+        (new_index, media, playlist.len())
     };
 
     // Update private playback position
@@ -101,7 +101,7 @@ pub async fn next_song(
     // If this session is a broadcaster, propagate the change to listeners
     update_broadcast_index(&state, &session_id, new_index);
 
-    // Touch the session so passive listeners don't get cleaned up mid-song.
+    // Touch the session so passive listeners don't get cleaned up mid-media.
     // Range requests fire on every seek so this naturally stays fresh during playback.
     if let Some(mut session) = state.sessions.get_mut(&session_id) {
         session.last_activity = std::time::Instant::now();
@@ -109,14 +109,14 @@ pub async fn next_song(
 
     // Return updated control state (used for partial page updates)
     PlayerControlsTemplate {
-        current_song,
+        current_media,
         current_index: new_index,
-        total_songs,
+        total_medias,
     }
 }
 
-/// Moves the current session to the previous song in the playlist.
-pub async fn prev_song(
+/// Moves the current session to the previous media in the playlist.
+pub async fn prev_media(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> PlayerControlsTemplate {
@@ -126,15 +126,15 @@ pub async fn prev_song(
     // Get the current position for this session
     let current_index = get_or_create_position(&state, &session_id);
 
-    // Acquire a read lock, compute new index and song name, then drop the guard
-    let (new_index, current_song, total_songs) = {
+    // Acquire a read lock, compute new index and media name, then drop the guard
+    let (new_index, current_media, total_medias) = {
         let playlist = state.playlist.read().await;
         let new_index = current_index.saturating_sub(1);
-        let song = playlist
+        let media = playlist
             .get(new_index)
             .map(|s| s.filename.clone())
-            .unwrap_or_else(|| "No songs found".to_string());
-        (new_index, song, playlist.len())
+            .unwrap_or_else(|| "No medias found".to_string());
+        (new_index, media, playlist.len())
     };
 
     // Update private playback position
@@ -143,7 +143,7 @@ pub async fn prev_song(
     // If this session is a broadcaster, propagate the change to listeners
     update_broadcast_index(&state, &session_id, new_index);
 
-    // Touch the session so passive listeners don't get cleaned up mid-song.
+    // Touch the session so passive listeners don't get cleaned up mid-media.
     // Range requests fire on every seek so this naturally stays fresh during playback.
     if let Some(mut session) = state.sessions.get_mut(&session_id) {
         session.last_activity = std::time::Instant::now();
@@ -151,9 +151,9 @@ pub async fn prev_song(
 
     // Return updated control state (used for partial page updates)
     PlayerControlsTemplate {
-        current_song,
+        current_media,
         current_index: new_index,
-        total_songs,
+        total_medias,
     }
 }
 
@@ -177,27 +177,27 @@ pub async fn player_controls(
 ) -> PlayerControlsTemplate {
     // If a broadcaster ID is provided, attempt to mirror its playback state
     if let Some(broadcaster_id) = query.broadcaster {
-        // Extract the song index without holding the DashMap ref across an await
+        // Extract the media index without holding the DashMap ref across an await
         let maybe_index = state
             .broadcast_states
             .get(&broadcaster_id)
-            .map(|b| b.song_index);
+            .map(|b| b.media_index);
 
         if let Some(index) = maybe_index {
-            let (current_song, total_songs) = {
+            let (current_media, total_medias) = {
                 let playlist = state.playlist.read().await;
-                let song = playlist
+                let media = playlist
                     .get(index)
                     .map(|s| s.filename.clone())
-                    .unwrap_or_else(|| "No songs found".to_string());
-                (song, playlist.len())
+                    .unwrap_or_else(|| "No medias found".to_string());
+                (media, playlist.len())
             };
 
             // Return controls reflecting the broadcaster's state
             return PlayerControlsTemplate {
-                current_song,
+                current_media,
                 current_index: index,
-                total_songs,
+                total_medias,
             };
         }
     }
@@ -207,32 +207,32 @@ pub async fn player_controls(
     let session_id = get_session_id(&headers);
     let index = get_or_create_position(&state, &session_id);
 
-    let (current_song, total_songs) = {
+    let (current_media, total_medias) = {
         let playlist = state.playlist.read().await;
-        let song = playlist
+        let media = playlist
             .get(index)
             .map(|s| s.filename.clone())
-            .unwrap_or_else(|| "No songs found".to_string());
-        (song, playlist.len())
+            .unwrap_or_else(|| "No medias found".to_string());
+        (media, playlist.len())
     };
 
     PlayerControlsTemplate {
-        current_song,
+        current_media,
         current_index: index,
-        total_songs,
+        total_medias,
     }
 }
 
-/// Stream audio by song ID instead of index
+/// Stream audio by media ID instead of index
 // #[tracing::instrument] creates a span for this function and correctly re-enters it on every
 // poll across .await points using span.enter() + _guard directly in async code is wrong
 // because tokio can resume the future on a different thread, entering/exiting on mismatched threads.
 // skip(state, headers) because they don't implement Debug and would otherwise cause a compile error.
 // fields() picks exactly what gets attached to the span, everything else is excluded.
-#[tracing::instrument(skip(state, headers), fields(song_id = %song_id, session_id = tracing::field::Empty, ip = tracing::field::Empty))]
+#[tracing::instrument(skip(state, headers), fields(media_id = %media_id, session_id = tracing::field::Empty, ip = tracing::field::Empty))]
 pub async fn stream_audio_by_id(
     State(state): State<SharedState>,
-    Path(song_id): Path<String>,
+    Path(media_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
     // Record the session so streaming logs are tied to who requested it
@@ -245,23 +245,23 @@ pub async fn stream_audio_by_id(
         .unwrap_or("unknown");
     tracing::Span::current().record("ip", ip);
 
-    // Clone the song out before the guard drops so no reference crosses an await point
-    let song = {
+    // Clone the media out before the guard drops so no reference crosses an await point
+    let media = {
         let playlist = state.playlist.read().await;
         playlist
             .iter()
-            .find(|s| s.id == song_id)
+            .find(|s| s.id == media_id)
             .cloned()
             .ok_or_else(|| {
-                tracing::warn!("Song not found for id: {}", song_id);
+                tracing::warn!("Media not found for id: {}", media_id);
                 StatusCode::NOT_FOUND
             })?
     };
 
-    stream_audio_internal(&state, &song, &headers, &session_id).await
+    stream_audio_internal(&state, &media, &headers, &session_id).await
 }
 
-/// Stream audio by song index
+/// Stream audio by media index
 // Same async-safe span reasoning as stream_audio_by_id above.
 // skip(state, headers) because they don't implement Debug and we don't need them in the span.
 #[tracing::instrument(skip(state, headers), fields(index = tracing::field::Empty, session_id = tracing::field::Empty, ip = tracing::field::Empty))]
@@ -281,16 +281,16 @@ pub async fn stream_audio_by_index(
         .unwrap_or("unknown");
     tracing::Span::current().record("ip", ip);
 
-    // Clone the song out before the guard drops so no reference crosses an await point
-    let song = {
+    // Clone the media out before the guard drops so no reference crosses an await point
+    let media = {
         let playlist = state.playlist.read().await;
         playlist.get(index).cloned().ok_or_else(|| {
-            tracing::warn!("Song not found at index: {}", index);
+            tracing::warn!("Media not found at index: {}", index);
             StatusCode::NOT_FOUND
         })?
     };
 
-    stream_audio_internal(&state, &song, &headers, &session_id).await
+    stream_audio_internal(&state, &media, &headers, &session_id).await
 }
 
 /// Parses a "bytes=start-end" range header into (start, end) byte offsets.
@@ -321,28 +321,28 @@ fn parse_range_header(headers: &HeaderMap, file_size: u64) -> Option<(u64, u64)>
 /// This handler is intentionally stateless: it does not modify playback state
 /// or session position, it only serves file data.
 // Inner span automatically nested under stream_by_id or stream_by_index because instrument
-// propagates the parent span context through the call, so logs show both how the song was
+// propagates the parent span context through the call, so logs show both how the media was
 // requested and what happened serving it.
 // debug level only: every seek during playback fires a range request so this would be
 // extremely noisy at info.
-#[tracing::instrument(skip(state, headers, session_id), fields(song = %song.filename, size = song.size))]
+#[tracing::instrument(skip(state, headers, session_id), fields(media = %media.filename, size = media.size))]
 pub async fn stream_audio_internal(
     state: &SharedState,
-    song: &MediaInfo,
+    media: &MediaInfo,
     headers: &HeaderMap,
     session_id: &str,
 ) -> Result<Response, StatusCode> {
-    let file_path = state.music_folder.join(&song.filename);
-    let file_size = song.size;
+    let file_path = state.music_folder.join(&media.filename);
+    let file_size = media.size;
 
-    // Touch the session so passive listeners don't get cleaned up mid-song.
+    // Touch the session so passive listeners don't get cleaned up mid-media.
     // Range requests fire on every seek so this naturally stays fresh during playback.
     if let Some(mut session) = state.sessions.get_mut(session_id) {
         session.last_activity = std::time::Instant::now();
     }
 
     // Derived from the file extension so audio and video files both get the right MIME type
-    let content_type = content_type_for(&song.filename);
+    let content_type = content_type_for(&media.filename);
 
     if let Some((start, end)) = parse_range_header(headers, file_size) {
         let mut file = File::open(&file_path).await.map_err(|e| {
@@ -378,7 +378,7 @@ pub async fn stream_audio_internal(
             // CACHE_CONTROL header tells browsers and intermediate proxies that this content can be cached
             // for up to 31,536,000 seconds (one year).
             // Since MP3 files don't change, aggressive caching dramatically improves performance for repeated playback.
-            // (seeking to previously loaded part of the song)
+            // (seeking to previously loaded part of the media)
             .header(header::CACHE_CONTROL, "public, max-age=31536000")
             .body(body)
             .unwrap());
@@ -467,11 +467,11 @@ pub async fn radio_websocket(
     })
 }
 
-/// Returns the full playlist with song IDs for client-side management
+/// Returns the full playlist with media IDs for client-side management
 pub async fn get_playlist(State(state): State<SharedState>) -> impl IntoResponse {
     let playlist = state.playlist.read().await;
-    let songs: Vec<MediaInfo> = playlist.iter().cloned().collect();
-    axum::Json(songs)
+    let medias: Vec<MediaInfo> = playlist.iter().cloned().collect();
+    axum::Json(medias)
 }
 
 /// Returns 200 if session cookie maps to a live session, 401 otherwise.
@@ -709,7 +709,7 @@ pub async fn upload_file(
 
         // Insert the new entry into the live playlist in alphabetical order.
         // Write lock is held only for the insert, then released immediately.
-        let new_song = MediaInfo {
+        let new_media = MediaInfo {
             id: Uuid::new_v4().to_string(),
             filename: final_name.clone(),
             size: final_size,
@@ -719,7 +719,7 @@ pub async fn upload_file(
         {
             let mut playlist = state.playlist.write().await;
             let pos = playlist.partition_point(|s| s.filename <= final_name);
-            playlist.insert(pos, new_song);
+            playlist.insert(pos, new_media);
             tracing::info!(
                 filename = %final_name,
                 position = pos + 1,

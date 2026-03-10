@@ -1,5 +1,5 @@
 use stargzr::player::validation::SessionId;
-use stargzr::player::validation::validate_song_index;
+use stargzr::player::validation::validate_media_index;
 use stargzr::player::rate_limit::RateLimiter;
 use stargzr::player::reconnect::ReconnectionStrategy;
 
@@ -19,10 +19,10 @@ fn test_session_id_validation() {
 
 #[test]
 fn test_song_index_validation() {
-    assert!(validate_song_index(0, 10).is_ok());
-    assert!(validate_song_index(9, 10).is_ok());
-    assert!(validate_song_index(10, 10).is_err());
-    assert!(validate_song_index(100, 10).is_err());
+    assert!(validate_media_index(0, 10).is_ok());
+    assert!(validate_media_index(9, 10).is_ok());
+    assert!(validate_media_index(10, 10).is_err());
+    assert!(validate_media_index(100, 10).is_err());
 }
 
 #[tokio::test]

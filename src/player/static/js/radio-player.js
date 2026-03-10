@@ -12,14 +12,14 @@ class RadioPlayer {
     this.wakeLock           = null;
     this.pageHiddenAt       = null;
 
-    // Queued next song received from AutoNext while listener's current track
+    // Queued next media received from AutoNext while listener's current track
     // is still playing. Cleared once the local 'ended' event fires.
     this.pendingAutoNextIndex = null;
     this.pendingAutoNextTime  = 0;
 
-    // Guards against duplicate canplay handlers when the same song-change
+    // Guards against duplicate canplay handlers when the same media-change
     // produces more than one Sync before the browser fires canplay.
-    this._loadingSongIndex  = null;
+    this._loadingMediaIndex  = null;
     this._pendingSeekTime   = 0;
     this._pendingIsPlaying  = false;
 
@@ -272,11 +272,11 @@ class RadioPlayer {
           const initMsg = {
             type: "StartBroadcasting",
             broadcaster_id: this.sessionId,
-            song_index:    this.getCurrentSongIndex(),
+            media_index:    this.getCurrentMediaIndex(),
             playback_time: this.audio.currentTime,
             is_playing:    !this.audio.paused,
           };
-          debugLog(`Resuming broadcast: song ${initMsg.song_index}, time ${initMsg.playback_time.toFixed(2)}s`);
+          debugLog(`Resuming broadcast: media ${initMsg.media_index}, time ${initMsg.playback_time.toFixed(2)}s`);
           if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(initMsg));
         }
       }
@@ -309,8 +309,8 @@ class RadioPlayer {
 
     if (msg.type === "AutoNext") {
       if (this.mode !== "radio") return;
-      debugLog(`AutoNext received: queuing song index ${msg.next_song_index} for after current track ends`);
-      this.pendingAutoNextIndex = msg.next_song_index;
+      debugLog(`AutoNext received: queuing media index ${msg.next_media_index} for after current track ends`);
+      this.pendingAutoNextIndex = msg.next_media_index;
       this.pendingAutoNextTime  = 0;
 
       this.audio.addEventListener("ended", () => {
@@ -320,13 +320,13 @@ class RadioPlayer {
         this.pendingAutoNextIndex = null;
         this.pendingAutoNextTime  = 0;
 
-        const songId = window.playlistManager?.getSongIdByServerIndex(idx) ?? null;
+        const mediaId = window.playlistManager?.getMediaIdByServerIndex(idx) ?? null;
 
-        // Switch to the correct element before loading the next song
-        const nextSong = songId ? window.playlistManager?.getSongById(songId) : window.playlistManager?.originalSongs[idx];
-        window.switchMediaElement?.(nextSong?.media_type === "video");
+        // Switch to the correct element before loading the next media
+        const nextMedia = mediaId ? window.playlistManager?.getMediaById(mediaId) : window.playlistManager?.originalMedias[idx];
+        window.switchMediaElement?.(nextMedia?.media_type === "video");
 
-        this.audio.src = songId ? `/stargzr/player/stream/id/${songId}` : `/stargzr/player/stream/${idx}`;
+        this.audio.src = mediaId ? `/stargzr/player/stream/id/${mediaId}` : `/stargzr/player/stream/${idx}`;
         this.audio.load();
 
         this.audio.addEventListener("canplay", () => {
@@ -334,7 +334,7 @@ class RadioPlayer {
           this.audio.play();
         }, { once: true });
 
-        debugLog(`AutoNext: switched to song index ${idx} at ${seekTo.toFixed(2)}s after local track ended`);
+        debugLog(`AutoNext: switched to media index ${idx} at ${seekTo.toFixed(2)}s after local track ended`);
       }, { once: true });
       return;
     }
@@ -356,7 +356,7 @@ class RadioPlayer {
   }
 
   syncToBroadcaster(msg) {
-    let { song_index, playback_time, is_playing } = msg;
+    let { media_index, playback_time, is_playing } = msg;
 
     // First Sync after TuneIn: compensate for server-to-listener transit time
     if (this._tuneInSentAt !== null) {
@@ -368,40 +368,40 @@ class RadioPlayer {
       debugLog(`TuneIn latency compensation: +${elapsed.toFixed(3)}s to ${playback_time.toFixed(2)}s`);
     }
 
-    // Broadcaster is still on the pending AutoNext song: update position only
-    if (this.pendingAutoNextIndex !== null && msg.song_index === this.pendingAutoNextIndex) {
+    // Broadcaster is still on the pending AutoNext media: update position only
+    if (this.pendingAutoNextIndex !== null && msg.media_index === this.pendingAutoNextIndex) {
       this.pendingAutoNextTime = playback_time;
       debugLog(`AutoNext position updated to ${playback_time.toFixed(2)}s`);
       return;
     }
 
     // Any manual broadcaster action clears the pending AutoNext
-    if (this.pendingAutoNextIndex !== null && msg.song_index !== this.pendingAutoNextIndex) {
+    if (this.pendingAutoNextIndex !== null && msg.media_index !== this.pendingAutoNextIndex) {
       debugLog(`Manual broadcaster action cleared pendingAutoNextIndex (was ${this.pendingAutoNextIndex})`);
       this.pendingAutoNextIndex = null;
     }
 
-    const currentIndex = this.getCurrentSongIndex();
+    const currentIndex = this.getCurrentMediaIndex();
 
-    if (currentIndex !== song_index || this._loadingSongIndex === song_index) {
+    if (currentIndex !== media_index || this._loadingMediaIndex === media_index) {
       this._pendingSeekTime  = playback_time;
       this._pendingIsPlaying = is_playing;
 
-      if (this._loadingSongIndex !== song_index) {
-        debugLog(`Switching from song ${currentIndex} to song ${song_index}`);
-        this._loadingSongIndex = song_index;
+      if (this._loadingMediaIndex !== media_index) {
+        debugLog(`Switching from media ${currentIndex} to media ${media_index}`);
+        this._loadingMediaIndex = media_index;
 
-        const songId   = window.playlistManager?.getSongIdByServerIndex(song_index) ?? null;
-        const nextSong = songId ? window.playlistManager?.getSongById(songId) : window.playlistManager?.originalSongs[song_index];
+        const mediaId   = window.playlistManager?.getMediaIdByServerIndex(media_index) ?? null;
+        const nextMedia = mediaId ? window.playlistManager?.getMediaById(mediaId) : window.playlistManager?.originalMedias[media_index];
 
         // Switch media element before loading so the browser targets the right one
-        window.switchMediaElement?.(nextSong?.media_type === "video");
+        window.switchMediaElement?.(nextMedia?.media_type === "video");
 
-        this.audio.src = songId ? `/stargzr/player/stream/id/${songId}` : `/stargzr/player/stream/${song_index}`;
+        this.audio.src = mediaId ? `/stargzr/player/stream/id/${mediaId}` : `/stargzr/player/stream/${media_index}`;
         this.audio.load();
 
         this.audio.addEventListener("canplay", () => {
-          this._loadingSongIndex = null;
+          this._loadingMediaIndex = null;
           const seekTo = this._pendingSeekTime < 1.0 ? 0 : this._pendingSeekTime;
           debugLog(`canplay, seeking to ${seekTo.toFixed(2)}s (broadcaster at ${this._pendingSeekTime.toFixed(2)}s)`);
           this.audio.currentTime = seekTo;
@@ -409,7 +409,7 @@ class RadioPlayer {
         }, { once: true });
       }
     } else {
-      this._loadingSongIndex = null;
+      this._loadingMediaIndex = null;
       this.audio.currentTime = playback_time;
       if (is_playing)  this.audio.play();
       if (!is_playing && !this.audio.paused) this.audio.pause();
@@ -431,15 +431,15 @@ class RadioPlayer {
 
     // Snapshot private playback state before entering radio mode for the first time
     if (this.mode !== "radio") {
-      const snapSongId = window.playlistManager?.currentSongId ?? null;
-      const snapSong   = snapSongId ? window.playlistManager?.getSongById(snapSongId) : null;
+      const snapMediaId = window.playlistManager?.currentMediaId ?? null;
+      const snapMedia   = snapMediaId ? window.playlistManager?.getMediaById(snapMediaId) : null;
       this.preRadioSnapshot = {
         src:         this.audio.src || this.audio.querySelector?.("source")?.getAttribute("src") || null,
         currentTime: this.audio.currentTime,
         paused:      this.audio.paused,
-        songId:      snapSongId,
-        // Remember whether the pre-radio song was video so tuneOut can restore the right element
-        isVideo:     snapSong?.media_type === "video",
+        mediaId:      snapMediaId,
+        // Remember whether the pre-radio media was video so tuneOut can restore the right element
+        isVideo:     snapMedia?.media_type === "video",
       };
       debugLog(`Saved pre-radio state: ${this.preRadioSnapshot.src} @ ${this.preRadioSnapshot.currentTime.toFixed(2)}s`);
     }
@@ -485,7 +485,7 @@ class RadioPlayer {
 
       if (snap.src) {
         debugLog(`Restoring pre-radio state: ${snap.src} @ ${snap.currentTime.toFixed(2)}s`);
-        // Restore the correct element type for the pre-radio song
+        // Restore the correct element type for the pre-radio media
         window.switchMediaElement?.(snap.isVideo);
         this.audio.src = snap.src;
         this.audio.load();
@@ -494,7 +494,7 @@ class RadioPlayer {
           if (!snap.paused) this.audio.play();
         }, { once: true });
       }
-      if (window.playlistManager && snap.songId) window.playlistManager.currentSongId = snap.songId;
+      if (window.playlistManager && snap.mediaId) window.playlistManager.currentMediaId = snap.mediaId;
     }
 
     window.playlistManager?.render();
@@ -508,14 +508,14 @@ class RadioPlayer {
   sendHeartbeat() {
     if (!this.isBroadcasting || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     const msg = { type: "Heartbeat", broadcaster_id: this.sessionId, playback_time: this.audio.currentTime, client_timestamp_ms: Date.now() };
-    debugLog(`Heartbeat: song ${this.getCurrentSongIndex()}, time ${msg.playback_time.toFixed(2)}s`);
+    debugLog(`Heartbeat: media ${this.getCurrentMediaIndex()}, time ${msg.playback_time.toFixed(2)}s`);
     this.ws.send(JSON.stringify(msg));
   }
 
-  sendAutoNext(nextSongIndex) {
+  sendAutoNext(nextMediaIndex) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    debugLog(`Sending AutoNext: next song index ${nextSongIndex}`);
-    this.ws.send(JSON.stringify({ type: "AutoNext", broadcaster_id: this.sessionId, next_song_index: nextSongIndex, server_timestamp_ms: 0 }));
+    debugLog(`Sending AutoNext: next media index ${nextMediaIndex}`);
+    this.ws.send(JSON.stringify({ type: "AutoNext", broadcaster_id: this.sessionId, next_media_index: nextMediaIndex, server_timestamp_ms: 0 }));
   }
 
   startBroadcasting() {
@@ -546,10 +546,10 @@ class RadioPlayer {
         if (!this.isBroadcasting || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
         const msg = {
           type: "BroadcastUpdate", broadcaster_id: this.sessionId,
-          song_index: this.getCurrentSongIndex(), playback_time: this.audio.currentTime,
+          media_index: this.getCurrentMediaIndex(), playback_time: this.audio.currentTime,
           is_playing: !this.audio.paused, client_timestamp_ms: Date.now(),
         };
-        debugLog(`Broadcasting: song ${msg.song_index}, time ${msg.playback_time.toFixed(2)}s`);
+        debugLog(`Broadcasting: media ${msg.media_index}, time ${msg.playback_time.toFixed(2)}s`);
         this.ws.send(JSON.stringify(msg));
       }, 150);
     };
@@ -567,8 +567,8 @@ class RadioPlayer {
 
     this.heartbeatInterval = setInterval(() => this.sendHeartbeat(), 2000);
 
-    const initMsg = { type: "StartBroadcasting", broadcaster_id: this.sessionId, song_index: this.getCurrentSongIndex(), playback_time: this.audio.currentTime, is_playing: !this.audio.paused };
-    debugLog(`Starting broadcast: song ${initMsg.song_index}, time ${initMsg.playback_time.toFixed(2)}s`);
+    const initMsg = { type: "StartBroadcasting", broadcaster_id: this.sessionId, media_index: this.getCurrentMediaIndex(), playback_time: this.audio.currentTime, is_playing: !this.audio.paused };
+    debugLog(`Starting broadcast: media ${initMsg.media_index}, time ${initMsg.playback_time.toFixed(2)}s`);
     this.ws.send(JSON.stringify(initMsg));
 
     this.updateBroadcastingUI(true);
@@ -598,8 +598,8 @@ class RadioPlayer {
     document.getElementById("stop-broadcast-btn").classList.toggle("hidden",  !isBroadcasting);
   }
 
-  // Returns the server's numeric index for the currently playing song
-  getCurrentSongIndex() {
+  // Returns the server's numeric index for the currently playing media
+  getCurrentMediaIndex() {
     const idMatch = this.audio.src.match(/\/stream\/id\/([^/?]+)/);
     if (idMatch && window.playlistManager) return window.playlistManager.getServerIndexById(idMatch[1]);
     const indexMatch = this.audio.src.match(/\/stream\/(\d+)(?:\?|$)/);

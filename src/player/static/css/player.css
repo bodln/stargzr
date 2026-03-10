@@ -40,7 +40,7 @@ video {
   border-radius: 4px;
 }
 
-.song-info { font-size: 18px; margin-bottom: 10px; }
+.media-info { font-size: 18px; margin-bottom: 10px; }
 
 /* Mode */
 .mode-container { background: #e9ecef; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
@@ -97,7 +97,7 @@ video {
 .broadcaster-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
 .broadcaster-info-card { flex: 1; }
 .broadcaster-id { font-size: 12px; color: #6c757d; font-family: monospace; margin-bottom: 5px; }
-.broadcaster-song { font-size: 14px; font-weight: 600; color: #212529; margin-bottom: 5px; display: flex; align-items: center; gap: 8px; }
+.broadcaster-media { font-size: 14px; font-weight: 600; color: #212529; margin-bottom: 5px; display: flex; align-items: center; gap: 8px; }
 .play-status { font-size: 16px; }
 .broadcaster-time { font-size: 12px; color: #6c757d; }
 
@@ -142,7 +142,7 @@ video {
 .drag-handle { font-size: 18px; cursor: grab; color: #6c757d; touch-action: none; user-select: none; padding: 4px 2px; }
 .drag-handle:active { cursor: grabbing; }
 
-.song-number { font-weight: bold; color: #6c757d; min-width: 30px; font-size: 14px; }
+.media-number { font-weight: bold; color: #6c757d; min-width: 30px; font-size: 14px; }
 
 /* Small badge shown next to each filename indicating audio or video */
 .media-badge {
@@ -152,20 +152,20 @@ video {
 .media-badge.audio { background: #d4edda; color: #155724; }
 .media-badge.video { background: #e2d9f3; color: #4a1f8c; }
 
-.song-name {
+.media-name {
   flex: 1; font-size: 14px; color: #212529; min-width: 0;
   overflow: hidden; white-space: nowrap; text-overflow: ellipsis; cursor: default;
 }
-.song-name .song-text { display: inline-block; }
+.media-name .media-text { display: inline-block; }
 
-@keyframes song-marquee {
+@keyframes media-marquee {
   0%,  15% { transform: translateX(0); }
   85%, 100% { transform: translateX(var(--scroll-dist, 0px)); }
 }
 
-.play-song-btn { padding: 6px 12px; font-size: 12px; background: #28a745; border: none; color: white; border-radius: 4px; cursor: pointer; }
-.play-song-btn:hover { background: #218838; }
-.play-song-btn:disabled { background: #6c757d; cursor: not-allowed; }
+.play-media-btn { padding: 6px 12px; font-size: 12px; background: #28a745; border: none; color: white; border-radius: 4px; cursor: pointer; }
+.play-media-btn:hover { background: #218838; }
+.play-media-btn:disabled { background: #6c757d; cursor: not-allowed; }
 
 .play-next-btn { padding: 6px 10px; font-size: 12px; background: #fd7e14; border: none; color: white; border-radius: 4px; cursor: pointer; white-space: nowrap; flex-shrink: 0; }
 .play-next-btn:hover { background: #e8590c; }

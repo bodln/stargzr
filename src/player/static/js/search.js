@@ -5,24 +5,24 @@ searchInput.addEventListener("input", () => {
   const query = searchInput.value.trim().toLowerCase();
   if (!query) { searchResultsEl.classList.add("hidden"); return; }
 
-  const matches = window.playlistManager.songs.filter((s) =>
+  const matches = window.playlistManager.medias.filter((s) =>
     s.filename.toLowerCase().includes(query)
   );
   if (matches.length === 0) { searchResultsEl.classList.add("hidden"); return; }
 
   searchResultsEl.innerHTML = matches
-    .map((s) => `<div class="search-result-item" data-song-id="${s.id}">${s.filename}</div>`)
+    .map((s) => `<div class="search-result-item" data-media-id="${s.id}">${s.filename}</div>`)
     .join("");
   searchResultsEl.classList.remove("hidden");
 
   searchResultsEl.querySelectorAll(".search-result-item").forEach((item) => {
     item.addEventListener("click", () => {
-      const songId = item.dataset.songId;
+      const mediaId = item.dataset.mediaId;
       searchResultsEl.classList.add("hidden");
       searchInput.value = "";
 
       const container = document.getElementById("playlist-display");
-      const el        = container.querySelector(`[data-song-id="${songId}"]`);
+      const el        = container.querySelector(`[data-media-id="${mediaId}"]`);
       if (!el) return;
 
       const cRect           = container.getBoundingClientRect();

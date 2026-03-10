@@ -48,7 +48,7 @@ pub struct PlayerSession {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BroadcastState {
     pub broadcaster_id: String,
-    pub song_index: usize,
+    pub media_index: usize,
     // TODO: here and in filename in MediaInfo could be changed to Arc<str> so we dont copy them around needlessly
     // we use Arc<str> isntead of Arc<String> because, Arc<String> is two heap allocations, the Arc points to a String header (ptr + len + capacity),
     // which points to the actual bytes. You pay for two pointer dereferences and two allocations.
@@ -58,8 +58,8 @@ pub struct BroadcastState {
     // There's also a semantic point that String implies mutable and growable.
     // Once a filename is in an Arc you're never mutating it, so the capacity tracking (keeping track how more can fit in it) that String carries is pure waste.
 
-    // We add this field so we can return the song name in analytics
-    pub song_name: String,
+    // We add this field so we can return the media name in analytics
+    pub media_name: String,
     pub playback_time: f64, // Current position in seconds (raw, as reported by broadcaster)
     pub is_playing: bool,
     pub server_timestamp_ms: u128, // When this state was recorded
@@ -87,7 +87,7 @@ impl PreparedMessage {
 // so concurrent operations on different keys never block each other, unlike a single
 // RwLock<HashMap> where every heartbeat, TuneIn, and BroadcastUpdate serialises globally.
 pub struct AppState {
-    // Wrapped in RwLock so the upload handler can insert new songs at runtime.
+    // Wrapped in RwLock so the upload handler can insert new medias at runtime.
     // All read paths (streaming, playlist fetch, radio) acquire a read guard.
     // The upload handler acquires the write guard only during the insert.
     pub playlist: Arc<RwLock<Vec<MediaInfo>>>,
@@ -144,7 +144,7 @@ pub enum RadioMessage {
     /// Broadcaster distributes this when play/pause/seek/next/prev happens
     Sync {
         broadcaster_id: String,
-        song_index: usize,
+        media_index: usize,
         playback_time: f64,
         is_playing: bool,
         server_timestamp_ms: u128,
@@ -172,7 +172,7 @@ pub enum RadioMessage {
     /// to estimate broadcaster to server latency for playback-time compensation.
     BroadcastUpdate {
         broadcaster_id: String,
-        song_index: usize,
+        media_index: usize,
         playback_time: f64,
         is_playing: bool,
         client_timestamp_ms: u64,
@@ -186,7 +186,7 @@ pub enum RadioMessage {
     /// Prevents BroadcasterNotFound errors when listeners try to tune in early
     StartBroadcasting {
         broadcaster_id: String,
-        song_index: usize,
+        media_index: usize,
         playback_time: f64,
         is_playing: bool,
     },
@@ -225,12 +225,12 @@ pub enum RadioMessage {
         current_state: Option<BroadcastState>,
     },
 
-    /// Broadcaster's song ended naturally; listeners should finish their
-    /// current playback then start the next song from the beginning.
+    /// Broadcaster's media ended naturally; listeners should finish their
+    /// current playback then start the next media from the beginning.
     /// Suppresses the normal Sync jump so listeners don't lose their last few seconds.
     AutoNext {
         broadcaster_id: String,
-        next_song_index: usize,
+        next_media_index: usize,
         server_timestamp_ms: u64,
     },
 

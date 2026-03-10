@@ -35,7 +35,7 @@ const originalPlayAudio = audioEl.play.bind(audioEl);
 const originalPlayVideo = videoEl.play.bind(videoEl);
 let seekPending = false;
 
-// Bluetooth mode: mute during seeks/song-changes to prevent DSP glitches.
+// Bluetooth mode: mute during seeks/media-changes to prevent DSP glitches.
 // Persisted in localStorage so it survives page reload.
 const btToggle = document.getElementById("bt-mode-toggle");
 btToggle.checked = localStorage.getItem("bt_mode") === "true";
@@ -104,10 +104,10 @@ function wireMediaEvents(el) {
     }
 
     if (window.player?.isBroadcasting) {
-      const nextSong = window.playlistManager?.getNextSong();
-      if (nextSong)
+      const nextMedia = window.playlistManager?.getNextMedia();
+      if (nextMedia)
         window.player.sendAutoNext(
-          window.playlistManager.getServerIndexById(nextSong.id),
+          window.playlistManager.getServerIndexById(nextMedia.id),
         );
     }
 

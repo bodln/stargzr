@@ -31,7 +31,7 @@ use tokio::sync::{RwLock, Semaphore, broadcast};
 use uuid::Uuid;
 
 use handlers::{
-    get_playlist, next_song, player_controls, player_page, prev_song, stream_audio_by_id,
+    get_playlist, next_media, player_controls, player_page, prev_media, stream_audio_by_id,
     stream_audio_by_index,
 };
 use rate_limit::RateLimiter;
@@ -94,10 +94,10 @@ pub fn create_player_router(state: Arc<AppState>) -> impl std::future::Future<Ou
         let inner = Router::new()
             .route("/", get(player_page)) // Root page
             .route("/player", get(player_page)) // Player main page
-            .route("/player/next", post(next_song)) // Next song action
-            .route("/player/prev", post(prev_song)) // Previous song action
+            .route("/player/next", post(next_media)) // Next media action
+            .route("/player/prev", post(prev_media)) // Previous media action
             .route("/player/stream/{index}", get(stream_audio_by_index)) // Audio streaming route
-            .route("/player/stream/id/{song_id}", get(stream_audio_by_id))
+            .route("/player/stream/id/{media_id}", get(stream_audio_by_id))
             .route("/player/radio", get(radio_websocket)) // Radio WebSocket
             .route("/player/controls", get(player_controls)) // Return current controls/status
             .route("/player/playlist", get(get_playlist))

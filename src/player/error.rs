@@ -7,8 +7,8 @@ pub enum PlayerError {
     #[error("Invalid session ID format: {0}")]
     InvalidSessionId(String),
 
-    #[error("Song index {0} out of bounds (playlist size: {1})")]
-    InvalidSongIndex(usize, usize),
+    #[error("Media index {0} out of bounds (playlist size: {1})")]
+    InvalidMediaIndex(usize, usize),
 
     #[error("Broadcaster {0} not found")]
     BroadcasterNotFound(String),
@@ -46,7 +46,7 @@ impl IntoResponse for PlayerError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
             PlayerError::InvalidSessionId(_) => (StatusCode::BAD_REQUEST, self.to_string()),
-            PlayerError::InvalidSongIndex(_, _) => (StatusCode::NOT_FOUND, self.to_string()),
+            PlayerError::InvalidMediaIndex(_, _) => (StatusCode::NOT_FOUND, self.to_string()),
             PlayerError::BroadcasterNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
             PlayerError::FileNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
             PlayerError::RateLimitExceeded(_) => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),

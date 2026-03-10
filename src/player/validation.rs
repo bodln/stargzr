@@ -30,9 +30,9 @@ impl std::fmt::Display for SessionId {
     }
 }
 
-pub fn validate_song_index(index: usize, playlist_size: usize) -> PlayerResult<usize> {
+pub fn validate_media_index(index: usize, playlist_size: usize) -> PlayerResult<usize> {
     if index >= playlist_size {
-        return Err(PlayerError::InvalidSongIndex(index, playlist_size));
+        return Err(PlayerError::InvalidMediaIndex(index, playlist_size));
     }
     Ok(index)
 }
