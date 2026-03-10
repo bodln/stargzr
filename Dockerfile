@@ -3,6 +3,8 @@
 # and added static file copy so CSS/JS are available at the path baked in by CARGO_MANIFEST_DIR
 FROM rust:latest AS builder
 RUN rustup target add x86_64-unknown-linux-musl
+# musl-tools provides x86_64-linux-musl-gcc, needed to compile C dependencies (like aws-lc-sys) against musl
+RUN apt-get update && apt-get install -y musl-tools && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 # Copy manifests
 COPY Cargo.toml Cargo.lock ./
