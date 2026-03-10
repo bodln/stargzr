@@ -11,7 +11,8 @@ mod types;
 pub mod validation;
 
 use tower_http::services::ServeDir;
-pub use types::{AppState, BroadcastState, RadioMessage, SharedState, SongInfo};
+pub use types::{AppState, BroadcastState, MediaType, RadioMessage, SharedState, MediaInfo};
+pub use types::media_type_for;
 
 use crate::player::handlers::{
     admin_state, check_session, metrics_handler, radio_websocket, upload_file,
@@ -26,7 +27,7 @@ use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{RwLock, Semaphore, broadcast};
 use uuid::Uuid;
 
 use handlers::{
@@ -45,13 +46,14 @@ async fn init_player_state(music_folder: PathBuf) -> SharedState {
     if let Ok(mut entries) = tokio::fs::read_dir(&music_folder).await {
         while let Ok(Some(entry)) = entries.next_entry().await {
             if let Some(filename) = entry.file_name().to_str() {
-                // Only include MP3 files
-                if filename.ends_with(".mp3") {
+                // Accept all supported audio and video formats
+                if let Some(media_type) = media_type_for(filename) {
                     if let Ok(metadata) = entry.metadata().await {
-                        playlist.push(SongInfo {
+                        playlist.push(MediaInfo {
                             id: Uuid::new_v4().to_string(),
                             filename: filename.to_string(),
                             size: metadata.len(),
+                            media_type,
                         });
                     }
                 }
@@ -80,6 +82,7 @@ async fn init_player_state(music_folder: PathBuf) -> SharedState {
         last_analytics_ms: AtomicU64::new(0),
         ws_rate_limiter: RateLimiter::for_websocket(),
         upload_quotas: DashMap::new(),
+        conversion_semaphore: Arc::new(Semaphore::new(1)),
     })
 }
 
