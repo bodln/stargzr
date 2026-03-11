@@ -374,7 +374,15 @@ async fn handle_client_message(
             let playlist_len = state.playlist.read().await.len();
             validate_media_index(media_index, playlist_len)?;
 
-            tracing::debug!(media_index, playback_time, is_playing, "Broadcast update");
+            let media_name = {
+                let playlist = state.playlist.read().await;
+                playlist
+                    .get(media_index)
+                    .map(|media| media.filename.clone())
+                    .unwrap_or_else(|| format!("Unknown media #{}", media_index))
+            };
+
+            tracing::debug!(media_name, media_index, playback_time, is_playing, "Broadcast update");
 
             // If the session isn't broadcasting don't update
             if !state.broadcast_states.contains_key(&broadcaster_id) {

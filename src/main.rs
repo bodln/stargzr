@@ -19,5 +19,18 @@ async fn main() {
 
 
 // TODO
-// When broadcasting from mobile and swtich between media thats different types the listeners dont makethat change, example listening a song and then start a video - the listener still listens to the song 
-// this problem isnt there when broadcasting from pc
+// also when first opening the site it shows both players even tho the first thing we see is an audio
+// it show both the audio and video player 
+
+
+// TODO
+// also on both pc and mobile if im on audio its fine i click next to a video, ok, click next to an audio, it plays, but there is no player controls or anything (this is on private mode)
+// this happens only if i was tuned in tho and then went to private 
+// then there is no longer a player for audio tho sound i played
+
+
+// TODO
+// say we start off (the first thing we play) with playing a video element on index 3 and indexes 4 and 5 are audio, if i click next it does play those but it doesnt send the broadcast update that it started plaing those
+// this only happens while the media type dffers from the first one played, if index 6 is a video it sends the update
+// to reiterate, if i start a video media -> click start broadcasting -> works and people can tune into the video -> broadcaster plays an audio -> aduio plays for broadcaster -> but no braodcast update is sent -> if now broadcaster plays a video -> it starts a video for broadcaster -> but now successfully sends broadcast update for the cchange -> clients too now see that new video change
+// this works the same way but in reverse if we start from streaming audio
