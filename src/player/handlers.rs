@@ -405,6 +405,48 @@ pub async fn stream_audio_internal(
         .unwrap())
 }
 
+/// Serves the WebVTT subtitle file for a given media ID.
+/// Returns 404 if the media doesn't exist or has no associated .vtt file.
+/// Not every file has subtitles, the frontend should handle 404 gracefully
+/// by simply not showing a subtitle track.
+pub async fn get_subtitles(
+    State(state): State<SharedState>,
+    Path(media_id): Path<String>,
+) -> Result<Response, StatusCode> {
+    // Resolve the media filename from the playlist, then derive the .vtt path from it
+    let vtt_filename = {
+        let playlist = state.playlist.read().await;
+        playlist
+            .iter()
+            .find(|s| s.id == media_id)
+            .map(|s| {
+                s.filename
+                    .rsplit_once('.')
+                    .map(|(stem, _)| format!("{}.vtt", stem))
+                    .unwrap_or_default()
+            })
+            .ok_or(StatusCode::NOT_FOUND)?
+    };
+
+    let path = state.music_folder.join(&vtt_filename);
+
+    if !path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let data = tokio::fs::read(&path)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/vtt")
+        // Subtitles are small and don't change, cache aggressively like the media files
+        .header(header::CACHE_CONTROL, "public, max-age=31536000")
+        .body(axum::body::Body::from(data))
+        .unwrap())
+}
+
 /// WebSocket entrypoint for the radio synchronization system.
 /// No state is modified here; it exists purely as a thin Axum integration
 /// layer for the radio protocol.
@@ -643,6 +685,7 @@ pub async fn upload_file(
                 let stem = safe_name.rsplit_once('.').map(|(s, _)| s).unwrap_or(&safe_name);
                 let mp4_name = format!("{}.mp4", stem);
                 let mp4_dest = state.music_folder.join(&mp4_name);
+                let vtt_dest = state.music_folder.join(format!("{}.vtt", stem));
 
                 tracing::info!(
                     ip = %ip,
@@ -659,6 +702,10 @@ pub async fn upload_file(
                 // that cause buffer underruns during streaming. -ac 2 avoids the AAC 5.1 PCE
                 // issue (silent playback in Chrome/Firefox). -movflags +faststart moves the moov
                 // atom to the front so playback starts before the full file is downloaded.
+                // Subtitles are extracted as a separate .vtt file in a second output, MP4 cannot
+                // embed WebVTT, so they must live alongside the video and are served via a
+                // dedicated /player/subtitles/{id} endpoint. The subtitle extraction uses .ok()
+                // so a missing subtitle stream does not fail the whole upload.
                 let output = tokio::process::Command::new("ffmpeg")
                     .args([
                         "-i",  dest.to_str().unwrap(),
@@ -673,6 +720,9 @@ pub async fn upload_file(
                         "-ac",  "2",
                         "-movflags", "+faststart",
                         mp4_dest.to_str().unwrap(),
+                        "-map", "0:s:0",
+                        "-c:s", "webvtt",
+                        vtt_dest.to_str().unwrap(),
                     ])
                     .output()
                     .await

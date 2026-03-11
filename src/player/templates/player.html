@@ -137,8 +137,15 @@
 
     <!-- Video element: hidden until a video file is played.
          Both elements share the same layout slot in CSS. -->
-    <video id="video-player" controls class="hidden">
-      Your browser doesn't support video playback.
+    <video id="video-player" controls>
+      <track
+        id="subtitle-track"
+        kind="subtitles"
+        label="English"
+        srclang="en"
+        default
+      />
+      Your browser doesn't suppor video.
     </video>
 
     <div class="controls">
@@ -151,7 +158,12 @@
       <h3>⬆️ Upload Media</h3>
       <div class="upload-row">
         <!-- Accept all supported audio and video formats -->
-        <input type="file" id="upload-input" accept=".mp3,.m4a,.ogg,.wav,.flac,.mp4,.webm,.mkv,.mov,.avi" multiple />
+        <input
+          type="file"
+          id="upload-input"
+          accept=".mp3,.m4a,.ogg,.wav,.flac,.mp4,.webm,.mkv,.mov,.avi"
+          multiple
+        />
         <button id="upload-btn">Upload</button>
       </div>
       <div id="upload-status"></div>

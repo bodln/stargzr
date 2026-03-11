@@ -388,6 +388,14 @@ class PlaylistManager {
     active.src = `/stargzr/player/stream/id/${mediaId}`;
     active.play();
 
+    // Update subtitle track whenever a video is loaded.
+    // The track src must be set after the video src so the browser loads them together.
+    // 404 responses (no subtitles for this file) are silently ignored by the browser.
+    if (this.isVideo(media)) {
+      const track = document.getElementById("subtitle-track");
+      if (track) track.src = `/stargzr/player/subtitles/${mediaId}`;
+    }
+
     if (media) {
       const mediaIndex = this.medias.findIndex((s) => s.id === mediaId);
       document.querySelector("#player-controls .media-info strong").nextSibling.textContent = " " + media.filename;
