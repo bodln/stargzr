@@ -1,4 +1,4 @@
-// ─── Media element switcher ────────────────────────────────────────────────
+// ─── Media element switcher ──────────────────────────────────────────────────
 //
 // The page has both an <audio> and a <video> element. Only one is visible at a
 // time. switchMediaElement() swaps them and keeps window._activeMedia up to
@@ -9,6 +9,7 @@ const audioEl = document.getElementById("audio-player");
 const videoEl = document.getElementById("video-player");
 
 window._activeMedia = audioEl;
+videoEl.classList.add("hidden");
 
 window.switchMediaElement = function switchMediaElement(toVideo) {
   const incoming = toVideo ? videoEl : audioEl;
@@ -29,7 +30,7 @@ window.switchMediaElement = function switchMediaElement(toVideo) {
   debugLog(`Switched to ${toVideo ? "video" : "audio"} element`);
 };
 
-// ─── Audio element & seek-aware play() patch ──────────────────────────────
+// ─── Audio element & seek-aware play() patch ──────────────────────────────────────────────────────
 
 const originalPlayAudio = audioEl.play.bind(audioEl);
 const originalPlayVideo = videoEl.play.bind(videoEl);
@@ -75,7 +76,7 @@ function patchPlay(el, originalPlay) {
 patchPlay(audioEl, originalPlayAudio);
 patchPlay(videoEl, originalPlayVideo);
 
-// ─── Shared event handler wiring ──────────────────────────────────────────
+// ─── Shared event handler wiring ──────────────────────────────────────────────────────────────────
 //
 // Both elements need the same seeking/seeked/playing/ended/etc. handlers.
 // We wire them to a shared set of callbacks so behaviour is identical
@@ -152,7 +153,7 @@ function wireMediaEvents(el) {
 wireMediaEvents(audioEl);
 wireMediaEvents(videoEl);
 
-// ─── Core instances ────────────────────────────────────────────────────────
+// ─── Core instances ────────────────────────────────────────────────────────────────────────────────
 
 const sessionId = document.getElementById("my-session-id").textContent;
 const player = new RadioPlayer(audioEl, sessionId);
@@ -174,7 +175,7 @@ player.connectWebSocket();
   } catch (_) {}
 })();
 
-// ─── Button event bindings ────────────────────────────────────────────────
+// ─── Button event bindings ────────────────────────────────────────────────────────────────────────
 
 document.getElementById("tune-in-btn").addEventListener("click", () => {
   const broadcasterId = document
@@ -224,7 +225,7 @@ document.getElementById("next-btn").addEventListener("click", () => {
   playlistManager.playNext();
 });
 
-// ─── Page lifecycle ────────────────────────────────────────────────────────
+// ─── Page lifecycle ────────────────────────────────────────────────────────────────────────────────
 
 window.addEventListener("beforeunload", () => window.player?.disconnect());
 window.addEventListener("pagehide", () => {
@@ -234,6 +235,6 @@ window.addEventListener("pagehide", () => {
   window.player.disconnect();
 });
 
-// ─── Bootstrap ────────────────────────────────────────────────────────────
+// ─── Bootstrap ────────────────────────────────────────────────────────────────────────────────────
 
 playlistManager.loadPlaylist();
