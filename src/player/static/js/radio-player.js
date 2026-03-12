@@ -561,9 +561,17 @@ class RadioPlayer {
     this.audioEventHandlers.set("pause",  sendPauseUpdate);
     this.audioEventHandlers.set("seeked", sendUpdate);
 
-    this.audio.addEventListener("play",   sendUpdate);
-    this.audio.addEventListener("pause",  sendPauseUpdate);
-    this.audio.addEventListener("seeked", sendUpdate);
+    // Attach to both elements so switching media type mid-broadcast still fires updates
+    const allMediaEls = [
+      document.getElementById("audio-player"),
+      document.getElementById("video-player"),
+    ].filter(Boolean);
+
+    allMediaEls.forEach(el => {
+      el.addEventListener("play",   sendUpdate);
+    el.addEventListener("pause",  sendPauseUpdate);
+    el.addEventListener("seeked", sendUpdate);
+});
 
     this.heartbeatInterval = setInterval(() => this.sendHeartbeat(), 2000);
 
