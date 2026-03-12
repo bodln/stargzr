@@ -34,17 +34,20 @@ class PlaylistManager {
     return media?.media_type === "video";
   }
 
-  // Sets currentMediaId by reading the audio element's current src.
+  // Sets currentMediaId by reading the active media element's current src.
   // Must be called after originalMedias is populated so index lookups work.
   syncCurrentFromAudio() {
+    // Use the active media element so this works for both audio and video.
+    // Falls back to audio-player on initial page load before _activeMedia is set.
+    const el = window._activeMedia ?? document.getElementById("audio-player");
+
     // audio.src returns "" when src is set via a <source> child element
     // rather than directly on the <audio> tag (as on initial page load).
     // Reading the <source> attribute directly is the reliable fallback.
-    const audio = document.getElementById("audio-player");
     const srcToCheck =
-      audio.currentSrc ||
-      audio.src ||
-      audio.querySelector("source")?.getAttribute("src") ||
+      el.currentSrc ||
+      el.src ||
+      el.querySelector("source")?.getAttribute("src") ||
       "";
 
     const idMatch    = srcToCheck.match(/\/stream\/id\/([^/?]+)/);
