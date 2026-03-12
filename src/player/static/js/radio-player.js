@@ -327,6 +327,7 @@ class RadioPlayer {
         window.switchMediaElement?.(nextMedia?.media_type === "video");
 
         this.audio.src = mediaId ? `/stargzr/player/stream/id/${mediaId}` : `/stargzr/player/stream/${idx}`;
+        this._updateSubtitleTrack(mediaId, nextMedia?.media_type === "video");
         this.audio.load();
 
         this.audio.addEventListener("canplay", () => {
@@ -398,6 +399,7 @@ class RadioPlayer {
         window.switchMediaElement?.(nextMedia?.media_type === "video");
 
         this.audio.src = mediaId ? `/stargzr/player/stream/id/${mediaId}` : `/stargzr/player/stream/${media_index}`;
+        this._updateSubtitleTrack(mediaId, nextMedia?.media_type === "video");
         this.audio.load();
 
         this.audio.addEventListener("canplay", () => {
@@ -625,6 +627,19 @@ class RadioPlayer {
     if (idMatch && window.playlistManager) return window.playlistManager.getServerIndexById(idMatch[1]);
     const indexMatch = this.audio.src.match(/\/stream\/(\d+)(?:\?|$)/);
     return indexMatch ? parseInt(indexMatch[1]) : 0;
+  }
+
+  // Updates the subtitle track src whenever a video is loaded.
+  // Clears the track for audio media so stale subtitles from the previous video don't linger.
+  // 404 responses (no subtitles for this file) are silently ignored by the browser.
+  _updateSubtitleTrack(mediaId, isVideo) {
+    const track = document.getElementById("subtitle-track");
+    if (!track) return;
+    if (isVideo && mediaId) {
+      track.src = `/stargzr/player/subtitles/${mediaId}`;
+    } else {
+      track.src = "";
+    }
   }
 
   isInRadioMode() { return this.mode === "radio"; }
