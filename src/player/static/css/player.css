@@ -171,6 +171,24 @@ video {
 .play-next-btn:hover { background: #e8590c; }
 .play-next-btn:disabled { background: #6c757d; cursor: not-allowed; }
 
+/* Download link — sized to match the small action buttons in the row */
+.download-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  border: 1px solid #ced4da;
+  background: #fff;
+  color: #495057;
+  cursor: pointer;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.download-btn:hover { background: #e9ecef; border-color: #adb5bd; }
+
 .loading { text-align: center; color: #6c757d; padding: 20px; font-style: italic; }
 
 /* Broadcast progress */
@@ -224,3 +242,57 @@ video {
 .search-result-item:hover { background: #e7f3ff; color: #007bff; }
 
 .search-highlight { outline: 2px solid #007bff; outline-offset: 1px; transition: outline 0.3s; }
+
+/* Navigation filter bar — sits at the top of the scrollable playlist */
+.playlist-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 4px 8px;
+  border-bottom: 1px solid #dee2e6;
+  margin-bottom: 6px;
+  position: sticky;
+  top: 0;
+  background: #f8f9fa;
+  z-index: 10;
+}
+
+.filter-label {
+  font-size: 11px;
+  color: #6c757d;
+  white-space: nowrap;
+  margin-right: 2px;
+}
+
+.filter-btn {
+  font-size: 11px;
+  padding: 3px 9px;
+  border: 1px solid #ced4da;
+  border-radius: 10px;
+  background: #fff;
+  color: #495057;
+  cursor: pointer;
+  line-height: 1.4;
+  /* override the global button styles */
+  font-weight: normal;
+}
+
+.filter-btn:hover {
+  background: #e9ecef;
+  border-color: #adb5bd;
+}
+
+.filter-btn.active {
+  background: #007bff;
+  color: #fff;
+  border-color: #007bff;
+}
+
+/* Note shown below the list when items are hidden by the active filter */
+.playlist-hidden-note {
+  text-align: center;
+  font-size: 11px;
+  color: #6c757d;
+  padding: 8px;
+  font-style: italic;
+}

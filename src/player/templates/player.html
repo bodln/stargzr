@@ -136,8 +136,10 @@
     </audio>
 
     <!-- Video element: hidden until a video file is played.
-         Both elements share the same layout slot in CSS. -->
-    <video id="video-player" controls>
+         hidden class is set here so it's invisible from first paint,
+         not waiting for JS to run. switchMediaElement() in main.js
+         toggles visibility and keeps _activeMedia in sync. -->
+    <video id="video-player" class="hidden" controls>
       <track
         id="subtitle-track"
         kind="subtitles"
@@ -145,7 +147,7 @@
         srclang="en"
         default
       />
-      Your browser doesn't suppor video.
+      Your browser doesn't support video.
     </video>
 
     <div class="controls">

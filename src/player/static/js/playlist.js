@@ -8,6 +8,9 @@ class PlaylistManager {
     this.originalMedias = [];
     this.currentMediaId = null;
     this.storageKey = `playlist_order_${sessionId}`;
+
+    // "all" | "audio" | "video" — gates next/prev navigation only, never blocks direct play
+    this.mediaFilter = "all";
   }
 
   async loadPlaylist() {
@@ -22,10 +25,12 @@ class PlaylistManager {
       // Sync currentMediaId from whatever is actually playing right now.
       // This handles page load where audio src is set server-side and the
       // playlist manager doesn't know about it yet.
-      this.syncCurrentFromAudio();
+      try { this.syncCurrentFromAudio(); } catch (e) { debugLog(`syncCurrentFromAudio: ${e.message}`); }
       this.render();
     } catch (err) {
       debugLog(`Failed to load playlist: ${err.message}`);
+      const c = document.getElementById("playlist-display");
+      if (c) c.innerHTML = '<div class="loading" style="color:#dc3545">Failed to load playlist. Check the debug log.</div>';
     }
   }
 
@@ -40,15 +45,17 @@ class PlaylistManager {
     // Use the active media element so this works for both audio and video.
     // Falls back to audio-player on initial page load before _activeMedia is set.
     const el = window._activeMedia ?? document.getElementById("audio-player");
+    if (!el) return;
 
     // audio.src returns "" when src is set via a <source> child element
     // rather than directly on the <audio> tag (as on initial page load).
     // Reading the <source> attribute directly is the reliable fallback.
-    const srcToCheck =
-      el.currentSrc ||
-      el.src ||
-      el.querySelector("source")?.getAttribute("src") ||
-      "";
+    // el.src on an audio with a <source> child returns the document URL, so
+    // we only use it if it actually contains a stream path.
+    const rawSrc   = (el.currentSrc || el.src || "");
+    const srcToCheck = rawSrc.includes("/stream/")
+      ? rawSrc
+      : (el.querySelector?.("source")?.getAttribute("src") || "");
 
     const idMatch    = srcToCheck.match(/\/stream\/id\/([^/?]+)/);
     const indexMatch = srcToCheck.match(/\/stream\/(\d+)(?:[^/]|$)/);
@@ -113,6 +120,23 @@ class PlaylistManager {
     return this.originalMedias[index]?.id ?? null;
   }
 
+  // Changes the navigation filter and re-renders the playlist.
+  // Does not affect direct play clicks, only next/prev traversal.
+  setMediaFilter(filter) {
+    this.mediaFilter = filter;
+    this.render(true);
+    debugLog(`Media filter set to: ${filter}`);
+  }
+
+  // Returns medias that pass the current navigation filter.
+  // Used by next/prev only so direct play is never gated.
+  _filteredMedias() {
+    if (this.mediaFilter === "all") return this.medias;
+    return this.medias.filter((m) =>
+      this.mediaFilter === "video" ? this.isVideo(m) : !this.isVideo(m)
+    );
+  }
+
   render(skipScroll = false) {
     const container = document.getElementById("playlist-display");
     if (this.medias.length === 0) {
@@ -120,37 +144,66 @@ class PlaylistManager {
       return;
     }
 
-    const inRadio = window.player?.isInRadioMode() ?? false;
-    container.innerHTML = this.medias
+    const inRadio    = window.player?.isInRadioMode() ?? false;
+    const audioCount = this.medias.filter((m) => !this.isVideo(m)).length;
+    const videoCount = this.medias.filter((m) =>  this.isVideo(m)).length;
+
+    // Filter bar: three-state toggle that gates next/prev navigation only
+    const filterBar = `
+      <div class="playlist-filter-bar">
+        <span class="filter-label">Navigate:</span>
+        <button class="filter-btn ${this.mediaFilter === "all"   ? "active" : ""}" onclick="window.playlistManager.setMediaFilter('all')">All (${this.medias.length})</button>
+        <button class="filter-btn ${this.mediaFilter === "audio" ? "active" : ""}" onclick="window.playlistManager.setMediaFilter('audio')">&#127925; Audio (${audioCount})</button>
+        <button class="filter-btn ${this.mediaFilter === "video" ? "active" : ""}" onclick="window.playlistManager.setMediaFilter('video')">&#127909; Video (${videoCount})</button>
+      </div>
+    `;
+
+    const items = this.medias
       .map((media, index) => {
         const isPlaying = media.id === this.currentMediaId;
         const isVid     = this.isVideo(media);
         // Small badge so the user can tell audio and video apart at a glance
-        const badge     = `<span class="media-badge ${isVid ? "video" : "audio"}">${isVid ? "🎬" : "🎵"}</span>`;
+        const badge     = `<span class="media-badge ${isVid ? "video" : "audio"}">${isVid ? "&#127909;" : "&#127925;"}</span>`;
+        // Items filtered out of the navigation mode are hidden from the list.
+        // Direct play is still possible by switching back to All.
+        const filtered  = this.mediaFilter !== "all" && (this.mediaFilter === "video") !== isVid;
+        if (filtered) return "";
         return `
           <div class="playlist-item ${isPlaying ? "current-playing" : ""} ${isVid ? "is-video" : ""}"
                draggable="true"
                data-media-id="${media.id}"
                data-index="${index}">
-            <span class="drag-handle">⋮⋮</span>
+            <span class="drag-handle">&#8942;&#8942;</span>
             <span class="media-number">${index + 1}.</span>
             ${badge}
             <span class="media-name"><span class="media-text">${media.filename}</span></span>
+            <a class="download-btn"
+               href="/stargzr/player/stream/id/${media.id}"
+               download="${media.filename}"
+               title="Download ${media.filename}">&#11015;&#65039;</a>
             <button class="play-next-btn"
                     onclick="window.playlistManager.playNext_queue('${media.id}')"
                     title="Play after current media"
                     ${inRadio ? "disabled" : ""}>
-              ⏩ After current
+              &#9193; After current
             </button>
             <button class="play-media-btn"
                     onclick="window.playlistManager.playMedia('${media.id}')"
                     ${inRadio ? "disabled" : ""}>
-              ${isPlaying ? "⏸️ Playing" : "▶️ Play"}
+              ${isPlaying ? "&#9208;&#65039; Playing" : "&#9654;&#65039; Play"}
             </button>
           </div>
         `;
       })
       .join("");
+
+    const hiddenCount = this.mediaFilter === "all" ? 0
+      : this.medias.filter((m) => (this.mediaFilter === "video") !== this.isVideo(m)).length;
+    const hiddenNote = hiddenCount > 0
+      ? `<div class="playlist-hidden-note">${hiddenCount} item${hiddenCount > 1 ? "s" : ""} hidden — switch to All to see them</div>`
+      : "";
+
+    container.innerHTML = filterBar + items + hiddenNote;
 
     this.setupDragAndDrop();
     if (!skipScroll) this.scrollToCurrentMedia();
@@ -270,8 +323,8 @@ class PlaylistManager {
     const cloneRect = this.touchClone.getBoundingClientRect();
     const scrollThreshold = 30;
     const scrollSpeed = 8;
-    if (cloneRect.top < cRect.top - scrollThreshold)         container.scrollTop -= scrollSpeed;
-    else if (cloneRect.bottom > cRect.bottom + scrollThreshold) container.scrollTop += scrollSpeed;
+    if (cloneRect.top < cRect.top - scrollThreshold)             container.scrollTop -= scrollSpeed;
+    else if (cloneRect.bottom > cRect.bottom + scrollThreshold)  container.scrollTop += scrollSpeed;
 
     this.touchClone.style.display = "none";
     const target = document.elementFromPoint(touch.clientX, touch.clientY);
@@ -344,35 +397,47 @@ class PlaylistManager {
   renderForDrag(activeDragIndex) {
     const container = document.getElementById("playlist-display");
     const inRadio   = window.player?.isInRadioMode() ?? false;
-    container.innerHTML = this.medias
+
+    // Filter bar is re-rendered as a no-op placeholder during drag to preserve scroll position
+    const filterBar = `<div class="playlist-filter-bar" style="pointer-events:none;opacity:0.4">dragging...</div>`;
+
+    const items = this.medias
       .map((media, index) => {
         const isPlaying = media.id === this.currentMediaId;
         const isVid     = this.isVideo(media);
-        const badge     = `<span class="media-badge ${isVid ? "video" : "audio"}">${isVid ? "🎬" : "🎵"}</span>`;
+        const badge     = `<span class="media-badge ${isVid ? "video" : "audio"}">${isVid ? "&#127909;" : "&#127925;"}</span>`;
+        const filtered  = this.mediaFilter !== "all" && (this.mediaFilter === "video") !== isVid;
+        if (filtered) return "";
         return `
           <div class="playlist-item ${isPlaying ? "current-playing" : ""} ${isVid ? "is-video" : ""} ${index === activeDragIndex ? "dragging" : ""}"
                draggable="true"
                data-media-id="${media.id}"
                data-index="${index}">
-            <span class="drag-handle">⋮⋮</span>
+            <span class="drag-handle">&#8942;&#8942;</span>
             <span class="media-number">${index + 1}.</span>
             ${badge}
             <span class="media-name"><span class="media-text">${media.filename}</span></span>
+            <a class="download-btn"
+               href="/stargzr/player/stream/id/${media.id}"
+               download="${media.filename}"
+               title="Download ${media.filename}">&#11015;&#65039;</a>
             <button class="play-next-btn"
                     onclick="window.playlistManager.playNext_queue('${media.id}')"
                     title="Play after current media"
                     ${inRadio ? "disabled" : ""}>
-              ⏩ Next
+              &#9193; Next
             </button>
             <button class="play-media-btn"
                     onclick="window.playlistManager.playMedia('${media.id}')"
                     ${inRadio ? "disabled" : ""}>
-              ${isPlaying ? "⏸️ Playing" : "▶️ Play"}
+              ${isPlaying ? "&#9208;&#65039; Playing" : "&#9654;&#65039; Play"}
             </button>
           </div>
         `;
       })
       .join("");
+
+    container.innerHTML = filterBar + items;
     this.setupDragAndDrop();
   }
 
@@ -431,10 +496,27 @@ class PlaylistManager {
     debugLog(`Queued "${media.filename}" to play next`);
   }
 
-  getMediaById(mediaId)  { return this.medias.find((s) => s.id === mediaId); }
-  getCurrentIndex()    { return this.currentMediaId ? this.medias.findIndex((s) => s.id === this.currentMediaId) : 0; }
-  getNextMedia()        { return this.medias[(this.getCurrentIndex() + 1) % this.medias.length]; }
-  getPrevMedia()        { const i = this.getCurrentIndex(); return this.medias[i === 0 ? this.medias.length - 1 : i - 1]; }
+  getMediaById(mediaId) { return this.medias.find((s) => s.id === mediaId); }
+  getCurrentIndex()     { return this.currentMediaId ? this.medias.findIndex((s) => s.id === this.currentMediaId) : 0; }
+
+  // next/prev respect the active navigation filter, wrapping within the filtered subset
+  getNextMedia() {
+    const pool = this._filteredMedias();
+    if (pool.length === 0) return this.medias[(this.getCurrentIndex() + 1) % this.medias.length];
+    const currentInPool = pool.findIndex((m) => m.id === this.currentMediaId);
+    return pool[(currentInPool + 1) % pool.length];
+  }
+
+  getPrevMedia() {
+    const pool = this._filteredMedias();
+    if (pool.length === 0) {
+      const i = this.getCurrentIndex();
+      return this.medias[i === 0 ? this.medias.length - 1 : i - 1];
+    }
+    const currentInPool = pool.findIndex((m) => m.id === this.currentMediaId);
+    const prevIndex = currentInPool <= 0 ? pool.length - 1 : currentInPool - 1;
+    return pool[prevIndex];
+  }
 
   playNext() { if (!window.player?.isInRadioMode()) { const s = this.getNextMedia(); if (s) this.playMedia(s.id); } }
   playPrev() { if (!window.player?.isInRadioMode()) { const s = this.getPrevMedia(); if (s) this.playMedia(s.id); } }
