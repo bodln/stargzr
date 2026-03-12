@@ -472,7 +472,6 @@ class RadioPlayer {
     document.getElementById("tune-in-btn").classList.remove("hidden");
     document.getElementById("prev-btn").disabled = false;
     document.getElementById("next-btn").disabled = false;
-    this.audio.controls = true;
 
     document.getElementById("broadcast-progress").classList.add("hidden");
     document.getElementById("progress-bar-fill").style.width = "0%";
@@ -493,15 +492,29 @@ class RadioPlayer {
           this.audio.currentTime = snap.currentTime;
           if (!snap.paused) this.audio.play();
         }, { once: true });
+      } else {
+        // No saved src, default back to the audio element
+        window.switchMediaElement?.(false);
       }
       if (window.playlistManager && snap.mediaId) window.playlistManager.currentMediaId = snap.mediaId;
+    } else {
+      window.switchMediaElement?.(false);
     }
 
+    // Set controls after switchMediaElement so the correct element gets them
+    this.audio.controls = true;
     window.playlistManager?.render();
   }
 
+  // Removes broadcast event listeners from both media elements
   removeAudioBroadcastListeners() {
-    this.audioEventHandlers.forEach((handler, event) => this.audio.removeEventListener(event, handler));
+    const allMediaEls = [
+      document.getElementById("audio-player"),
+      document.getElementById("video-player"),
+    ].filter(Boolean);
+    this.audioEventHandlers.forEach((handler, event) => {
+      allMediaEls.forEach(el => el.removeEventListener(event, handler));
+    });
     this.audioEventHandlers.clear();
   }
 
@@ -569,9 +582,9 @@ class RadioPlayer {
 
     allMediaEls.forEach(el => {
       el.addEventListener("play",   sendUpdate);
-    el.addEventListener("pause",  sendPauseUpdate);
-    el.addEventListener("seeked", sendUpdate);
-});
+      el.addEventListener("pause",  sendPauseUpdate);
+      el.addEventListener("seeked", sendUpdate);
+    });
 
     this.heartbeatInterval = setInterval(() => this.sendHeartbeat(), 2000);
 
