@@ -22,3 +22,4 @@ env = "1.0.1"
 metrics = "0.24.3"
 metrics-exporter-prometheus = "0.18.1"
 tower-http = { version = "0.6.8", features = ["fs"] }
+zip = "8.2.0"

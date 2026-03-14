@@ -297,9 +297,9 @@ video {
   font-style: italic;
 }
 
-/* Compact icon-only action buttons in playlist rows */
+/* Compact icon-only buttons replacing the old verbose labeled buttons.       */
 .action-btn {
-  padding: 3px 7px;
+  padding: 3px 8px;
   font-size: 13px;
   line-height: 1;
   border-radius: 4px;
@@ -310,9 +310,14 @@ video {
   color: inherit;
   display: inline-flex;
   align-items: center;
+  flex-shrink: 0;
 }
 .action-btn:hover { background: #e2e6ea; }
 .action-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+ 
+/* Badge variants for non-media entries in the Other tab */
+.media-badge.other  { background: #6c757d; color: #fff; }
+.media-badge.folder { background: #fd7e14; color: #fff; }
 
 /* "Other" file type badge */
 .media-badge.other {

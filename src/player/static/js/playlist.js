@@ -126,7 +126,7 @@ class PlaylistManager {
     return this.originalMedias[index]?.id ?? null;
   }
 
-  // Changes the navigation filter and re-renders the filter bar and playlist.
+  // Changes the navigation filter and re-renders the playlist.
   // Does not affect direct play clicks, only next/prev traversal.
   setMediaFilter(filter) {
     this.mediaFilter = filter;
@@ -144,8 +144,8 @@ class PlaylistManager {
     );
   }
 
-  // Renders the filter bar into #playlist-filter-bar which lives outside
-  // the scrollable #playlist-display so it stays pinned above the list.
+  // Renders the filter bar into #playlist-filter-bar which lives outside the scrollable list.
+  // Called on load and whenever the active filter changes.
   renderFilterBar() {
     const bar = document.getElementById("playlist-filter-bar");
     if (!bar) return;
@@ -166,7 +166,9 @@ class PlaylistManager {
   render(skipScroll = false) {
     const container = document.getElementById("playlist-display");
 
-    // "Other" tab: non-media files, download only, no play buttons
+    // "Other" tab: non-media files and folders, download only, no play or queue buttons.
+    // Folders get a zip download via /player/download-folder/{name}.
+    // Files get a direct download via /player/download/{name}.
     if (this.mediaFilter === "other") {
       if (this.otherFiles.length === 0) {
         container.innerHTML = '<div class="loading">No other files found</div>';
@@ -174,17 +176,29 @@ class PlaylistManager {
       }
       container.innerHTML = this.otherFiles
         .map((f) => {
-          const sizeStr = f.size > 1024 * 1024
-            ? `${(f.size / 1024 / 1024).toFixed(1)} MB`
-            : `${(f.size / 1024).toFixed(0)} KB`;
+          const sizeStr = f.is_dir
+            ? "folder"
+            : f.size > 1024 * 1024
+              ? `${(f.size / 1024 / 1024).toFixed(1)} MB`
+              : `${(f.size / 1024).toFixed(0)} KB`;
+
+          const icon = f.is_dir ? "&#128193;" : "&#128196;";
+          const badgeClass = f.is_dir ? "folder" : "other";
+
+          const downloadHref = f.is_dir
+            ? `/stargzr/player/download-folder/${encodeURIComponent(f.filename)}`
+            : `/stargzr/player/download/${encodeURIComponent(f.filename)}`;
+
+          const downloadName = f.is_dir ? `${f.filename}.zip` : f.filename;
+
           return `
             <div class="playlist-item">
-              <span class="media-badge other">&#128196;</span>
+              <span class="media-badge ${badgeClass}">${icon}</span>
               <span class="media-name"><span class="media-text">${f.filename}</span></span>
-              <span class="other-size">${sizeStr}</span>
+              <span style="font-size:11px;color:#888;margin-left:4px;flex-shrink:0">${sizeStr}</span>
               <a class="action-btn download-btn"
-                 href="/stargzr/player/download/${encodeURIComponent(f.filename)}"
-                 download="${f.filename}"
+                 href="${downloadHref}"
+                 download="${downloadName}"
                  title="Download ${f.filename}">&#11015;</a>
             </div>
           `;
@@ -461,9 +475,9 @@ class PlaylistManager {
                download="${media.filename}"
                title="Download ${media.filename}">&#11015;</a>
             <button class="action-btn play-next-btn"
-                onclick="window.playlistManager.playNext_queue('${media.id}')"
-                title="Play after current media"
-                ${inRadio ? "disabled" : ""}>&#9193;</button>
+                    onclick="window.playlistManager.playNext_queue('${media.id}')"
+                    title="Play after current media"
+                    ${inRadio ? "disabled" : ""}>&#9193;</button>
             <button class="action-btn play-media-btn"
                     onclick="window.playlistManager.playMedia('${media.id}')"
                     ${inRadio ? "disabled" : ""}>${isPlaying ? "&#9208;&#65039;" : "&#9654;&#65039;"}</button>
