@@ -450,6 +450,13 @@ class RadioPlayer {
 
       // Show listener controls when first entering radio mode
       document.getElementById("radio-listener-controls")?.classList.remove("hidden");
+
+      // Move the resync button next to whichever element is active and show it
+      const resyncBtn = document.getElementById("media-resync-btn");
+      if (resyncBtn) {
+        window._activeMedia?.after(resyncBtn);
+        resyncBtn.classList.remove("hidden");
+      }
     }
 
     this.mode            = "radio";
@@ -487,6 +494,7 @@ class RadioPlayer {
 
     // Hide listener controls and reset mute state
     document.getElementById("radio-listener-controls")?.classList.add("hidden");
+    document.getElementById("media-resync-btn")?.classList.add("hidden");
     this.isMuted = false;
     const allMediaEls = [
       document.getElementById("audio-player"),

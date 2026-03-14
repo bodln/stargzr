@@ -27,6 +27,14 @@ window.switchMediaElement = function switchMediaElement(toVideo) {
   // Keep RadioPlayer pointed at the active element
   if (window.player) window.player.audio = incoming;
 
+  // Move the single resync button to sit after whichever element just became active,
+  // and keep it hidden unless we're already in radio mode
+  const resyncBtn = document.getElementById("media-resync-btn");
+  if (resyncBtn) {
+    incoming.after(resyncBtn);
+    resyncBtn.classList.toggle("hidden", !window.player?.isInRadioMode());
+  }
+
   debugLog(`Switched to ${toVideo ? "video" : "audio"} element`);
 };
 

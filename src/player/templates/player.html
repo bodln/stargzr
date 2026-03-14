@@ -141,6 +141,9 @@
       Your browser doesn't support audio playback.
     </audio>
 
+    <!-- Shown only in radio mode; moved next to whichever media element is active -->
+    <button id="media-resync-btn" class="hidden" onclick="window.player.resync()">🔄 Resync</button>
+
     <!-- Video element: hidden until a video file is played.
          hidden class is set here so it's invisible from first paint,
          not waiting for JS to run. switchMediaElement() in main.js
