@@ -564,7 +564,14 @@ pub async fn get_other_files(State(state): State<SharedState>) -> impl IntoRespo
 pub async fn download_file(
     State(state): State<SharedState>,
     Path(filename): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
+    let ip = headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
     let safe = sanitize_filename(&filename);
     let path = state.music_folder.join(&safe);
 
@@ -575,6 +582,8 @@ pub async fn download_file(
     let data = tokio::fs::read(&path)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    tracing::info!(ip = %ip, file = %safe, bytes = data.len(), "Serving folder zip");
 
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -593,7 +602,14 @@ pub async fn download_file(
 pub async fn download_folder(
     State(state): State<SharedState>,
     Path(foldername): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
+    let ip = headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
     let safe = sanitize_filename(&foldername);
     let path = state.music_folder.join(&safe);
 
@@ -610,7 +626,7 @@ pub async fn download_folder(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    tracing::info!(folder = %safe, bytes = zip_bytes.len(), "Serving folder zip");
+    tracing::info!(ip = %ip, folder = %safe, bytes = zip_bytes.len(), "Serving folder zip");
 
     Ok(Response::builder()
         .status(StatusCode::OK)
