@@ -6,26 +6,32 @@ class PlaylistManager {
     // numeric index to broadcast. The server's /stream/{index} endpoints
     // use this order, not the user's custom order.
     this.originalMedias = [];
+    this.otherFiles = [];
     this.currentMediaId = null;
     this.storageKey = `playlist_order_${sessionId}`;
 
-    // "all" | "audio" | "video" — gates next/prev navigation only, never blocks direct play
+    // "all" | "audio" | "video" | "other" — gates next/prev navigation only, never blocks direct play
     this.mediaFilter = "all";
   }
 
   async loadPlaylist() {
     try {
       debugLog("Fetching playlist from server...");
-      const response = await fetch("/stargzr/player/playlist");
-      const serverMedias = await response.json();
+      const [mediaResp, otherResp] = await Promise.all([
+        fetch("/stargzr/player/playlist"),
+        fetch("/stargzr/player/other-files"),
+      ]);
+      const serverMedias = await mediaResp.json();
+      this.otherFiles    = await otherResp.json();
       this.originalMedias = serverMedias;
       this.medias = [...serverMedias];
-      debugLog(`Loaded ${this.medias.length} medias`);
+      debugLog(`Loaded ${this.medias.length} medias, ${this.otherFiles.length} other file(s)`);
       this.loadCustomOrder();
       // Sync currentMediaId from whatever is actually playing right now.
       // This handles page load where audio src is set server-side and the
       // playlist manager doesn't know about it yet.
       try { this.syncCurrentFromAudio(); } catch (e) { debugLog(`syncCurrentFromAudio: ${e.message}`); }
+      this.renderFilterBar();
       this.render();
     } catch (err) {
       debugLog(`Failed to load playlist: ${err.message}`);
@@ -120,10 +126,11 @@ class PlaylistManager {
     return this.originalMedias[index]?.id ?? null;
   }
 
-  // Changes the navigation filter and re-renders the playlist.
+  // Changes the navigation filter and re-renders the filter bar and playlist.
   // Does not affect direct play clicks, only next/prev traversal.
   setMediaFilter(filter) {
     this.mediaFilter = filter;
+    this.renderFilterBar();
     this.render(true);
     debugLog(`Media filter set to: ${filter}`);
   }
@@ -137,8 +144,55 @@ class PlaylistManager {
     );
   }
 
+  // Renders the filter bar into #playlist-filter-bar which lives outside
+  // the scrollable #playlist-display so it stays pinned above the list.
+  renderFilterBar() {
+    const bar = document.getElementById("playlist-filter-bar");
+    if (!bar) return;
+    const audioCount = this.medias.filter((m) => !this.isVideo(m)).length;
+    const videoCount = this.medias.filter((m) =>  this.isVideo(m)).length;
+    const otherCount = this.otherFiles.length;
+    bar.innerHTML = `
+      <div class="playlist-filter-bar">
+        <span class="filter-label">Navigate:</span>
+        <button class="filter-btn ${this.mediaFilter === "all"   ? "active" : ""}" onclick="window.playlistManager.setMediaFilter('all')">All (${this.medias.length})</button>
+        <button class="filter-btn ${this.mediaFilter === "audio" ? "active" : ""}" onclick="window.playlistManager.setMediaFilter('audio')">&#127925; Audio (${audioCount})</button>
+        <button class="filter-btn ${this.mediaFilter === "video" ? "active" : ""}" onclick="window.playlistManager.setMediaFilter('video')">&#127909; Video (${videoCount})</button>
+        <button class="filter-btn ${this.mediaFilter === "other" ? "active" : ""}" onclick="window.playlistManager.setMediaFilter('other')">&#128196; Other (${otherCount})</button>
+      </div>
+    `;
+  }
+
   render(skipScroll = false) {
     const container = document.getElementById("playlist-display");
+
+    // "Other" tab: non-media files, download only, no play buttons
+    if (this.mediaFilter === "other") {
+      if (this.otherFiles.length === 0) {
+        container.innerHTML = '<div class="loading">No other files found</div>';
+        return;
+      }
+      container.innerHTML = this.otherFiles
+        .map((f) => {
+          const sizeStr = f.size > 1024 * 1024
+            ? `${(f.size / 1024 / 1024).toFixed(1)} MB`
+            : `${(f.size / 1024).toFixed(0)} KB`;
+          return `
+            <div class="playlist-item">
+              <span class="media-badge other">&#128196;</span>
+              <span class="media-name"><span class="media-text">${f.filename}</span></span>
+              <span class="other-size">${sizeStr}</span>
+              <a class="action-btn download-btn"
+                 href="/stargzr/player/download/${encodeURIComponent(f.filename)}"
+                 download="${f.filename}"
+                 title="Download ${f.filename}">&#11015;</a>
+            </div>
+          `;
+        })
+        .join("");
+      return;
+    }
+
     if (this.medias.length === 0) {
       container.innerHTML = '<div class="loading">No medias found</div>';
       return;
@@ -147,16 +201,6 @@ class PlaylistManager {
     const inRadio    = window.player?.isInRadioMode() ?? false;
     const audioCount = this.medias.filter((m) => !this.isVideo(m)).length;
     const videoCount = this.medias.filter((m) =>  this.isVideo(m)).length;
-
-    // Filter bar: three-state toggle that gates next/prev navigation only
-    const filterBar = `
-      <div class="playlist-filter-bar">
-        <span class="filter-label">Navigate:</span>
-        <button class="filter-btn ${this.mediaFilter === "all"   ? "active" : ""}" onclick="window.playlistManager.setMediaFilter('all')">All (${this.medias.length})</button>
-        <button class="filter-btn ${this.mediaFilter === "audio" ? "active" : ""}" onclick="window.playlistManager.setMediaFilter('audio')">&#127925; Audio (${audioCount})</button>
-        <button class="filter-btn ${this.mediaFilter === "video" ? "active" : ""}" onclick="window.playlistManager.setMediaFilter('video')">&#127909; Video (${videoCount})</button>
-      </div>
-    `;
 
     const items = this.medias
       .map((media, index) => {
@@ -177,20 +221,18 @@ class PlaylistManager {
             <span class="media-number">${index + 1}.</span>
             ${badge}
             <span class="media-name"><span class="media-text">${media.filename}</span></span>
-            <a class="download-btn"
+            <a class="action-btn download-btn"
                href="/stargzr/player/stream/id/${media.id}"
                download="${media.filename}"
-               title="Download ${media.filename}">&#11015;&#65039;</a>
-            <button class="play-next-btn"
+               title="Download ${media.filename}">&#11015;</a>
+            <button class="action-btn play-next-btn"
                     onclick="window.playlistManager.playNext_queue('${media.id}')"
                     title="Play after current media"
-                    ${inRadio ? "disabled" : ""}>
-              &#9193; After current
-            </button>
-            <button class="play-media-btn"
+                    ${inRadio ? "disabled" : ""}>&#9193;</button>
+            <button class="action-btn play-media-btn"
                     onclick="window.playlistManager.playMedia('${media.id}')"
                     ${inRadio ? "disabled" : ""}>
-              ${isPlaying ? "&#9208;&#65039; Playing" : "&#9654;&#65039; Play"}
+              ${isPlaying ? "&#9208;&#65039;" : "&#9654;&#65039;"}
             </button>
           </div>
         `;
@@ -200,10 +242,10 @@ class PlaylistManager {
     const hiddenCount = this.mediaFilter === "all" ? 0
       : this.medias.filter((m) => (this.mediaFilter === "video") !== this.isVideo(m)).length;
     const hiddenNote = hiddenCount > 0
-      ? `<div class="playlist-hidden-note">${hiddenCount} item${hiddenCount > 1 ? "s" : ""} hidden — switch to All to see them</div>`
+      ? `<div class="playlist-hidden-note">${hiddenCount} item${hiddenCount > 1 ? "s" : ""} hidden â€" switch to All to see them</div>`
       : "";
 
-    container.innerHTML = filterBar + items + hiddenNote;
+    container.innerHTML = items + hiddenNote;
 
     this.setupDragAndDrop();
     if (!skipScroll) this.scrollToCurrentMedia();
@@ -398,9 +440,6 @@ class PlaylistManager {
     const container = document.getElementById("playlist-display");
     const inRadio   = window.player?.isInRadioMode() ?? false;
 
-    // Filter bar is re-rendered as a no-op placeholder during drag to preserve scroll position
-    const filterBar = `<div class="playlist-filter-bar" style="pointer-events:none;opacity:0.4">dragging...</div>`;
-
     const items = this.medias
       .map((media, index) => {
         const isPlaying = media.id === this.currentMediaId;
@@ -417,27 +456,23 @@ class PlaylistManager {
             <span class="media-number">${index + 1}.</span>
             ${badge}
             <span class="media-name"><span class="media-text">${media.filename}</span></span>
-            <a class="download-btn"
+            <a class="action-btn download-btn"
                href="/stargzr/player/stream/id/${media.id}"
                download="${media.filename}"
-               title="Download ${media.filename}">&#11015;&#65039;</a>
-            <button class="play-next-btn"
-                    onclick="window.playlistManager.playNext_queue('${media.id}')"
-                    title="Play after current media"
-                    ${inRadio ? "disabled" : ""}>
-              &#9193; Next
-            </button>
-            <button class="play-media-btn"
+               title="Download ${media.filename}">&#11015;</a>
+            <button class="action-btn play-next-btn"
+                onclick="window.playlistManager.playNext_queue('${media.id}')"
+                title="Play after current media"
+                ${inRadio ? "disabled" : ""}>&#9193;</button>
+            <button class="action-btn play-media-btn"
                     onclick="window.playlistManager.playMedia('${media.id}')"
-                    ${inRadio ? "disabled" : ""}>
-              ${isPlaying ? "&#9208;&#65039; Playing" : "&#9654;&#65039; Play"}
-            </button>
+                    ${inRadio ? "disabled" : ""}>${isPlaying ? "&#9208;&#65039;" : "&#9654;&#65039;"}</button>
           </div>
         `;
       })
       .join("");
 
-    container.innerHTML = filterBar + items;
+    container.innerHTML = items;
     this.setupDragAndDrop();
   }
 
