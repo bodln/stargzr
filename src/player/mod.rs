@@ -15,8 +15,7 @@ pub use types::{AppState, BroadcastState, MediaType, RadioMessage, SharedState, 
 pub use types::media_type_for;
 
 use crate::player::handlers::{
-    admin_state, check_session, download_file, get_other_files, get_subtitles, metrics_handler,
-    radio_websocket, upload_file
+    admin_state, check_session, get_subtitles, metrics_handler, radio_websocket, upload_file
 };
 use crate::player::types::PreparedMessage;
 
@@ -32,8 +31,8 @@ use tokio::sync::{RwLock, Semaphore, broadcast};
 use uuid::Uuid;
 
 use handlers::{
-    get_playlist, next_media, player_controls, player_page, prev_media, stream_audio_by_id,
-    stream_audio_by_index,
+    download_file, download_folder, get_other_files, get_playlist, next_media, player_controls,
+    player_page, prev_media, stream_audio_by_id, stream_audio_by_index,
 };
 use rate_limit::RateLimiter;
 use session::cleanup_stale_sessions;
@@ -103,7 +102,8 @@ pub fn create_player_router(state: Arc<AppState>) -> impl std::future::Future<Ou
             .route("/player/controls", get(player_controls)) // Return current controls/status
             .route("/player/playlist", get(get_playlist))
             .route("/player/other-files", get(get_other_files))
-            .route("/player/download/:filename", get(download_file))
+            .route("/player/download/{filename}", get(download_file))
+            .route("/player/download-folder/{foldername}", get(download_folder))
             .route("/player/session/check", get(check_session))
             .route("/player/subtitles/{media_id}", get(get_subtitles))
             // Override the default 2 MB body limit for the upload route only.
