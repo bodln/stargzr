@@ -601,12 +601,8 @@ pub async fn download_file(
 /// The zip is written to a temp file on a blocking thread so the async runtime
 /// isn't blocked and so the zip crate can seek (it must seek to write the
 /// central directory).  The temp file is streamed back in 512 KB chunks and
-/// deleted automatically once the response body is fully consumed or the client
-/// disconnects, so it never lingers on disk.
-///
-/// Previously the zip was buffered entirely in a Vec<u8> via Cursor before
-/// sending.  For large directories this caused an out-of-memory crash because
-/// the entire archive had to fit in RAM at once.
+/// deleted automatically once the response body is fully consumed, the client
+/// disconnects, or zipping fails partway through, it can never leak.
 pub async fn download_folder(
     State(state): State<SharedState>,
     Path(foldername): Path<String>,
@@ -618,17 +614,53 @@ pub async fn download_folder(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // Write the zip to a temp file on a blocking thread.
-    // The zip crate requires Write + Seek; a pipe or channel cannot satisfy
-    // Seek, so a real file is the only correct option here.
+    tracing::info!(folder = %safe, "Folder zip requested, starting zip...");
+
+    // DeleteOnDrop is created immediately when the temp file is created so it
+    // is cleaned up on every exit path: success, zip error, and panic.
+    // On success we call .into_path() which moves ownership out and disarms it,
+    // then pass the path to a second DeleteOnDrop in the stream closure.
+    struct DeleteOnDrop(Option<std::path::PathBuf>);
+
+    impl DeleteOnDrop {
+        fn new(p: std::path::PathBuf) -> Self { Self(Some(p)) }
+        // Disarms the guard and returns the path, caller takes ownership of cleanup
+        fn into_path(mut self) -> std::path::PathBuf { self.0.take().unwrap() }
+    }
+    
+    impl Drop for DeleteOnDrop {
+        fn drop(&mut self) {
+            if let Some(p) = self.0.take() {
+                if let Err(e) = std::fs::remove_file(&p) {
+                    tracing::warn!(path = %p.display(), "Failed to delete temp zip: {}", e);
+                } else {
+                    tracing::debug!(path = %p.display(), "Deleted temp zip");
+                }
+            }
+        }
+    }
+
+    let safe_clone = safe.clone();
     let tmp_path = tokio::task::spawn_blocking(move || -> std::io::Result<std::path::PathBuf> {
         let tmp = std::env::temp_dir().join(format!("stargzr_{}.zip", uuid::Uuid::new_v4()));
+
+        tracing::info!(folder = %safe_clone, tmp = %tmp.display(), "Zipping to temp file");
+
+        // Guard is armed immediately — any early return from this closure
+        // (zip error, IO error, panic) will delete the partially-written file
+        let guard = DeleteOnDrop::new(tmp.clone());
+
         let file = std::fs::File::create(&tmp)?;
         // BufWriter reduces the number of seek + write syscalls the zip crate issues
         let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(file));
         zip_dir_recursive(&mut zip, &path, "")?;
         zip.finish().map_err(|e| std::io::Error::other(e.to_string()))?;
-        Ok(tmp)
+
+        tracing::info!(folder = %safe_clone, "Zip complete, returning temp path");
+
+        // Disarm: zipping succeeded, hand path back to the async side which
+        // will install its own DeleteOnDrop on the stream closure
+        Ok(guard.into_path())
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -642,28 +674,20 @@ pub async fn download_folder(
         .map(|m| m.len())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    tracing::info!(folder = %safe, bytes = zip_size, "Serving folder zip");
+    tracing::info!(folder = %safe, bytes = zip_size, "Zip ready, starting download stream");
 
     let file = tokio::fs::File::open(&tmp_path)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // DeleteOnDrop removes the temp file when it goes out of scope.
-    // Moving it into the stream closure means it lives exactly as long as the
-    // stream does — the file is deleted after the last byte is sent or if the
-    // client disconnects early.
-    struct DeleteOnDrop(std::path::PathBuf);
-    impl Drop for DeleteOnDrop {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-    let guard = DeleteOnDrop(tmp_path);
+    // Second guard on the stream side: deleted when the last byte is sent
+    // or when the client disconnects before the download finishes.
+    let stream_guard = DeleteOnDrop::new(tmp_path);
 
     let stream = ReaderStream::with_capacity(file, 512 * 1024)
-        // The move keeps `guard` alive for the lifetime of the stream.
-        // When the stream is dropped, `guard` is dropped, deleting the temp file.
-        .map(move |chunk| { let _ = &guard; chunk });
+        // The move keeps `stream_guard` alive for the lifetime of the stream.
+        // When the stream is dropped, `stream_guard` is dropped, deleting the temp file.
+        .map(move |chunk| { let _ = &stream_guard; chunk });
 
     let body = axum::body::Body::from_stream(stream);
 
