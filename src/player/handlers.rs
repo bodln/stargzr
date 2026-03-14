@@ -2,6 +2,7 @@ use axum::extract::{ConnectInfo, Multipart, Path, Query, State, WebSocketUpgrade
 use axum::http::header;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use futures_util::StreamExt;
 use serde::Deserialize;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -597,19 +598,19 @@ pub async fn download_file(
 }
 
 /// Zips an entire subdirectory of the music folder and serves it as a download.
-/// The zip is built in memory on a blocking thread so the async runtime isn't blocked.
-/// Directory traversal is recursive so nested folders are included in full.
+/// The zip is written to a temp file on a blocking thread so the async runtime
+/// isn't blocked and so the zip crate can seek (it must seek to write the
+/// central directory).  The temp file is streamed back in 512 KB chunks and
+/// deleted automatically once the response body is fully consumed or the client
+/// disconnects, so it never lingers on disk.
+///
+/// Previously the zip was buffered entirely in a Vec<u8> via Cursor before
+/// sending.  For large directories this caused an out-of-memory crash because
+/// the entire archive had to fit in RAM at once.
 pub async fn download_folder(
     State(state): State<SharedState>,
     Path(foldername): Path<String>,
-    headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    let ip = headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-
     let safe = sanitize_filename(&foldername);
     let path = state.music_folder.join(&safe);
 
@@ -617,16 +618,54 @@ pub async fn download_folder(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // Zip is a synchronous operation, spawn_blocking keeps the async runtime free
-    let zip_bytes = tokio::task::spawn_blocking(move || zip_directory(&path))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .map_err(|e| {
-            tracing::error!("Failed to zip directory: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    // Write the zip to a temp file on a blocking thread.
+    // The zip crate requires Write + Seek; a pipe or channel cannot satisfy
+    // Seek, so a real file is the only correct option here.
+    let tmp_path = tokio::task::spawn_blocking(move || -> std::io::Result<std::path::PathBuf> {
+        let tmp = std::env::temp_dir().join(format!("stargzr_{}.zip", uuid::Uuid::new_v4()));
+        let file = std::fs::File::create(&tmp)?;
+        // BufWriter reduces the number of seek + write syscalls the zip crate issues
+        let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(file));
+        zip_dir_recursive(&mut zip, &path, "")?;
+        zip.finish().map_err(|e| std::io::Error::other(e.to_string()))?;
+        Ok(tmp)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|e| {
+        tracing::error!("Failed to zip directory: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
-    tracing::info!(ip = %ip, folder = %safe, bytes = zip_bytes.len(), "Serving folder zip");
+    let zip_size = tokio::fs::metadata(&tmp_path)
+        .await
+        .map(|m| m.len())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    tracing::info!(folder = %safe, bytes = zip_size, "Serving folder zip");
+
+    let file = tokio::fs::File::open(&tmp_path)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // DeleteOnDrop removes the temp file when it goes out of scope.
+    // Moving it into the stream closure means it lives exactly as long as the
+    // stream does — the file is deleted after the last byte is sent or if the
+    // client disconnects early.
+    struct DeleteOnDrop(std::path::PathBuf);
+    impl Drop for DeleteOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let guard = DeleteOnDrop(tmp_path);
+
+    let stream = ReaderStream::with_capacity(file, 512 * 1024)
+        // The move keeps `guard` alive for the lifetime of the stream.
+        // When the stream is dropped, `guard` is dropped, deleting the temp file.
+        .map(move |chunk| { let _ = &guard; chunk });
+
+    let body = axum::body::Body::from_stream(stream);
 
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -635,22 +674,13 @@ pub async fn download_folder(
             header::CONTENT_DISPOSITION,
             format!("attachment; filename=\"{}.zip\"", safe),
         )
-        .body(axum::body::Body::from(zip_bytes))
+        .header(header::CONTENT_LENGTH, zip_size.to_string())
+        .body(body)
         .unwrap())
 }
 
-/// Walks `dir` recursively and writes every file into a zip archive held in memory.
-/// Returns the raw zip bytes on success.
-fn zip_directory(dir: &std::path::Path) -> std::io::Result<Vec<u8>> {
-    let cursor = std::io::Cursor::new(Vec::new());
-    let mut zip = zip::ZipWriter::new(cursor);
-    zip_dir_recursive(&mut zip, dir, "")?;
-    let cursor = zip.finish().map_err(|e| std::io::Error::other(e.to_string()))?;
-    Ok(cursor.into_inner())
-}
-
-/// Adds all files under `dir` into `zip`, prefixing each archive entry with `prefix`.
-/// Called recursively for subdirectories so the full tree is preserved inside the zip.
+/// Walks `dir` recursively and writes every file into a zip archive.
+/// Called with a File-backed ZipWriter so the archive is never held in memory.
 fn zip_dir_recursive<W: std::io::Write + std::io::Seek>(
     zip: &mut zip::ZipWriter<W>,
     dir: &std::path::Path,
