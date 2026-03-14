@@ -60,7 +60,15 @@ video {
 
 .broadcaster-info { background: #fff; padding: 10px; border-radius: 4px; margin-top: 10px; font-size: 14px; }
 .session-id-display { background: #fff; padding: 10px; border-radius: 4px; margin-top: 10px; font-size: 14px; font-family: monospace; }
-.hidden { display: none; }
+
+/* .hidden must not be overridden by any inline display property.
+   All elements that need a specific display value when visible
+   (e.g. flex containers) must declare that in a separate rule below,
+   NOT via an inline style attribute otherwise the inline style wins. */
+.hidden { display: none !important; }
+
+/* Listener controls row: mute + resync, shown only while tuned in */
+#radio-listener-controls { display: flex; gap: 8px; margin-top: 8px; }
 
 /* Debug */
 #debug-log {
