@@ -296,3 +296,34 @@ video {
   padding: 8px;
   font-style: italic;
 }
+
+/* Compact icon-only action buttons in playlist rows */
+.action-btn {
+  padding: 3px 7px;
+  font-size: 13px;
+  line-height: 1;
+  border-radius: 4px;
+  border: 1px solid #ced4da;
+  background: #f8f9fa;
+  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
+  display: inline-flex;
+  align-items: center;
+}
+.action-btn:hover { background: #e2e6ea; }
+.action-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* "Other" file type badge */
+.media-badge.other {
+  background: #6c757d;
+  color: #fff;
+}
+
+/* File size label in the Other tab */
+.other-size {
+  font-size: 11px;
+  color: #888;
+  margin-left: 4px;
+  white-space: nowrap;
+}
