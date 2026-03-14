@@ -185,11 +185,23 @@ class PlaylistManager {
           const icon = f.is_dir ? "&#128193;" : "&#128196;";
           const badgeClass = f.is_dir ? "folder" : "other";
 
-          const downloadHref = f.is_dir
-            ? `/stargzr/player/download-folder/${encodeURIComponent(f.filename)}`
-            : `/stargzr/player/download/${encodeURIComponent(f.filename)}`;
-
-          const downloadName = f.is_dir ? `${f.filename}.zip` : f.filename;
+          if (f.is_dir) {
+            // Folders must be zipped server-side first which can take a while for large
+            // directories. Use a button that shows a status message while waiting instead
+            // of a plain <a> that gives no feedback until the browser receives the first byte.
+            return `
+              <div class="playlist-item" id="folder-item-${CSS.escape(f.filename)}">
+                <span class="media-badge ${badgeClass}">${icon}</span>
+                <span class="media-name"><span class="media-text">${f.filename}</span></span>
+                <span style="font-size:11px;color:#888;margin-left:4px;flex-shrink:0">${sizeStr}</span>
+                <span id="folder-zip-status-${CSS.escape(f.filename)}" style="font-size:11px;color:#888;margin-left:8px;flex-shrink:0"></span>
+                <button class="action-btn download-btn"
+                        id="folder-dl-btn-${CSS.escape(f.filename)}"
+                        onclick="downloadFolder('${f.filename.replace(/'/g, "\\'")}')"
+                        title="Download ${f.filename} as zip">&#11015;</button>
+              </div>
+            `;
+          }
 
           return `
             <div class="playlist-item">
@@ -197,8 +209,8 @@ class PlaylistManager {
               <span class="media-name"><span class="media-text">${f.filename}</span></span>
               <span style="font-size:11px;color:#888;margin-left:4px;flex-shrink:0">${sizeStr}</span>
               <a class="action-btn download-btn"
-                 href="${downloadHref}"
-                 download="${downloadName}"
+                 href="/stargzr/player/download/${encodeURIComponent(f.filename)}"
+                 download="${f.filename}"
                  title="Download ${f.filename}">&#11015;</a>
             </div>
           `;
@@ -256,7 +268,7 @@ class PlaylistManager {
     const hiddenCount = this.mediaFilter === "all" ? 0
       : this.medias.filter((m) => (this.mediaFilter === "video") !== this.isVideo(m)).length;
     const hiddenNote = hiddenCount > 0
-      ? `<div class="playlist-hidden-note">${hiddenCount} item${hiddenCount > 1 ? "s" : ""} hidden â€" switch to All to see them</div>`
+      ? `<div class="playlist-hidden-note">${hiddenCount} item${hiddenCount > 1 ? "s" : ""} hidden — switch to All to see them</div>`
       : "";
 
     container.innerHTML = items + hiddenNote;
@@ -589,5 +601,55 @@ class PlaylistManager {
 function resetPlaylistOrder() {
   if (confirm("Reset playlist to default order?")) {
     window.playlistManager.resetToDefaultOrder();
+  }
+}
+
+// Triggers a folder zip download with accurate status feedback.
+// The server must finish zipping before it sends a single byte, so we use
+// fetch() to wait for the complete response. The "Zipping..." label stays up
+// for exactly as long as the server is actually working, then flips to
+// "Downloading..." while the blob is being saved, then clears when done.
+// A hidden <a> with a blob URL is the only way to trigger Save-As from JS
+// without navigating away from the page.
+async function downloadFolder(filename) {
+  const escapedId = CSS.escape(filename);
+  const btn       = document.getElementById(`folder-dl-btn-${escapedId}`);
+  const status    = document.getElementById(`folder-zip-status-${escapedId}`);
+
+  if (btn)    { btn.disabled = true; btn.textContent = "⏳"; }
+  if (status) status.textContent = "Zipping...";
+  debugLog(`Zipping folder "${filename}", waiting for server...`);
+
+  try {
+    const resp = await fetch(`/stargzr/player/download-folder/${encodeURIComponent(filename)}`);
+
+    if (!resp.ok) {
+      throw new Error(`Server returned ${resp.status}`);
+    }
+
+    // Server is done zipping — now we're just pulling bytes over the network
+    if (status) status.textContent = "Downloading...";
+    debugLog(`Folder "${filename}" zipped, downloading...`);
+
+    const blob = await resp.blob();
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href     = url;
+    a.download = `${filename}.zip`;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+
+    // Revoke the blob URL after a short delay so the browser can release the memory
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+
+    debugLog(`Folder "${filename}" download complete`);
+  } catch (err) {
+    debugLog(`Folder download failed: ${err.message}`);
+    if (status) status.textContent = "Failed";
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "⬇"; }
+    setTimeout(() => { if (status) status.textContent = ""; }, 3000);
   }
 }
