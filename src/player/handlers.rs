@@ -516,41 +516,51 @@ pub async fn get_playlist(State(state): State<SharedState>) -> impl IntoResponse
     axum::Json(medias)
 }
 
-/// Returns all non-media files in the music folder (PDFs, ZIPs, images, etc.)
-/// with their filename and size. Used by the "Other" tab in the frontend playlist.
+/// Returns all non-media files and subdirectories inside the music folder.
+/// Files carry their byte size; directories carry size 0 and is_dir: true.
+/// Directories sort before files, then everything sorts alphabetically.
 pub async fn get_other_files(State(state): State<SharedState>) -> impl IntoResponse {
     #[derive(serde::Serialize)]
     struct OtherFile {
         filename: String,
         size: u64,
+        is_dir: bool,
     }
 
-    let mut files: Vec<OtherFile> = Vec::new();
+    let mut entries: Vec<OtherFile> = Vec::new();
 
-    if let Ok(mut entries) = tokio::fs::read_dir(&*state.music_folder).await {
-        while let Ok(Some(entry)) = entries.next_entry().await {
+    if let Ok(mut read_dir) = tokio::fs::read_dir(&*state.music_folder).await {
+        while let Ok(Some(entry)) = read_dir.next_entry().await {
             if let Some(name) = entry.file_name().to_str() {
-                // Only include files that are not recognized media types
-                if media_type_for(name).is_none() {
                     if let Ok(meta) = entry.metadata().await {
-                        if meta.is_file() {
-                            files.push(OtherFile {
+                    if meta.is_dir() {
+                        // Include subdirectories so the frontend can offer a zip download
+                        entries.push(OtherFile {
+                            filename: name.to_string(),
+                            size: 0,
+                            is_dir: true,
+                        });
+                    } else if meta.is_file() && crate::player::types::media_type_for(name).is_none() {
+                        // Include non-media files (PDFs, ZIPs, etc.)
+                        entries.push(OtherFile {
                                 filename: name.to_string(),
                                 size: meta.len(),
+                            is_dir: false,
                             });
-                        }
                     }
                 }
             }
         }
     }
 
-    files.sort_by(|a, b| a.filename.cmp(&b.filename));
-    axum::Json(files)
+    // Directories first, then files, both groups sorted alphabetically
+    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.filename.cmp(&b.filename)));
+
+    axum::Json(entries)
 }
 
-/// Serves a non-media file from the music folder as a direct download.
-/// Uses the same sanitize_filename guard as uploads so path traversal is impossible.
+/// Serves a non-media file from the music folder as a download.
+/// Used by the "Other" tab for files that don't have playlist IDs.
 pub async fn download_file(
     State(state): State<SharedState>,
     Path(filename): Path<String>,
@@ -558,7 +568,7 @@ pub async fn download_file(
     let safe = sanitize_filename(&filename);
     let path = state.music_folder.join(&safe);
 
-    if !path.exists() {
+    if !path.exists() || !path.is_file() {
         return Err(StatusCode::NOT_FOUND);
     }
 
@@ -575,6 +585,91 @@ pub async fn download_file(
         )
         .body(axum::body::Body::from(data))
         .unwrap())
+}
+
+/// Zips an entire subdirectory of the music folder and serves it as a download.
+/// The zip is built in memory on a blocking thread so the async runtime isn't blocked.
+/// Directory traversal is recursive so nested folders are included in full.
+pub async fn download_folder(
+    State(state): State<SharedState>,
+    Path(foldername): Path<String>,
+) -> Result<Response, StatusCode> {
+    let safe = sanitize_filename(&foldername);
+    let path = state.music_folder.join(&safe);
+
+    if !path.exists() || !path.is_dir() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // Zip is a synchronous operation, spawn_blocking keeps the async runtime free
+    let zip_bytes = tokio::task::spawn_blocking(move || zip_directory(&path))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|e| {
+            tracing::error!("Failed to zip directory: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    tracing::info!(folder = %safe, bytes = zip_bytes.len(), "Serving folder zip");
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/zip")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}.zip\"", safe),
+        )
+        .body(axum::body::Body::from(zip_bytes))
+        .unwrap())
+}
+
+/// Walks `dir` recursively and writes every file into a zip archive held in memory.
+/// Returns the raw zip bytes on success.
+fn zip_directory(dir: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    let cursor = std::io::Cursor::new(Vec::new());
+    let mut zip = zip::ZipWriter::new(cursor);
+    zip_dir_recursive(&mut zip, dir, "")?;
+    let cursor = zip.finish().map_err(|e| std::io::Error::other(e.to_string()))?;
+    Ok(cursor.into_inner())
+}
+
+/// Adds all files under `dir` into `zip`, prefixing each archive entry with `prefix`.
+/// Called recursively for subdirectories so the full tree is preserved inside the zip.
+fn zip_dir_recursive<W: std::io::Write + std::io::Seek>(
+    zip: &mut zip::ZipWriter<W>,
+    dir: &std::path::Path,
+    prefix: &str,
+) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let options = zip::write::SimpleFileOptions::default();
+
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let meta  = entry.metadata()?;
+        let name  = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        // Build the archive-internal path, e.g. "subfolder/track.mp3"
+        let zip_path = if prefix.is_empty() {
+            name_str.to_string()
+        } else {
+            format!("{}/{}", prefix, name_str)
+        };
+
+        if meta.is_file() {
+            zip.start_file(&zip_path, options)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let data = std::fs::read(entry.path())?;
+            zip.write_all(&data)?;
+        } else if meta.is_dir() {
+            zip.add_directory(&zip_path, options)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            zip_dir_recursive(zip, &entry.path(), &zip_path)?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Returns 200 if session cookie maps to a live session, 401 otherwise.
