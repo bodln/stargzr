@@ -516,6 +516,67 @@ pub async fn get_playlist(State(state): State<SharedState>) -> impl IntoResponse
     axum::Json(medias)
 }
 
+/// Returns all non-media files in the music folder (PDFs, ZIPs, images, etc.)
+/// with their filename and size. Used by the "Other" tab in the frontend playlist.
+pub async fn get_other_files(State(state): State<SharedState>) -> impl IntoResponse {
+    #[derive(serde::Serialize)]
+    struct OtherFile {
+        filename: String,
+        size: u64,
+    }
+
+    let mut files: Vec<OtherFile> = Vec::new();
+
+    if let Ok(mut entries) = tokio::fs::read_dir(&*state.music_folder).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if let Some(name) = entry.file_name().to_str() {
+                // Only include files that are not recognized media types
+                if media_type_for(name).is_none() {
+                    if let Ok(meta) = entry.metadata().await {
+                        if meta.is_file() {
+                            files.push(OtherFile {
+                                filename: name.to_string(),
+                                size: meta.len(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    files.sort_by(|a, b| a.filename.cmp(&b.filename));
+    axum::Json(files)
+}
+
+/// Serves a non-media file from the music folder as a direct download.
+/// Uses the same sanitize_filename guard as uploads so path traversal is impossible.
+pub async fn download_file(
+    State(state): State<SharedState>,
+    Path(filename): Path<String>,
+) -> Result<Response, StatusCode> {
+    let safe = sanitize_filename(&filename);
+    let path = state.music_folder.join(&safe);
+
+    if !path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let data = tokio::fs::read(&path)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", safe),
+        )
+        .body(axum::body::Body::from(data))
+        .unwrap())
+}
+
 /// Returns 200 if session cookie maps to a live session, 401 otherwise.
 /// Called by the frontend on audio play to detect expired sessions early.
 pub async fn check_session(
@@ -735,7 +796,7 @@ pub async fn upload_file(
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     tracing::error!(stderr = %stderr, "ffmpeg conversion failed");
                     return Err(PlayerError::UploadFailed(
-                        "Video conversion failed — is the file a valid video?".into(),
+                        "Video conversion failed. Is the file a valid video?".into(),
                     ));
                 }
 
