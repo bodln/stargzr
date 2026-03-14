@@ -98,6 +98,12 @@
         <span id="progress-time-display">0:00</span>
       </div>
 
+      <!-- Listener controls: shown only while tuned into a broadcaster -->
+      <div id="radio-listener-controls" class="hidden" style="margin-top: 8px; display: flex; gap: 8px;">
+        <button id="mute-btn" onclick="window.player.toggleMute()">🔇 Mute</button>
+        <button id="resync-btn" onclick="window.player.resync()">🔄 Resync</button>
+      </div>
+
       <div class="radio-controls">
         <div class="radio-input-group">
           <input

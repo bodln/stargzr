@@ -44,6 +44,9 @@ class RadioPlayer {
     // Debounce timer for incoming Sync messages
     this.syncTimer = null;
 
+    // Whether the listener has manually muted their own audio
+    this.isMuted = false;
+
     debugLog(`Initialized with session ID: ${sessionId}`);
     this.setupPageVisibilityHandling();
   }
@@ -444,6 +447,9 @@ class RadioPlayer {
         isVideo:     snapMedia?.media_type === "video",
       };
       debugLog(`Saved pre-radio state: ${this.preRadioSnapshot.src} @ ${this.preRadioSnapshot.currentTime.toFixed(2)}s`);
+
+      // Show listener controls when first entering radio mode
+      document.getElementById("radio-listener-controls")?.classList.remove("hidden");
     }
 
     this.mode            = "radio";
@@ -478,6 +484,17 @@ class RadioPlayer {
     document.getElementById("broadcast-progress").classList.add("hidden");
     document.getElementById("progress-bar-fill").style.width = "0%";
     document.getElementById("progress-time-display").textContent = "0:00";
+
+    // Hide listener controls and reset mute state
+    document.getElementById("radio-listener-controls")?.classList.add("hidden");
+    this.isMuted = false;
+    const allMediaEls = [
+      document.getElementById("audio-player"),
+      document.getElementById("video-player"),
+    ].filter(Boolean);
+    allMediaEls.forEach(el => el.muted = false);
+    const muteBtn = document.getElementById("mute-btn");
+    if (muteBtn) muteBtn.textContent = "🔇 Mute";
 
     // Restore private playback state from before tuning in
     if (this.preRadioSnapshot) {
@@ -619,6 +636,41 @@ class RadioPlayer {
     document.getElementById("broadcast-status").classList.toggle("hidden",    !isBroadcasting);
     document.getElementById("broadcast-btn").classList.toggle("hidden",        isBroadcasting);
     document.getElementById("stop-broadcast-btn").classList.toggle("hidden",  !isBroadcasting);
+  }
+
+  // Toggles mute on all media elements so switching audio/video mid-session
+  // doesn't silently restore sound. Button label reflects current state.
+  toggleMute() {
+    this.isMuted = !this.isMuted;
+    const allMediaEls = [
+      document.getElementById("audio-player"),
+      document.getElementById("video-player"),
+    ].filter(Boolean);
+    allMediaEls.forEach(el => el.muted = this.isMuted);
+    const btn = document.getElementById("mute-btn");
+    if (btn) btn.textContent = this.isMuted ? "🔊 Unmute" : "🔇 Mute";
+    debugLog(`Audio ${this.isMuted ? "muted" : "unmuted"}`);
+  }
+
+  // Re-sends TuneIn to the current broadcaster so the server issues a fresh
+  // Sync with the broadcaster's live position. Useful when drift accumulates
+  // or after a network hiccup that didn't fully drop the WebSocket.
+  resync() {
+    if (!this.tunedBroadcaster || this.mode !== "radio") return;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      debugLog("WebSocket not ready for resync");
+      return;
+    }
+    debugLog("Resyncing to broadcaster position...");
+    // Clear any stale loading state so the incoming Sync is handled cleanly
+    this._loadingMediaIndex = null;
+    this._pendingSeekTime   = 0;
+    this._pendingIsPlaying  = false;
+    this.pendingAutoNextIndex = null;
+    this.pendingAutoNextTime  = 0;
+    // Set tuneInSentAt so latency compensation runs on the fresh Sync
+    this._tuneInSentAt = Date.now();
+    this.ws.send(JSON.stringify({ type: "TuneIn", broadcaster_id: this.tunedBroadcaster }));
   }
 
   // Returns the server's numeric index for the currently playing media
