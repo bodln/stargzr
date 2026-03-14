@@ -12,6 +12,11 @@ class PlaylistManager {
 
     // "all" | "audio" | "video" | "other" — gates next/prev navigation only, never blocks direct play
     this.mediaFilter = "all";
+
+    // Persists folder download state across render() calls so status survives
+    // filter switches and playlist reloads. Keys are folder filenames,
+    // values are: "zipping" | "downloading" | "done" | "failed"
+    this.folderDownloadStates = new Map();
   }
 
   async loadPlaylist() {
@@ -186,19 +191,31 @@ class PlaylistManager {
           const badgeClass = f.is_dir ? "folder" : "other";
 
           if (f.is_dir) {
-            // Folders must be zipped server-side first which can take a while for large
-            // directories. Use a button that shows a status message while waiting instead
-            // of a plain <a> that gives no feedback until the browser receives the first byte.
+            // Folders must be zipped server-side first which can take a while.
+            // State is stored in this.folderDownloadStates so it survives
+            // render() calls caused by filter switches or playlist reloads.
+            const dlState  = this.folderDownloadStates.get(f.filename);
+            const busy     = dlState === "zipping" || dlState === "downloading";
+            const statusLabels = {
+              zipping:     "⏳ Zipping...",
+              downloading: "📥 Downloading...",
+              done:        "✔ Done",
+              failed:      "✗ Failed",
+            };
+            const statusText  = statusLabels[dlState] ?? "";
+            const statusColor = dlState === "failed" ? "#dc3545"
+                              : dlState === "done"   ? "#28a745"
+                              : "#888";
             return `
-              <div class="playlist-item" id="folder-item-${CSS.escape(f.filename)}">
+              <div class="playlist-item">
                 <span class="media-badge ${badgeClass}">${icon}</span>
                 <span class="media-name"><span class="media-text">${f.filename}</span></span>
                 <span style="font-size:11px;color:#888;margin-left:4px;flex-shrink:0">${sizeStr}</span>
-                <span id="folder-zip-status-${CSS.escape(f.filename)}" style="font-size:11px;color:#888;margin-left:8px;flex-shrink:0"></span>
+                <span style="font-size:11px;color:${statusColor};margin-left:8px;flex-shrink:0">${statusText}</span>
                 <button class="action-btn download-btn"
-                        id="folder-dl-btn-${CSS.escape(f.filename)}"
-                        onclick="downloadFolder('${f.filename.replace(/'/g, "\\'")}')"
-                        title="Download ${f.filename} as zip">&#11015;</button>
+                        onclick="downloadFolder('${f.filename.replace(/'/g, "\'")}')"
+                        title="Download ${f.filename} as zip"
+                        ${busy ? "disabled" : ""}>&#11015;</button>
               </div>
             `;
           }
@@ -604,31 +621,33 @@ function resetPlaylistOrder() {
   }
 }
 
-// Triggers a folder zip download with accurate status feedback.
-// The server must finish zipping before it sends a single byte, so we use
-// fetch() to wait for the complete response. The "Zipping..." label stays up
-// for exactly as long as the server is actually working, then flips to
-// "Downloading..." while the blob is being saved, then clears when done.
-// A hidden <a> with a blob URL is the only way to trigger Save-As from JS
-// without navigating away from the page.
+// Triggers a folder zip download with status that persists across filter
+// changes and render() calls. State is stored on PlaylistManager so any
+// re-render can read it and reconstruct the correct label and button state.
 async function downloadFolder(filename) {
-  const escapedId = CSS.escape(filename);
-  const btn       = document.getElementById(`folder-dl-btn-${escapedId}`);
-  const status    = document.getElementById(`folder-zip-status-${escapedId}`);
+  const pm = window.playlistManager;
 
-  if (btn)    { btn.disabled = true; btn.textContent = "⏳"; }
-  if (status) status.textContent = "Zipping...";
+  // Ignore clicks while a download for this folder is already in progress
+  const current = pm.folderDownloadStates.get(filename);
+  if (current === "zipping" || current === "downloading") return;
+
+  const setState = (state) => {
+    pm.folderDownloadStates.set(filename, state);
+    // Re-render only the Other tab if it's visible; otherwise the state
+    // will be picked up automatically the next time the tab is opened
+    if (pm.mediaFilter === "other") pm.render(true);
+  };
+
+  setState("zipping");
   debugLog(`Zipping folder "${filename}", waiting for server...`);
 
   try {
     const resp = await fetch(`/stargzr/player/download-folder/${encodeURIComponent(filename)}`);
 
-    if (!resp.ok) {
-      throw new Error(`Server returned ${resp.status}`);
-    }
+    if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
 
-    // Server is done zipping — now we're just pulling bytes over the network
-    if (status) status.textContent = "Downloading...";
+    // Server finished zipping — now pulling bytes over the network
+    setState("downloading");
     debugLog(`Folder "${filename}" zipped, downloading...`);
 
     const blob = await resp.blob();
@@ -644,12 +663,16 @@ async function downloadFolder(filename) {
     // Revoke the blob URL after a short delay so the browser can release the memory
     setTimeout(() => URL.revokeObjectURL(url), 10000);
 
+    setState("done");
     debugLog(`Folder "${filename}" download complete`);
   } catch (err) {
     debugLog(`Folder download failed: ${err.message}`);
-    if (status) status.textContent = "Failed";
+    setState("failed");
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = "⬇"; }
-    setTimeout(() => { if (status) status.textContent = ""; }, 3000);
+    // Clear the status after a few seconds so the row goes back to normal
+    setTimeout(() => {
+      pm.folderDownloadStates.delete(filename);
+      if (pm.mediaFilter === "other") pm.render(true);
+    }, 3000);
   }
 }
