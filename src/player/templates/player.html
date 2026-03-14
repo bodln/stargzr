@@ -184,6 +184,12 @@
         >
           🔄 Reset to Default Order
         </button>
+        <button
+          onclick="window.playlistManager.loadPlaylist()"
+          style="font-size: 14px; padding: 8px 12px; margin-left: 6px"
+        >
+          🔃 Refresh
+        </button>
         <div class="search-row" style="margin-top: 10px">
           <input
             type="text"
@@ -194,6 +200,11 @@
           <div id="search-results" class="search-results hidden"></div>
         </div>
       </div>
+
+      <!-- Filter bar rendered here by renderFilterBar() in playlist.js,
+           outside the scrollable playlist-display so it stays fixed above the list -->
+      <div id="playlist-filter-bar"></div>
+
       <div id="playlist-display">
         <div class="loading">Loading playlist...</div>
       </div>
