@@ -28,12 +28,20 @@ document.getElementById("upload-btn").addEventListener("click", async () => {
 
     xhr.addEventListener("load", async () => {
       if (xhr.status === 200) {
-        status.textContent = "Upload successful, refreshing playlist...";
-        status.style.color = "#28a745";
-        bar.style.width    = "100%";
-        input.value        = "";
+        bar.style.width = "100%";
+        input.value = "";
         await window.playlistManager.loadPlaylist();
-        status.textContent = "Upload complete.";
+
+        // Server returns an empty body on full success, or newline-separated
+        // per-file error messages when some files in the batch failed
+        const warnings = xhr.responseText.trim();
+        if (warnings) {
+          status.textContent = "Some files failed:\n" + warnings;
+          status.style.color = "#ffc107";
+        } else {
+          status.textContent = "Upload complete.";
+          status.style.color = "#28a745";
+        }
       } else {
         status.textContent = xhr.responseText || "Upload failed.";
         status.style.color = "#dc3545";
