@@ -17,6 +17,9 @@ class PlaylistManager {
     // filter switches and playlist reloads. Keys are folder filenames,
     // values are: "zipping" | "downloading" | "done" | "failed"
     this.folderDownloadStates = new Map();
+    // Same as folderDownloadStates but for plain file downloads.
+    // Values are: "starting" | "failed"
+    this.fileDownloadStates = new Map();
   }
 
   async loadPlaylist() {
@@ -191,44 +194,45 @@ class PlaylistManager {
           const badgeClass = f.is_dir ? "folder" : "other";
 
           if (f.is_dir) {
-            // Folders must be zipped server-side first which can take a while.
-            // State is stored in this.folderDownloadStates so it survives
-            // render() calls caused by filter switches or playlist reloads.
-            const dlState  = this.folderDownloadStates.get(f.filename);
-            const busy     = dlState === "zipping" || dlState === "downloading";
-            const statusLabels = {
-              zipping:     "⏳ Zipping...",
-              downloading: "📥 Downloading...",
-              done:        "✔ Done",
-              failed:      "✗ Failed",
-            };
-            const statusText  = statusLabels[dlState] ?? "";
-            const statusColor = dlState === "failed" ? "#dc3545"
-                              : dlState === "done"   ? "#28a745"
-                              : "#888";
+            // Folders over 1500 MB cannot be zipped (server rejects with 413)
+            const TOO_LARGE = 1500 * 1024 * 1024;
+            const tooBig    = f.size > TOO_LARGE && f.size > 0;
+            const dlState   = this.folderDownloadStates.get(f.filename);
+            const busy      = dlState === "zipping";
+            const statusLabels = { zipping: "⏳ Zipping...", done: "✔ Done", failed: "✗ Failed" };
+            const statusText   = statusLabels[dlState] ?? "";
+            const statusColor  = dlState === "failed" ? "#dc3545" : dlState === "done" ? "#28a745" : "#888";
             return `
               <div class="playlist-item">
                 <span class="media-badge ${badgeClass}">${icon}</span>
                 <span class="media-name"><span class="media-text">${f.filename}</span></span>
                 <span style="font-size:11px;color:#888;margin-left:4px;flex-shrink:0">${sizeStr}</span>
                 <span style="font-size:11px;color:${statusColor};margin-left:8px;flex-shrink:0">${statusText}</span>
-                <button class="action-btn download-btn"
-                        onclick="downloadFolder('${f.filename.replace(/'/g, "\'")}')"
-                        title="Download ${f.filename} as zip"
-                        ${busy ? "disabled" : ""}>&#11015;</button>
+                ${tooBig
+                  ? `<span style="font-size:11px;color:#dc3545;flex-shrink:0" title="Folders over 1500 MB cannot be zipped">&#128683; Too large</span>`
+                  : `<button class="action-btn download-btn"
+                            onclick="downloadFolder('${f.filename.replace(/'/g, "\'")}')"
+                            title="Download ${f.filename} as zip"
+                            ${busy ? "disabled" : ""}>&#11015;</button>`
+                }
               </div>
             `;
           }
 
+          const fileState = this.fileDownloadStates.get(f.filename);
+          const fileColor = fileState === "failed"   ? "#dc3545"
+                          : fileState === "starting" ? "#007bff" : "#888";
+          const fileLabel = fileState === "starting" ? "⬇ Starting..."
+                          : fileState === "failed"   ? "✗ Failed" : "";
           return `
             <div class="playlist-item">
               <span class="media-badge ${badgeClass}">${icon}</span>
               <span class="media-name"><span class="media-text">${f.filename}</span></span>
               <span style="font-size:11px;color:#888;margin-left:4px;flex-shrink:0">${sizeStr}</span>
-              <a class="action-btn download-btn"
-                 href="/stargzr/player/download/${encodeURIComponent(f.filename)}"
-                 download="${f.filename}"
-                 title="Download ${f.filename}">&#11015;</a>
+              <span style="font-size:11px;color:${fileColor};margin-left:8px;flex-shrink:0">${fileLabel}</span>
+              <button class="action-btn download-btn"
+              onclick="downloadFile('${f.filename.replace(/'/g, String.fromCharCode(39))}')"
+                      title="Download ${f.filename}">&#11015;</button>
             </div>
           `;
         })
@@ -621,58 +625,74 @@ function resetPlaylistOrder() {
   }
 }
 
-// Triggers a folder zip download with status that persists across filter
-// changes and render() calls. State is stored on PlaylistManager so any
-// re-render can read it and reconstruct the correct label and button state.
+// Triggers a folder zip download.
+// The server zips the folder to a temp file then streams it directly to the
+// browser's download manager, no JS memory involved, works for any size up
+// to the 2000 MB server-side limit.
+// Status is stored on PlaylistManager so it survives filter switches.
 async function downloadFolder(filename) {
   const pm = window.playlistManager;
 
-  // Ignore clicks while a download for this folder is already in progress
   const current = pm.folderDownloadStates.get(filename);
-  if (current === "zipping" || current === "downloading") return;
+  if (current === "zipping") return;
 
   const setState = (state) => {
     pm.folderDownloadStates.set(filename, state);
-    // Re-render only the Other tab if it's visible; otherwise the state
-    // will be picked up automatically the next time the tab is opened
     if (pm.mediaFilter === "other") pm.render(true);
   };
 
   setState("zipping");
-  debugLog(`Zipping folder "${filename}", waiting for server...`);
+  debugLog(`Zipping "${filename}", waiting for server...`);
 
-  try {
-    const resp = await fetch(`/stargzr/player/download-folder/${encodeURIComponent(filename)}`);
+  // Fire a hidden <a> to the download endpoint. The browser will show the
+  // Save-As dialog once the server starts streaming (after zipping finishes).
+  // We can't know exactly when that happens from JS, so we show "Zipping..."
+  // for a fixed window then clear it. The download itself continues in the
+  // browser's own download manager regardless.
+  const a    = document.createElement("a");
+  a.href     = `/stargzr/player/download-folder/${encodeURIComponent(filename)}`;
+  a.download = `${filename}.zip`;
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
 
-    if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
-
-    // Server finished zipping — now pulling bytes over the network
-    setState("downloading");
-    debugLog(`Folder "${filename}" zipped, downloading...`);
-
-    const blob = await resp.blob();
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement("a");
-    a.href     = url;
-    a.download = `${filename}.zip`;
-    a.style.display = "none";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-
-    // Revoke the blob URL after a short delay so the browser can release the memory
-    setTimeout(() => URL.revokeObjectURL(url), 10000);
-
+  // The server responds with 413 if the folder is too large. We can't easily
+  // intercept that from a navigation click, so the too-large guard in render()
+  // (hiding the button) is the primary defence. The status clears after the
+  // typical zip time so the button becomes usable again if they retry.
+  setTimeout(() => {
     setState("done");
-    debugLog(`Folder "${filename}" download complete`);
-  } catch (err) {
-    debugLog(`Folder download failed: ${err.message}`);
-    setState("failed");
-  } finally {
-    // Clear the status after a few seconds so the row goes back to normal
     setTimeout(() => {
       pm.folderDownloadStates.delete(filename);
       if (pm.mediaFilter === "other") pm.render(true);
-    }, 3000);
-  }
+    }, 2000);
+  }, 4000);
+}
+
+
+// Triggers an immediate download of a plain file (no server-side processing needed).
+// Uses a direct <a> navigation so the browser's Save-As dialog appears instantly —
+// no buffering, no waiting. Status flashes "Starting..." briefly so the user knows
+// the click registered, then clears after a couple of seconds.
+function downloadFile(filename) {
+  const pm = window.playlistManager;
+
+  pm.fileDownloadStates.set(filename, "starting");
+  if (pm.mediaFilter === "other") pm.render(true);
+  debugLog(`Starting download: "${filename}"`);
+
+  const a    = document.createElement("a");
+  a.href     = `/stargzr/player/download/${encodeURIComponent(filename)}`;
+  a.download = filename;
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+
+  // Clear status after a short delay — the browser has taken over by then
+  setTimeout(() => {
+    pm.fileDownloadStates.delete(filename);
+    if (pm.mediaFilter === "other") pm.render(true);
+  }, 2000);
 }
