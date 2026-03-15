@@ -21,6 +21,9 @@ window.switchMediaElement = function switchMediaElement(toVideo) {
   outgoing.src = "";
   outgoing.classList.add("hidden");
 
+  // Reset so a seek on the outgoing element never blocks the incoming one
+  seekPending = false;
+
   incoming.classList.remove("hidden");
   window._activeMedia = incoming;
 
@@ -155,14 +158,55 @@ function wireMediaEvents(el) {
         alert("Your session has expired. Please refresh the page.");
       }
     } catch (_) {}
+
+    // Update OS notification with current track title whenever playback starts,
+    // including the initial page load where audio starts via the <source> tag
+    // rather than through playMedia, so metadata would otherwise never be set
+    const currentId = window.playlistManager?.currentMediaId;
+    if (currentId) {
+      const m = window.playlistManager?.medias?.find((s) => s.id === currentId);
+      if (m) window.updateMediaSession?.(m.filename);
+    }
   });
 }
 
 wireMediaEvents(audioEl);
 wireMediaEvents(videoEl);
 
-// ─── Core instances ────────────────────────────────────────────────────────────────────────────────
+// ─── Media Session API ────────────────────────────────────────────────────────────────────────────────
+//
+// Registers the current track with the browser's media session so the OS
+// lock screen and notification shade display the title and respond to
+// next/prev controls. Next and prev are disabled in radio mode since
+// the listener cannot control the broadcaster's playback.
+//
+// Action handlers are registered once here at startup so the OS never loses
+// them between track changes. Only the metadata is updated per track.
 
+if ("mediaSession" in navigator) {
+  navigator.mediaSession.setActionHandler("play",  () => window._activeMedia?.play());
+  navigator.mediaSession.setActionHandler("pause", () => window._activeMedia?.pause());
+  navigator.mediaSession.setActionHandler("nexttrack", () => {
+    if (window.player?.isInRadioMode()) return;
+    window.playlistManager?.playNext();
+  });
+  navigator.mediaSession.setActionHandler("previoustrack", () => {
+    if (window.player?.isInRadioMode()) return;
+    window.playlistManager?.playPrev();
+  });
+}
+
+window.updateMediaSession = function updateMediaSession(filename) {
+  if (!("mediaSession" in navigator)) return;
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title:  filename,
+    artist: "stargzr",
+  });
+  // Keeps the OS notification visible during the gap between load() and canplay
+  navigator.mediaSession.playbackState = "playing";
+};
+
+// ─── Core instances ────────────────────────────────────────────────────────────────────────────────
 const sessionId = document.getElementById("my-session-id").textContent;
 const player = new RadioPlayer(audioEl, sessionId);
 const playlistManager = new PlaylistManager(sessionId);

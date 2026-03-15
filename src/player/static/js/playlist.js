@@ -45,6 +45,13 @@ class PlaylistManager {
       } catch (e) {
         debugLog(`syncCurrentFromAudio: ${e.message}`);
       }
+
+      // Update the OS media session for the track that was already playing on page load
+      if (this.currentMediaId) {
+        const m = this.medias.find((s) => s.id === this.currentMediaId);
+        if (m) window.updateMediaSession?.(m.filename);
+      }
+
       this.renderFilterBar();
       this.render();
     } catch (err) {
@@ -208,8 +215,8 @@ class PlaylistManager {
           const badgeClass = f.is_dir ? "folder" : "other";
 
           if (f.is_dir) {
-            // Folders over 1500 MB cannot be zipped (server rejects with 413)
-            const TOO_LARGE = 1500 * 1024 * 1024;
+            // Folders over 2000 MB cannot be zipped (server rejects with 413)
+            const TOO_LARGE = 2000 * 1024 * 1024;
             const tooBig = f.size > TOO_LARGE && f.size > 0;
             const dlState = this.folderDownloadStates.get(f.filename);
             const busy = dlState === "zipping";
@@ -602,6 +609,7 @@ class PlaylistManager {
     );
     const overlay = document.getElementById("video-loading-overlay");
 
+    // Show overlay while the browser parses the moov atom on large video files
     if (isVid && overlay) {
       const rect = active.getBoundingClientRect();
       overlay.style.position = "fixed";
@@ -638,6 +646,10 @@ class PlaylistManager {
       },
       { once: true },
     );
+
+    // Register with the OS media session so lock screen and notification
+    // shade controls show the correct title and fire next/prev here
+    if (media) window.updateMediaSession?.(media.filename);
 
     if (media) {
       const mediaIndex = this.medias.findIndex((s) => s.id === mediaId);
