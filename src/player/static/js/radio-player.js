@@ -335,7 +335,7 @@ class RadioPlayer {
 
         this.audio.addEventListener("canplay", () => {
           this.audio.currentTime = seekTo;
-          this.audio.play();
+          this._radioPlay();
         }, { once: true });
 
         debugLog(`AutoNext: switched to media index ${idx} at ${seekTo.toFixed(2)}s after local track ended`);
@@ -410,13 +410,13 @@ class RadioPlayer {
           const seekTo = this._pendingSeekTime < 1.0 ? 0 : this._pendingSeekTime;
           debugLog(`canplay, seeking to ${seekTo.toFixed(2)}s (broadcaster at ${this._pendingSeekTime.toFixed(2)}s)`);
           this.audio.currentTime = seekTo;
-          if (this._pendingIsPlaying) this.audio.play();
+          if (this._pendingIsPlaying) this._radioPlay();
         }, { once: true });
       }
     } else {
       this._loadingMediaIndex = null;
       this.audio.currentTime = playback_time;
-      if (is_playing)  this.audio.play();
+      if (is_playing)  this._radioPlay();
       if (!is_playing && !this.audio.paused) this.audio.pause();
     }
   }
@@ -450,6 +450,17 @@ class RadioPlayer {
 
       // Show listener controls when first entering radio mode
       document.getElementById("radio-listener-controls")?.classList.remove("hidden");
+
+      // Unmute on tune in whatever mute state the user had in private mode
+      // does not carry over into radio mode. The mute button starts fresh.
+      this.isMuted = false;
+      const allMediaEls = [
+        document.getElementById("audio-player"),
+        document.getElementById("video-player"),
+      ].filter(Boolean);
+      allMediaEls.forEach(el => el.muted = false);
+      const muteBtn = document.getElementById("mute-btn");
+      if (muteBtn) muteBtn.textContent = "🔇 Mute";
 
       // Move the resync button next to whichever element is active and show it
       const resyncBtn = document.getElementById("media-resync-btn");
@@ -646,18 +657,28 @@ class RadioPlayer {
     document.getElementById("stop-broadcast-btn").classList.toggle("hidden",  !isBroadcasting);
   }
 
-  // Toggles mute on all media elements so switching audio/video mid-session
-  // doesn't silently restore sound. Button label reflects current state.
+  // Wrapper around play() used by all radio playback paths.
+  // Ensures the element is unmuted and isMuted/button are reset before
+  // the browser outputs any audio, this is the last possible moment to
+  // correct a muted state that carried over from private mode or from
+  // load() resetting the element.
+  _radioPlay() {
+    if (this.audio.muted) {
+      this.audio.muted = false;
+      this.isMuted = false;
+      const btn = document.getElementById("mute-btn");
+      if (btn) btn.textContent = "🔇 Mute";
+      debugLog("Corrected muted state before radio playback");
+    }
+    this.audio.play();
+  }
+
+  // Toggles mute on the active element. The volumechange listener in main.js
+  // mirrors the state to the other element, updates this.isMuted, and updates
+  // the button label, so this only needs to flip the element's muted property.
   toggleMute() {
-    this.isMuted = !this.isMuted;
-    const allMediaEls = [
-      document.getElementById("audio-player"),
-      document.getElementById("video-player"),
-    ].filter(Boolean);
-    allMediaEls.forEach(el => el.muted = this.isMuted);
-    const btn = document.getElementById("mute-btn");
-    if (btn) btn.textContent = this.isMuted ? "🔊 Unmute" : "🔇 Mute";
-    debugLog(`Audio ${this.isMuted ? "muted" : "unmuted"}`);
+    this.audio.muted = !this.audio.muted;
+    debugLog(`Audio ${this.audio.muted ? "muted" : "unmuted"}`);
   }
 
   // Re-sends TuneIn to the current broadcaster so the server issues a fresh
