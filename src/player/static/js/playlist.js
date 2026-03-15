@@ -30,21 +30,29 @@ class PlaylistManager {
         fetch("/stargzr/player/other-files"),
       ]);
       const serverMedias = await mediaResp.json();
-      this.otherFiles    = await otherResp.json();
+      this.otherFiles = await otherResp.json();
       this.originalMedias = serverMedias;
       this.medias = [...serverMedias];
-      debugLog(`Loaded ${this.medias.length} medias, ${this.otherFiles.length} other file(s)`);
+      debugLog(
+        `Loaded ${this.medias.length} medias, ${this.otherFiles.length} other file(s)`,
+      );
       this.loadCustomOrder();
       // Sync currentMediaId from whatever is actually playing right now.
       // This handles page load where audio src is set server-side and the
       // playlist manager doesn't know about it yet.
-      try { this.syncCurrentFromAudio(); } catch (e) { debugLog(`syncCurrentFromAudio: ${e.message}`); }
+      try {
+        this.syncCurrentFromAudio();
+      } catch (e) {
+        debugLog(`syncCurrentFromAudio: ${e.message}`);
+      }
       this.renderFilterBar();
       this.render();
     } catch (err) {
       debugLog(`Failed to load playlist: ${err.message}`);
       const c = document.getElementById("playlist-display");
-      if (c) c.innerHTML = '<div class="loading" style="color:#dc3545">Failed to load playlist. Check the debug log.</div>';
+      if (c)
+        c.innerHTML =
+          '<div class="loading" style="color:#dc3545">Failed to load playlist. Check the debug log.</div>';
     }
   }
 
@@ -66,23 +74,27 @@ class PlaylistManager {
     // Reading the <source> attribute directly is the reliable fallback.
     // el.src on an audio with a <source> child returns the document URL, so
     // we only use it if it actually contains a stream path.
-    const rawSrc   = (el.currentSrc || el.src || "");
+    const rawSrc = el.currentSrc || el.src || "";
     const srcToCheck = rawSrc.includes("/stream/")
       ? rawSrc
-      : (el.querySelector?.("source")?.getAttribute("src") || "");
+      : el.querySelector?.("source")?.getAttribute("src") || "";
 
-    const idMatch    = srcToCheck.match(/\/stream\/id\/([^/?]+)/);
+    const idMatch = srcToCheck.match(/\/stream\/id\/([^/?]+)/);
     const indexMatch = srcToCheck.match(/\/stream\/(\d+)(?:[^/]|$)/);
 
     if (idMatch) {
       this.currentMediaId = idMatch[1];
-      debugLog(`Synced current media from audio src (id): ${this.currentMediaId}`);
+      debugLog(
+        `Synced current media from audio src (id): ${this.currentMediaId}`,
+      );
     } else if (indexMatch) {
       const index = parseInt(indexMatch[1]);
       const media = this.originalMedias[index];
       if (media) {
         this.currentMediaId = media.id;
-        debugLog(`Synced current media from audio src (index ${index}): ${media.filename}`);
+        debugLog(
+          `Synced current media from audio src (index ${index}): ${media.filename}`,
+        );
       }
     }
   }
@@ -95,7 +107,9 @@ class PlaylistManager {
     }
     try {
       const orderIds = JSON.parse(savedOrder);
-      const validIds = orderIds.filter((id) => this.medias.some((s) => s.id === id));
+      const validIds = orderIds.filter((id) =>
+        this.medias.some((s) => s.id === id),
+      );
       const orderedMedias = [];
       validIds.forEach((id) => {
         const media = this.medias.find((s) => s.id === id);
@@ -148,7 +162,7 @@ class PlaylistManager {
   _filteredMedias() {
     if (this.mediaFilter === "all") return this.medias;
     return this.medias.filter((m) =>
-      this.mediaFilter === "video" ? this.isVideo(m) : !this.isVideo(m)
+      this.mediaFilter === "video" ? this.isVideo(m) : !this.isVideo(m),
     );
   }
 
@@ -158,12 +172,12 @@ class PlaylistManager {
     const bar = document.getElementById("playlist-filter-bar");
     if (!bar) return;
     const audioCount = this.medias.filter((m) => !this.isVideo(m)).length;
-    const videoCount = this.medias.filter((m) =>  this.isVideo(m)).length;
+    const videoCount = this.medias.filter((m) => this.isVideo(m)).length;
     const otherCount = this.otherFiles.length;
     bar.innerHTML = `
       <div class="playlist-filter-bar">
         <span class="filter-label">Navigate:</span>
-        <button class="filter-btn ${this.mediaFilter === "all"   ? "active" : ""}" onclick="window.playlistManager.setMediaFilter('all')">All (${this.medias.length})</button>
+        <button class="filter-btn ${this.mediaFilter === "all" ? "active" : ""}" onclick="window.playlistManager.setMediaFilter('all')">All (${this.medias.length})</button>
         <button class="filter-btn ${this.mediaFilter === "audio" ? "active" : ""}" onclick="window.playlistManager.setMediaFilter('audio')">&#127925; Audio (${audioCount})</button>
         <button class="filter-btn ${this.mediaFilter === "video" ? "active" : ""}" onclick="window.playlistManager.setMediaFilter('video')">&#127909; Video (${videoCount})</button>
         <button class="filter-btn ${this.mediaFilter === "other" ? "active" : ""}" onclick="window.playlistManager.setMediaFilter('other')">&#128196; Other (${otherCount})</button>
@@ -196,21 +210,31 @@ class PlaylistManager {
           if (f.is_dir) {
             // Folders over 1500 MB cannot be zipped (server rejects with 413)
             const TOO_LARGE = 1500 * 1024 * 1024;
-            const tooBig    = f.size > TOO_LARGE && f.size > 0;
-            const dlState   = this.folderDownloadStates.get(f.filename);
-            const busy      = dlState === "zipping";
-            const statusLabels = { zipping: "⏳ Zipping...", done: "✔ Done", failed: "✗ Failed" };
-            const statusText   = statusLabels[dlState] ?? "";
-            const statusColor  = dlState === "failed" ? "#dc3545" : dlState === "done" ? "#28a745" : "#888";
+            const tooBig = f.size > TOO_LARGE && f.size > 0;
+            const dlState = this.folderDownloadStates.get(f.filename);
+            const busy = dlState === "zipping";
+            const statusLabels = {
+              zipping: "⏳ Zipping...",
+              done: "✔ Done",
+              failed: "✗ Failed",
+            };
+            const statusText = statusLabels[dlState] ?? "";
+            const statusColor =
+              dlState === "failed"
+                ? "#dc3545"
+                : dlState === "done"
+                  ? "#28a745"
+                  : "#888";
             return `
               <div class="playlist-item">
                 <span class="media-badge ${badgeClass}">${icon}</span>
                 <span class="media-name"><span class="media-text">${f.filename}</span></span>
                 <span style="font-size:11px;color:#888;margin-left:4px;flex-shrink:0">${sizeStr}</span>
                 <span style="font-size:11px;color:${statusColor};margin-left:8px;flex-shrink:0">${statusText}</span>
-                ${tooBig
-                  ? `<span style="font-size:11px;color:#dc3545;flex-shrink:0" title="Folders over 1500 MB cannot be zipped">&#128683; Too large</span>`
-                  : `<button class="action-btn download-btn"
+                ${
+                  tooBig
+                    ? `<span style="font-size:11px;color:#dc3545;flex-shrink:0" title="Folders over 1500 MB cannot be zipped">&#128683; Too large</span>`
+                    : `<button class="action-btn download-btn"
                             onclick="downloadFolder('${f.filename.replace(/'/g, "\'")}')"
                             title="Download ${f.filename} as zip"
                             ${busy ? "disabled" : ""}>&#11015;</button>`
@@ -220,10 +244,18 @@ class PlaylistManager {
           }
 
           const fileState = this.fileDownloadStates.get(f.filename);
-          const fileColor = fileState === "failed"   ? "#dc3545"
-                          : fileState === "starting" ? "#007bff" : "#888";
-          const fileLabel = fileState === "starting" ? "⬇ Starting..."
-                          : fileState === "failed"   ? "✗ Failed" : "";
+          const fileColor =
+            fileState === "failed"
+              ? "#dc3545"
+              : fileState === "starting"
+                ? "#007bff"
+                : "#888";
+          const fileLabel =
+            fileState === "starting"
+              ? "⬇ Starting..."
+              : fileState === "failed"
+                ? "✗ Failed"
+                : "";
           return `
             <div class="playlist-item">
               <span class="media-badge ${badgeClass}">${icon}</span>
@@ -245,19 +277,21 @@ class PlaylistManager {
       return;
     }
 
-    const inRadio    = window.player?.isInRadioMode() ?? false;
+    const inRadio = window.player?.isInRadioMode() ?? false;
     const audioCount = this.medias.filter((m) => !this.isVideo(m)).length;
-    const videoCount = this.medias.filter((m) =>  this.isVideo(m)).length;
+    const videoCount = this.medias.filter((m) => this.isVideo(m)).length;
 
     const items = this.medias
       .map((media, index) => {
         const isPlaying = media.id === this.currentMediaId;
-        const isVid     = this.isVideo(media);
+        const isVid = this.isVideo(media);
         // Small badge so the user can tell audio and video apart at a glance
-        const badge     = `<span class="media-badge ${isVid ? "video" : "audio"}">${isVid ? "&#127909;" : "&#127925;"}</span>`;
+        const badge = `<span class="media-badge ${isVid ? "video" : "audio"}">${isVid ? "&#127909;" : "&#127925;"}</span>`;
         // Items filtered out of the navigation mode are hidden from the list.
         // Direct play is still possible by switching back to All.
-        const filtered  = this.mediaFilter !== "all" && (this.mediaFilter === "video") !== isVid;
+        const filtered =
+          this.mediaFilter !== "all" &&
+          (this.mediaFilter === "video") !== isVid;
         if (filtered) return "";
         return `
           <div class="playlist-item ${isPlaying ? "current-playing" : ""} ${isVid ? "is-video" : ""}"
@@ -286,11 +320,16 @@ class PlaylistManager {
       })
       .join("");
 
-    const hiddenCount = this.mediaFilter === "all" ? 0
-      : this.medias.filter((m) => (this.mediaFilter === "video") !== this.isVideo(m)).length;
-    const hiddenNote = hiddenCount > 0
-      ? `<div class="playlist-hidden-note">${hiddenCount} item${hiddenCount > 1 ? "s" : ""} hidden — switch to All to see them</div>`
-      : "";
+    const hiddenCount =
+      this.mediaFilter === "all"
+        ? 0
+        : this.medias.filter(
+            (m) => (this.mediaFilter === "video") !== this.isVideo(m),
+          ).length;
+    const hiddenNote =
+      hiddenCount > 0
+        ? `<div class="playlist-hidden-note">${hiddenCount} item${hiddenCount > 1 ? "s" : ""} hidden — switch to All to see them</div>`
+        : "";
 
     container.innerHTML = items + hiddenNote;
 
@@ -301,9 +340,9 @@ class PlaylistManager {
   setupDragAndDrop() {
     document.querySelectorAll(".playlist-item").forEach((item) => {
       item.addEventListener("dragstart", this.handleDragStart.bind(this));
-      item.addEventListener("dragover",  this.handleDragOver.bind(this));
-      item.addEventListener("drop",      this.handleDrop.bind(this));
-      item.addEventListener("dragend",   this.handleDragEnd.bind(this));
+      item.addEventListener("dragover", this.handleDragOver.bind(this));
+      item.addEventListener("drop", this.handleDrop.bind(this));
+      item.addEventListener("dragend", this.handleDragEnd.bind(this));
     });
 
     // Marquee: scroll overflowing media names on hover
@@ -325,10 +364,20 @@ class PlaylistManager {
 
     // Mobile: touch events only on the handle
     document.querySelectorAll(".drag-handle").forEach((handle) => {
-      handle.addEventListener("touchstart",  this.handleTouchStart.bind(this),  { passive: false });
-      handle.addEventListener("touchmove",   this.handleTouchMove.bind(this),   { passive: false });
-      handle.addEventListener("touchend",    this.handleTouchEnd.bind(this),    { passive: true });
-      handle.addEventListener("touchcancel", this.handleTouchCancel.bind(this), { passive: true });
+      handle.addEventListener("touchstart", this.handleTouchStart.bind(this), {
+        passive: false,
+      });
+      handle.addEventListener("touchmove", this.handleTouchMove.bind(this), {
+        passive: false,
+      });
+      handle.addEventListener("touchend", this.handleTouchEnd.bind(this), {
+        passive: true,
+      });
+      handle.addEventListener(
+        "touchcancel",
+        this.handleTouchCancel.bind(this),
+        { passive: true },
+      );
     });
   }
 
@@ -350,7 +399,7 @@ class PlaylistManager {
   handleDrop(e) {
     e.stopPropagation();
     const from = parseInt(this.draggedElement.dataset.index);
-    const to   = parseInt(e.currentTarget.dataset.index);
+    const to = parseInt(e.currentTarget.dataset.index);
     if (from !== to) {
       const media = this.medias[from];
       this.medias.splice(from, 1);
@@ -375,7 +424,7 @@ class PlaylistManager {
     e.preventDefault();
 
     this.touchDragElement = row;
-    this.touchDragStartIndex   = parseInt(row.dataset.index);
+    this.touchDragStartIndex = parseInt(row.dataset.index);
     this.touchDragCurrentIndex = this.touchDragStartIndex;
 
     const touch = e.touches[0];
@@ -412,8 +461,10 @@ class PlaylistManager {
     const cloneRect = this.touchClone.getBoundingClientRect();
     const scrollThreshold = 30;
     const scrollSpeed = 8;
-    if (cloneRect.top < cRect.top - scrollThreshold)             container.scrollTop -= scrollSpeed;
-    else if (cloneRect.bottom > cRect.bottom + scrollThreshold)  container.scrollTop += scrollSpeed;
+    if (cloneRect.top < cRect.top - scrollThreshold)
+      container.scrollTop -= scrollSpeed;
+    else if (cloneRect.bottom > cRect.bottom + scrollThreshold)
+      container.scrollTop += scrollSpeed;
 
     this.touchClone.style.display = "none";
     const target = document.elementFromPoint(touch.clientX, touch.clientY);
@@ -423,11 +474,12 @@ class PlaylistManager {
     if (!targetItem) return;
 
     const targetIndex = parseInt(targetItem.dataset.index);
-    if (isNaN(targetIndex) || targetIndex === this.touchDragCurrentIndex) return;
+    if (isNaN(targetIndex) || targetIndex === this.touchDragCurrentIndex)
+      return;
 
     // Only swap once the clone's leading edge crosses the midpoint of the target row
     const targetRect = targetItem.getBoundingClientRect();
-    const targetMid  = targetRect.top + targetRect.height / 2;
+    const targetMid = targetRect.top + targetRect.height / 2;
     const movingDown = targetIndex > this.touchDragCurrentIndex;
     if (movingDown && touch.clientY < targetMid) return;
     if (!movingDown && touch.clientY > targetMid) return;
@@ -448,11 +500,15 @@ class PlaylistManager {
     this.touchClone?.remove();
     this.touchClone = null;
 
-    document.querySelectorAll(".playlist-item.dragging").forEach((el) => el.classList.remove("dragging"));
+    document
+      .querySelectorAll(".playlist-item.dragging")
+      .forEach((el) => el.classList.remove("dragging"));
 
     if (this.touchDragCurrentIndex !== this.touchDragStartIndex) {
       this.saveCustomOrder();
-      debugLog(`Moved media from position ${this.touchDragStartIndex + 1} to ${this.touchDragCurrentIndex + 1}`);
+      debugLog(
+        `Moved media from position ${this.touchDragStartIndex + 1} to ${this.touchDragCurrentIndex + 1}`,
+      );
     }
     this.render(true);
   }
@@ -464,13 +520,15 @@ class PlaylistManager {
     this.touchClone?.remove();
     this.touchClone = null;
 
-    document.querySelectorAll(".playlist-item.dragging").forEach((el) => el.classList.remove("dragging"));
+    document
+      .querySelectorAll(".playlist-item.dragging")
+      .forEach((el) => el.classList.remove("dragging"));
     this.render(true);
     debugLog("Touch drag cancelled by browser");
   }
 
   scrollToCurrentMedia() {
-    const container  = document.getElementById("playlist-display");
+    const container = document.getElementById("playlist-display");
     const activeItem = container.querySelector(".current-playing");
     if (!activeItem) return;
 
@@ -479,20 +537,25 @@ class PlaylistManager {
     if (iRect.top >= cRect.top && iRect.bottom <= cRect.bottom) return;
 
     const targetScrollTop = container.scrollTop + (iRect.top - cRect.top) - 16;
-    container.scrollTo({ top: Math.max(0, targetScrollTop), behavior: "smooth" });
+    container.scrollTo({
+      top: Math.max(0, targetScrollTop),
+      behavior: "smooth",
+    });
   }
 
   // Mid-drag re-render: rebuilds DOM order while preserving the dragging class
   renderForDrag(activeDragIndex) {
     const container = document.getElementById("playlist-display");
-    const inRadio   = window.player?.isInRadioMode() ?? false;
+    const inRadio = window.player?.isInRadioMode() ?? false;
 
     const items = this.medias
       .map((media, index) => {
         const isPlaying = media.id === this.currentMediaId;
-        const isVid     = this.isVideo(media);
-        const badge     = `<span class="media-badge ${isVid ? "video" : "audio"}">${isVid ? "&#127909;" : "&#127925;"}</span>`;
-        const filtered  = this.mediaFilter !== "all" && (this.mediaFilter === "video") !== isVid;
+        const isVid = this.isVideo(media);
+        const badge = `<span class="media-badge ${isVid ? "video" : "audio"}">${isVid ? "&#127909;" : "&#127925;"}</span>`;
+        const filtered =
+          this.mediaFilter !== "all" &&
+          (this.mediaFilter === "video") !== isVid;
         if (filtered) return "";
         return `
           <div class="playlist-item ${isPlaying ? "current-playing" : ""} ${isVid ? "is-video" : ""} ${index === activeDragIndex ? "dragging" : ""}"
@@ -530,30 +593,65 @@ class PlaylistManager {
     }
     this.currentMediaId = mediaId;
     const media = this.medias.find((s) => s.id === mediaId);
+    const isVid = this.isVideo(media);
 
-    // Switch to the correct media element before setting src
-    window.switchMediaElement?.(this.isVideo(media));
+    window.switchMediaElement?.(isVid);
 
-    const active = document.getElementById(this.isVideo(media) ? "video-player" : "audio-player");
-    active.src = `/stargzr/player/stream/id/${mediaId}`;
-    active.play();
+    const active = document.getElementById(
+      isVid ? "video-player" : "audio-player",
+    );
+    const overlay = document.getElementById("video-loading-overlay");
 
-    // Update subtitle track whenever a video is loaded.
-    // The track src must be set after the video src so the browser loads them together.
-    // 404 responses (no subtitles for this file) are silently ignored by the browser.
-    if (this.isVideo(media)) {
+    if (isVid && overlay) {
+      const rect = active.getBoundingClientRect();
+      overlay.style.position = "fixed";
+      overlay.style.left = rect.left + "px";
+      overlay.style.top = rect.top + "px";
+      overlay.style.width = rect.width + "px";
+      overlay.style.height = rect.height + "px";
+      overlay.classList.remove("hidden");
+    }
+
+    // Set subtitle src before setting video src so both are fetched in the same load cycle
+    if (isVid) {
       const track = document.getElementById("subtitle-track");
       if (track) track.src = `/stargzr/player/subtitles/${mediaId}`;
     }
 
+    active.src = `/stargzr/player/stream/id/${mediaId}`;
+    active.load();
+
+    active.addEventListener(
+      "canplay",
+      () => {
+        if (overlay) overlay.classList.add("hidden");
+        active.play();
+      },
+      { once: true },
+    );
+
+    // Hide overlay on error so it never gets stuck visible
+    active.addEventListener(
+      "error",
+      () => {
+        if (overlay) overlay.classList.add("hidden");
+      },
+      { once: true },
+    );
+
     if (media) {
       const mediaIndex = this.medias.findIndex((s) => s.id === mediaId);
-      document.querySelector("#player-controls .media-info strong").nextSibling.textContent = " " + media.filename;
-      document.querySelector("#player-controls div:last-child").textContent = `Track ${mediaIndex + 1} of ${this.medias.length}`;
+      document.querySelector(
+        "#player-controls .media-info strong",
+      ).nextSibling.textContent = " " + media.filename;
+      document.querySelector("#player-controls div:last-child").textContent =
+        `Track ${mediaIndex + 1} of ${this.medias.length}`;
     }
 
     this.render();
-    debugLog(`Playing: ${media ? media.filename : mediaId} (${this.isVideo(media) ? "video" : "audio"})`);
+    debugLog(
+      `Playing: ${media ? media.filename : mediaId} (${isVid ? "video" : "audio"})`,
+    );
   }
 
   // Moves a media to the slot immediately after the currently playing media
@@ -578,13 +676,20 @@ class PlaylistManager {
     debugLog(`Queued "${media.filename}" to play next`);
   }
 
-  getMediaById(mediaId) { return this.medias.find((s) => s.id === mediaId); }
-  getCurrentIndex()     { return this.currentMediaId ? this.medias.findIndex((s) => s.id === this.currentMediaId) : 0; }
+  getMediaById(mediaId) {
+    return this.medias.find((s) => s.id === mediaId);
+  }
+  getCurrentIndex() {
+    return this.currentMediaId
+      ? this.medias.findIndex((s) => s.id === this.currentMediaId)
+      : 0;
+  }
 
   // next/prev respect the active navigation filter, wrapping within the filtered subset
   getNextMedia() {
     const pool = this._filteredMedias();
-    if (pool.length === 0) return this.medias[(this.getCurrentIndex() + 1) % this.medias.length];
+    if (pool.length === 0)
+      return this.medias[(this.getCurrentIndex() + 1) % this.medias.length];
     const currentInPool = pool.findIndex((m) => m.id === this.currentMediaId);
     return pool[(currentInPool + 1) % pool.length];
   }
@@ -600,13 +705,23 @@ class PlaylistManager {
     return pool[prevIndex];
   }
 
-  playNext() { if (!window.player?.isInRadioMode()) { const s = this.getNextMedia(); if (s) this.playMedia(s.id); } }
-  playPrev() { if (!window.player?.isInRadioMode()) { const s = this.getPrevMedia(); if (s) this.playMedia(s.id); } }
+  playNext() {
+    if (!window.player?.isInRadioMode()) {
+      const s = this.getNextMedia();
+      if (s) this.playMedia(s.id);
+    }
+  }
+  playPrev() {
+    if (!window.player?.isInRadioMode()) {
+      const s = this.getPrevMedia();
+      if (s) this.playMedia(s.id);
+    }
+  }
 
   updateCurrentFromAudioSrc() {
     // Read from whichever element is currently active
-    const el         = window._activeMedia ?? document.getElementById("audio-player");
-    const idMatch    = el.src.match(/\/stream\/id\/([^/?]+)/);
+    const el = window._activeMedia ?? document.getElementById("audio-player");
+    const idMatch = el.src.match(/\/stream\/id\/([^/?]+)/);
     const indexMatch = el.src.match(/\/stream\/(\d+)(?:\?|$)/);
 
     if (idMatch) {
@@ -614,7 +729,10 @@ class PlaylistManager {
       this.render();
     } else if (indexMatch) {
       const mediaId = this.getMediaIdByServerIndex(parseInt(indexMatch[1]));
-      if (mediaId) { this.currentMediaId = mediaId; this.render(); }
+      if (mediaId) {
+        this.currentMediaId = mediaId;
+        this.render();
+      }
     }
   }
 }
@@ -649,8 +767,8 @@ async function downloadFolder(filename) {
   // We can't know exactly when that happens from JS, so we show "Zipping..."
   // for a fixed window then clear it. The download itself continues in the
   // browser's own download manager regardless.
-  const a    = document.createElement("a");
-  a.href     = `/stargzr/player/download-folder/${encodeURIComponent(filename)}`;
+  const a = document.createElement("a");
+  a.href = `/stargzr/player/download-folder/${encodeURIComponent(filename)}`;
   a.download = `${filename}.zip`;
   a.style.display = "none";
   document.body.appendChild(a);
@@ -670,9 +788,8 @@ async function downloadFolder(filename) {
   }, 4000);
 }
 
-
 // Triggers an immediate download of a plain file (no server-side processing needed).
-// Uses a direct <a> navigation so the browser's Save-As dialog appears instantly —
+// Uses a direct <a> navigation so the browser's Save-As dialog appears instantly,
 // no buffering, no waiting. Status flashes "Starting..." briefly so the user knows
 // the click registered, then clears after a couple of seconds.
 function downloadFile(filename) {
@@ -682,15 +799,15 @@ function downloadFile(filename) {
   if (pm.mediaFilter === "other") pm.render(true);
   debugLog(`Starting download: "${filename}"`);
 
-  const a    = document.createElement("a");
-  a.href     = `/stargzr/player/download/${encodeURIComponent(filename)}`;
+  const a = document.createElement("a");
+  a.href = `/stargzr/player/download/${encodeURIComponent(filename)}`;
   a.download = filename;
   a.style.display = "none";
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
 
-  // Clear status after a short delay — the browser has taken over by then
+  // Clear status after a short delay, the browser has taken over by then
   setTimeout(() => {
     pm.fileDownloadStates.delete(filename);
     if (pm.mediaFilter === "other") pm.render(true);

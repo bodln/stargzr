@@ -99,9 +99,17 @@
       </div>
 
       <!-- Listener controls: shown only while tuned into a broadcaster -->
-      <div id="radio-listener-controls" class="hidden" style="margin-top: 8px; gap: 8px;">
-        <button id="mute-btn" onclick="window.player.toggleMute()">🔇 Mute</button>
-        <button id="resync-btn" onclick="window.player.resync()">🔄 Resync</button>
+      <div
+        id="radio-listener-controls"
+        class="hidden"
+        style="margin-top: 8px; gap: 8px"
+      >
+        <button id="mute-btn" onclick="window.player.toggleMute()">
+          🔇 Mute
+        </button>
+        <button id="resync-btn" onclick="window.player.resync()">
+          🔄 Resync
+        </button>
       </div>
 
       <div class="radio-controls">
@@ -142,13 +150,19 @@
     </audio>
 
     <!-- Shown only in radio mode; moved next to whichever media element is active -->
-    <button id="media-resync-btn" class="hidden" onclick="window.player.resync()">🔄 Resync</button>
+    <button
+      id="media-resync-btn"
+      class="hidden"
+      onclick="window.player.resync()"
+    >
+      🔄 Resync
+    </button>
 
     <!-- Video element: hidden until a video file is played.
-         hidden class is set here so it's invisible from first paint,
-         not waiting for JS to run. switchMediaElement() in main.js
-         toggles visibility and keeps _activeMedia in sync. -->
-    <video id="video-player" class="hidden" controls>
+     hidden class is set here so it's invisible from first paint,
+     not waiting for JS to run. switchMediaElement() in main.js
+     toggles visibility and keeps _activeMedia in sync. -->
+    <video id="video-player" class="hidden" controls preload="metadata">
       <track
         id="subtitle-track"
         kind="subtitles"
@@ -158,6 +172,24 @@
       />
       Your browser doesn't support video.
     </video>
+
+    <div
+      id="video-loading-overlay"
+      class="hidden"
+      style="
+        position: fixed;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(0, 0, 0, 0.5);
+        color: #fff;
+        font-size: 1.2rem;
+        z-index: 9999;
+        pointer-events: none;
+      "
+    >
+      Loading...
+    </div>
 
     <div class="controls">
       <button id="prev-btn">⏮️ Previous</button>
