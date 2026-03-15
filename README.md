@@ -1,31 +1,39 @@
 # stargzr
 
-A self-hosted music streaming server with live radio broadcasting built in Rust.
+A self-hosted music and video streaming server with live radio broadcasting built in Rust.
 
-Stream your local MP3 library from any device on your network, or broadcast what you're listening to so others can tune in and sync in real time.
+Stream your local media library from any device on your network, or broadcast what you're listening to so others can tune in and sync in real time.
 
 ---
 
 ## Features
 
-- **MP3 Streaming** — serves your local music library over HTTP with full byte-range support, enabling seeking and browser caching
+- **Media Streaming** — serves your local audio and video library over HTTP with full byte-range support, enabling seeking and browser caching
+- **Video Support** — MP4 and WebM files play natively in the browser; uploaded MKV, MOV, AVI, and WebM files are automatically converted to H.264/AAC MP4 via ffmpeg before being added to the playlist
+- **Subtitle Support** — subtitle streams are extracted from uploaded videos as WebVTT files and served alongside the video; the player loads them automatically and falls back silently if none exist
 - **Session-based Playback** — each user gets their own independent playback position tracked via cookies
 - **Live Radio Broadcasting** — start a broadcast and share your session ID; listeners sync to your playback in real time over WebSocket
 - **Drift Correction** — listeners receive periodic heartbeats and automatically correct position drift to stay in sync with the broadcaster
-- **Drag-and-Drop Playlist** — reorder songs in the browser; custom order is saved to localStorage and persists across sessions
-- **Playlist Search** — filter songs by filename with a live search bar; clicking a result scrolls the playlist to that song and briefly highlights it
-- **Play Next** — queue any song to the position immediately after the current one directly from the playlist row
-- **MP3 Upload** — upload MP3 files directly from the browser; the server enforces a 5 GB total library cap and a 200 MB per-IP quota per server session; uploaded files are inserted into the live playlist in alphabetical order without a restart
+- **AutoNext** — when a broadcaster's track ends naturally, listeners are notified to finish their current track then advance to the same next track, preserving the last few seconds instead of jumping immediately
+- **Drag-and-Drop Playlist** — reorder tracks in the browser; custom order is saved to localStorage and persists across sessions; touch drag-and-drop supported on mobile
+- **Media Type Filter** — playlist navigation can be filtered to All, Audio, Video, or Other; next/prev respect the active filter; direct play is never gated
+- **Playlist Search** — filter tracks by filename with a live search bar; clicking a result scrolls the playlist to that track and briefly highlights it
+- **Play Next** — queue any track to the position immediately after the current one directly from the playlist row
+- **Other Files Tab** — non-media files and subdirectories in the music folder are listed separately; plain files stream directly to the browser's download manager; folders are zipped on demand (up to 2000 MB) and streamed without buffering in RAM
+- **Folder Zip Download** — folders are zipped to a temp file on a blocking thread then streamed in chunks; the temp file is deleted by a RAII guard when the stream ends or the client disconnects; folders over 1500 MB show a "Too large" indicator and cannot be downloaded
+- **Media Upload** — upload audio and video (only) files directly from the browser; video files are converted to browser-compatible H.264/AAC MP4 via ffmpeg; the server enforces a 5 GB total library cap and a 200 MB per-IP quota per server session; uploaded files are inserted into the live playlist in alphabetical order without a restart; only one video conversion runs at a time via a semaphore
+- **Progress Bar** — a playback progress bar is shown while tuned into a broadcaster
 - **Live Analytics** — active connections, broadcasters, and listener counts pushed to all clients in real time
 - **Admin Panel** — on-page admin view showing all live sessions, their idle time, who each session is tuned to, and the full broadcaster-to-listener map
 - **Auto-cleanup** — stale broadcaster sessions and player sessions are automatically evicted on the server
 - **Rate Limiting** — heartbeat, broadcast update, and WebSocket upgrade endpoints are rate-limited per IP to prevent abuse
 - **Per-IP WebSocket Rate Limiting** — WebSocket upgrade requests are limited per client IP; behind a reverse proxy requires `X-Real-IP` header forwarding
-- **Session Validation** — expired sessions are detected on page load and WebSocket upgrade, triggering an automatic reload to issue a fresh session
-- **Bluetooth Mode** — optional toggle that mutes audio during seeks and song changes to prevent glitches on Bluetooth DSP pipelines; unmutes once the browser confirms audio output has resumed;
+- **Session Validation** — expired sessions are detected on page load, media play, and WebSocket upgrade, triggering an automatic reload to issue a fresh session
+- **Bluetooth Mode** — optional toggle that mutes media during seeks and song changes to prevent glitches on Bluetooth DSP pipelines; unmutes once the browser confirms media output has resumed
+- **Graceful Shutdown** — on `SIGINT` or `SIGTERM` the server sends a `ServerShutdown` message to all connected WebSocket clients before draining HTTP connections, so listeners reconnect automatically after a restart rather than seeing a dead connection
 - **Prometheus Metrics** — active connections, broadcasters, listeners, message rates, rate limit hits, session creation and cleanup counts exposed at `/stargzr/metrics`
-- **Structured Tracing** — per-session spans propagate `session_id` through all log lines automatically; audio streaming spans are nested under request spans
-- **Mobile Support** — touch drag-and-drop for playlist reordering, Wake Lock API support to keep the screen on while broadcasting, mobile battery-aware reconnection
+- **Structured Tracing** — per-session spans propagate `session_id` through all log lines automatically; media streaming spans are nested under request spans;
+- **Mobile Support** — Wake Lock API support to keep the screen on while broadcasting, mobile battery-aware reconnection, page visibility handling that resumes broadcasts after backgrounding
 
 ---
 
@@ -42,6 +50,8 @@ Stream your local MP3 library from any device on your network, or broadcast what
 | Session IDs | UUID v4 |
 | Metrics | `metrics` + `metrics-exporter-prometheus` |
 | Tracing | `tracing` + `tracing-subscriber` |
+| Video conversion | ffmpeg (must be installed separately) |
+| Zip archives | `zip` crate |
 
 ---
 
@@ -51,34 +61,34 @@ Stream your local MP3 library from any device on your network, or broadcast what
 src/
   player/
     mod.rs          — server init, router, TCP listener, playlist scanning
-    types.rs        — AppState, RadioMessage, SongInfo, BroadcastState
-    handlers.rs     — HTTP route handlers (page, next, prev, stream, playlist, upload, metrics, admin)
+    types.rs        — AppState, RadioMessage, MediaInfo, BroadcastState
+    handlers.rs     — HTTP route handlers (page, next, prev, stream, playlist, upload, download, zip, metrics, admin)
     radio.rs        — WebSocket lifecycle, radio protocol, analytics
     session.rs      — session helpers, timestamp utils, stale session cleanup
     templates.rs    — Askama template structs and IntoResponse impls
     error.rs        — PlayerError, PlayerResult
-    validation.rs   — SessionId newtype, song index validation
+    validation.rs   — SessionId newtype, media index validation
     rate_limit.rs   — token bucket rate limiter (heartbeat, broadcast, WebSocket)
     metrics.rs      — Prometheus metrics registry and helper functions
     logging.rs      — tracing-subscriber initialization
-    reconnect.rs    — reconnection logic
+    reconnect.rs    — reconnection logic with exponential backoff and jitter
     static/
       css/
         player.css        — all player styles
       js/
         utils.js          — debugLog, copySessionId
-        playlist.js       — PlaylistManager class
+        playlist.js       — PlaylistManager class, folder/file download handlers
         radio-player.js   — RadioPlayer class
         analytics.js      — updateAnalyticsDisplay, tuneInToBroadcaster
         upload.js         — upload button handler
         admin.js          — admin panel polling
         search.js         — playlist search bar
-        main.js           — audio setup, instantiation, all event bindings
+        main.js           — media element switcher, audio setup, instantiation, event bindings
     templates/
       player.html         — full player page, references external CSS and JS
       player_controls.html — HTMX partial for control updates
   main.rs
-music/                  — your MP3 files go here
+music/                  — your media files go here
 ```
 
 ---
@@ -88,7 +98,8 @@ music/                  — your MP3 files go here
 ### Prerequisites
 
 - Docker Desktop (for Docker usage) OR Rust (for native build)
-- A folder of MP3 files
+- A folder of audio/video files
+- ffmpeg (required for video uploads; must be available on PATH)
 
 ### Running with Docker Compose
 
@@ -133,21 +144,25 @@ Edit the path in `main.rs` to point to your music folder before running.
 
 1. Open the player and copy your **Session ID**
 2. Click **Start Broadcasting** — you are now live
-3. Share your Session ID with someone else (all broadcaster IDs will be shown in a public list and people can tune in from there too)
-4. They paste it into the **Tune In** field and click **Tune In**
-5. Their playback syncs to yours — play, pause, and seek updates propagate in real time
+3. Share your Session ID with someone else (all broadcaster IDs are shown in the live broadcasts list and people can tune in directly from there)
+4. They paste it into the **Tune In** field and click **Tune In**, or click **Tune In** directly from the broadcaster card
+5. Their playback syncs to yours — play, pause, seek, and track changes propagate in real time
 
-Listeners receive an initial `Sync` on tune-in, then periodic `Heartbeat` messages for drift correction. If a broadcaster disconnects, all tuned listeners are notified automatically.
+Listeners receive an initial `Sync` on tune-in with latency compensation applied, then periodic `Heartbeat` messages for drift correction. When a track ends naturally an `AutoNext` message lets listeners finish their current track before advancing. If a broadcaster disconnects, all tuned listeners are notified automatically.
+
+While tuned in, listeners have access to:
+- **Resync** — immediately re-syncs to the broadcaster's current position
+- **Mute/Unmute** — toggles audio without affecting the broadcast
 
 ---
 
-## Uploading Music
+## Uploading Media
 
-Songs can be added to the library at runtime without restarting the server.
+Files can be added to the library at runtime without restarting the server.
 
-1. Click **Upload MP3** at the bottom of the player page
-2. Select one or more `.mp3` files
-3. The server validates the file type, checks the per-IP and total folder quotas, writes the file to disk, and inserts it into the live playlist in alphabetical order
+1. Click **Upload Media** at the bottom of the player page
+2. Select one or more audio or video files
+3. The server validates the file type, checks the per-IP and total folder quotas, writes the file to disk, converts video files to MP4 via ffmpeg, and inserts it into the live playlist in alphabetical order
 
 Upload limits (reset on server restart):
 
@@ -155,7 +170,20 @@ Upload limits (reset on server restart):
 |---|---|
 | Total library size | 5 GB |
 | Per-IP upload quota | 200 MB |
-| Accepted file types | `.mp3` only |
+| Accepted audio formats | `.mp3`, `.m4a`, `.ogg`, `.wav`, `.flac` |
+| Accepted video formats | `.mp4`, `.webm`, `.mkv`, `.mov`, `.avi` |
+
+Video files are re-encoded to H.264/AAC stereo MP4 at CRF 23 with `+faststart` so playback begins before the full file is downloaded. Subtitle streams are extracted as WebVTT alongside the video. Only one video conversion runs at a time.
+
+---
+
+## Other Files
+
+The **Other** tab lists non-media files and subdirectories in the music folder.
+
+- **Plain files** — downloaded immediately via direct browser navigation; bytes stream straight to disk, no RAM buffering
+- **Folders** — zipped on demand and streamed to the browser's download manager; the zip is written to a temp file on a blocking thread (never held in RAM) then streamed in chunks; the temp file is deleted automatically when the download completes or the client disconnects
+- **Folders over 1500 MB** — shown with a "Too large" indicator; zip downloads are rejected with `413` before any work is done
 
 ---
 
@@ -309,7 +337,13 @@ https://random-name.trycloudflare.com
 
 Available at `omersadikovic/stargzr:latest` on Docker Hub.
 
-The Docker image is built using a two-stage build. The builder stage compiles a fully static binary targeting `x86_64-unknown-linux-musl` using `musl-tools`, which eliminates any dependency on the host system's glibc version. The runtime stage is Alpine Linux with just `ca-certificates` added. Static CSS and JS files are copied from the builder into the final image at the path baked in by `CARGO_MANIFEST_DIR` at compile time.
+The Docker image is built using a two-stage build. The builder stage compiles a fully static binary targeting `x86_64-unknown-linux-musl` using `musl-tools`, which eliminates any dependency on the host system's glibc version. The runtime stage is Alpine Linux with `ca-certificates` and `ffmpeg` added. Static CSS and JS files are copied from the builder into the final image at the path baked in by `CARGO_MANIFEST_DIR` at compile time.
+
+My ffmpeg command:
+
+```
+ffmpeg -i "\stargzr\music\A.Haunting.in.Venice.2023.1080p.AMZN.WEBRip.1400MB.DD5.1.x264-GalaxyRG.mkv" -map 0:v:0 -map 0:a:0 -c:v copy -c:a aac -b:a 192k -ac 2 -movflags +faststart "\stargzr\music\haunting.mp4" -map 0:s:0 -c:s webvtt "\stargzr\music\haunting.vtt"
+```
 
 ---
 
