@@ -13,3 +13,5 @@ async fn main() {
     player::initialize(PathBuf::from(music_path)).await;
 }
 // DOCUMENT ENTIRE WORK FLOW WITH CODE SNIPPETS
+// TODO 
+// Rename these here and in docker to media, rename the folder also

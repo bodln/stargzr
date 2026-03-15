@@ -84,7 +84,7 @@ pub fn now_ms() -> u128 {
 
 /// Periodically cleans up stale player sessions and broadcaster channels.
 pub async fn cleanup_stale_sessions(state: Arc<AppState>) {
-    let mut interval = tokio::time::interval(Duration::from_secs(3600));
+    let mut interval = tokio::time::interval(Duration::from_secs(1800));
 
     loop {
         // Wait for the next tick (initially fires immediately, then every 1h)
@@ -100,7 +100,7 @@ pub async fn cleanup_stale_sessions(state: Arc<AppState>) {
 
             state.sessions.retain(|session_id, session| {
                 let age = now.duration_since(session.last_activity);
-                let should_keep = age.as_secs() < 7200; // Only keep sessions younger than 2 hours
+                let should_keep = age.as_secs() < 3600; // Only keep sessions younger than 1 hour
 
                 if !should_keep {
                     removed += 1;
@@ -119,6 +119,10 @@ pub async fn cleanup_stale_sessions(state: Arc<AppState>) {
                 tracing::info!("Cleaned up {} stale player session(s)", removed);
             }
         }
+
+        // Purge token buckets that have been idle for over an hour so the map
+        // does not grow unboundedly for IPs that connected once and never returned
+        state.ws_rate_limiter.cleanup_old_buckets();
 
         // Cleanup Broadcaster Sessions
         // These are active radio broadcasts that should be recent
