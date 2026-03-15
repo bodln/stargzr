@@ -861,6 +861,10 @@ pub async fn admin_state(State(state): State<SharedState>) -> impl IntoResponse 
 /// Video uploads (mkv, mov, avi, webm, mp4) are converted to H.264/AAC stereo MP4
 /// via ffmpeg before being added to the playlist. The original file is deleted after
 /// a successful conversion. Audio files are stored as-is.
+///
+/// Per-file errors (wrong type, already exists, too large, conversion failed) are
+/// collected and returned in the response body so the caller knows which files
+/// failed without aborting the rest of the batch.
 pub async fn upload_file(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -891,59 +895,81 @@ pub async fn upload_file(
         )));
     }
 
-    let remaining_quota = MAX_IP_QUOTA_BYTES.saturating_sub(ip_used);
-    let remaining_folder = MAX_FOLDER_BYTES.saturating_sub(folder_size);
+    let mut remaining_quota = MAX_IP_QUOTA_BYTES.saturating_sub(ip_used);
+    let mut remaining_folder = MAX_FOLDER_BYTES.saturating_sub(folder_size);
+
+    // Errors are collected here so one bad file does not abort the rest of the batch.
+    // Global failures (folder full, quota exhausted) still return early above.
+    let mut file_errors: Vec<String> = Vec::new();
 
     while let Some(field) = multipart
         .next_field()
         .await
         .map_err(|e| PlayerError::UploadFailed(e.to_string()))?
     {
-        let raw_name = field
-            .file_name()
-            .ok_or_else(|| PlayerError::UploadFailed("Missing filename in upload".into()))?
-            .to_string();
+        let raw_name = match field.file_name() {
+            Some(n) => n.to_string(),
+            None => {
+                file_errors.push("a field had no filename, skipping".to_string());
+                continue;
+            }
+        };
 
         // Accept all supported audio and video formats
-        let upload_media_type = media_type_for(&raw_name).ok_or_else(|| {
-            PlayerError::UploadFailed(
-                "Unsupported file type. Accepted: mp3, m4a, ogg, wav, flac, mp4, webm, mkv, mov, avi".into(),
-            )
-        })?;
+        let upload_media_type = match media_type_for(&raw_name) {
+            Some(t) => t,
+            None => {
+                file_errors.push(format!(
+                    "'{}': unsupported file type. Accepted: mp3, m4a, ogg, wav, flac, mp4, webm, mkv, mov, avi",
+                    raw_name
+                ));
+                continue;
+            }
+        };
 
         let safe_name = sanitize_filename(&raw_name);
 
         // Buffer the whole file so we can check size before writing to disk
-        let data = field
-            .bytes()
-            .await
-            .map_err(|e| PlayerError::UploadFailed(e.to_string()))?;
+        let data = match field.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                file_errors.push(format!("'{}': failed to read upload data: {}", safe_name, e));
+                continue;
+            }
+        };
 
         let file_size = data.len() as u64;
 
         if file_size > remaining_quota {
-            return Err(PlayerError::UploadFailed(format!(
+            file_errors.push(format!(
                 "'{}' is too large, you have {} MB of upload quota remaining",
                 safe_name,
                 remaining_quota / 1024 / 1024
-            )));
+            ));
+            continue;
         }
 
         if file_size > remaining_folder {
-            return Err(PlayerError::UploadFailed(
-                "Not enough space on the server for this file".into(),
+            file_errors.push(format!(
+                "'{}': not enough space on the server for this file",
+                safe_name
             ));
+            continue;
         }
 
         let dest = state.music_folder.join(&safe_name);
         if dest.exists() {
-            return Err(PlayerError::UploadFailed(format!(
+            file_errors.push(format!(
                 "'{}' already exists in the library",
                 safe_name
-            )));
+            ));
+            continue;
         }
 
-        tokio::fs::write(&dest, &data).await?;
+        if let Err(e) = tokio::fs::write(&dest, &data).await {
+            file_errors.push(format!("'{}': failed to write file: {}", safe_name, e));
+            continue;
+        }
 
         tracing::info!(
             ip = %ip,
@@ -955,6 +981,7 @@ pub async fn upload_file(
         // Quota is tracked against the upload size, not the converted size,
         // so users can't game the quota by uploading large files.
         *state.upload_quotas.entry(ip.clone()).or_insert(0) += file_size;
+        remaining_quota = remaining_quota.saturating_sub(file_size);
 
         // Video files are converted to browser-compatible H.264/AAC MP4.
         // Audio files are stored as is, browsers handle mp3/ogg/flac/wav natively.
@@ -984,7 +1011,7 @@ pub async fn upload_file(
                 // embed WebVTT, so they must live alongside the video and are served via a
                 // dedicated /player/subtitles/{id} endpoint. The subtitle extraction uses .ok()
                 // so a missing subtitle stream does not fail the whole upload.
-                let output = tokio::process::Command::new("ffmpeg")
+                let output = match tokio::process::Command::new("ffmpeg")
                     .args([
                         "-i",  dest.to_str().unwrap(),
                         "-map", "0:v:0",
@@ -1004,7 +1031,15 @@ pub async fn upload_file(
                     ])
                     .output()
                     .await
-                    .map_err(|e| PlayerError::UploadFailed(format!("ffmpeg not found: {}", e)))?;
+                {
+                    Ok(o) => o,
+                    Err(e) => {
+                        // Always remove the original regardless of outcome to avoid orphaned files
+                        tokio::fs::remove_file(&dest).await.ok();
+                        file_errors.push(format!("'{}': ffmpeg not found: {}", safe_name, e));
+                        continue;
+                    }
+                };
 
                 // Always remove the original regardless of outcome to avoid orphaned files
                 tokio::fs::remove_file(&dest).await.ok();
@@ -1012,9 +1047,11 @@ pub async fn upload_file(
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     tracing::error!(stderr = %stderr, "ffmpeg conversion failed");
-                    return Err(PlayerError::UploadFailed(
-                        "Video conversion failed. Is the file a valid video?".into(),
+                    file_errors.push(format!(
+                        "'{}': video conversion failed. Is the file a valid video?",
+                        safe_name
                     ));
+                    continue;
                 }
 
                 // Use the actual converted file size for the playlist entry
@@ -1034,6 +1071,9 @@ pub async fn upload_file(
             }
             MediaType::Audio => (safe_name.clone(), MediaType::Audio, file_size),
         };
+
+        // Reduce remaining folder space by the size that actually landed on disk
+        remaining_folder = remaining_folder.saturating_sub(final_size);
 
         // Insert the new entry into the live playlist in alphabetical order.
         // Write lock is held only for the insert, then released immediately.
@@ -1056,7 +1096,10 @@ pub async fn upload_file(
         }
     }
 
-    Ok(StatusCode::OK)
+    // Return 200 with an empty body on full success, or 200 with newline-separated
+    // error messages when some files failed so the frontend can show per-file feedback
+    // while still refreshing the playlist for the files that did succeed.
+    Ok((StatusCode::OK, file_errors.join("\n")))
 }
 
 /// Strips path separators and special characters from an upload filename.
