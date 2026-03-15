@@ -26,6 +26,10 @@ use super::types::{SharedState, MediaInfo};
 const MAX_FOLDER_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 // 200 MB per IP per server session
 const MAX_IP_QUOTA_BYTES: u64 = 200 * 1024 * 1024;
+// 2000 MB folder cap for zip downloads
+const MAX_ZIP_FOLDER_BYTES: u64 = 2000 * 1024 * 1024;
+// 1 MB streaming chunk size
+const STREAMING_CHUNK_BYTES: usize = 1 * 1024 * 1024;
 
 /// Maps a filename extension to the correct HTTP Content-Type.
 /// Browsers use this to decide how to handle the response, incorrect values
@@ -362,7 +366,7 @@ pub async fn stream_audio_internal(
         tracing::debug!(start, end, length, "Serving range request");
 
         let limited_file = file.take(length);
-        let stream = ReaderStream::with_capacity(limited_file, 512 * 1024); // we read 128 kilobytes at a time
+        let stream = ReaderStream::with_capacity(limited_file, STREAMING_CHUNK_BYTES); // we read 1 MB at a time
         let body = axum::body::Body::from_stream(stream);
 
         return Ok(Response::builder()
@@ -385,7 +389,11 @@ pub async fn stream_audio_internal(
             .unwrap());
     }
 
-    // If there is no range specified just start from the beginning
+    // If there is no range specified just start from the beginning.
+    // Return 206 with a full-file Content-Range so the browser treats this as
+    // a range response from the start — this avoids the abort-and-restart cycle
+    // that a plain 200 triggers, which was causing the ~10 s delay before MP4
+    // playback began.
     tracing::debug!("Serving full file");
 
     let file = File::open(&file_path).await.map_err(|e| {
@@ -393,13 +401,17 @@ pub async fn stream_audio_internal(
         StatusCode::NOT_FOUND
     })?;
 
-    let stream = ReaderStream::with_capacity(file, 512 * 1024);
+    let stream = ReaderStream::with_capacity(file, STREAMING_CHUNK_BYTES);
     let body = axum::body::Body::from_stream(stream);
 
     Ok(Response::builder()
-        .status(StatusCode::OK)
+        .status(StatusCode::PARTIAL_CONTENT)
         .header(header::CONTENT_TYPE, content_type)
         .header(header::ACCEPT_RANGES, "bytes")
+        .header(
+            header::CONTENT_RANGE,
+            format!("bytes 0-{}/{}", file_size - 1, file_size),
+        )
         .header(header::CONTENT_LENGTH, file_size.to_string())
         .header(header::CACHE_CONTROL, "public, max-age=31536000")
         .body(body)
@@ -535,10 +547,13 @@ pub async fn get_other_files(State(state): State<SharedState>) -> impl IntoRespo
             if let Some(name) = entry.file_name().to_str() {
                     if let Ok(meta) = entry.metadata().await {
                     if meta.is_dir() {
-                        // Include subdirectories so the frontend can offer a zip download
+                        // Include subdirectories so the frontend can offer a zip download.
+                        // Use the recursive size so the frontend can enforce the MAX_ZIP_FOLDER_BYTES cap
+                        // client-side and hide the download button for oversized folders.
+                        let size = dir_size_recursive(&entry.path()).unwrap_or(0);
                         entries.push(OtherFile {
                             filename: name.to_string(),
-                            size: 0,
+                            size,
                             is_dir: true,
                         });
                     } else if meta.is_file() && crate::player::types::media_type_for(name).is_none() {
@@ -562,6 +577,7 @@ pub async fn get_other_files(State(state): State<SharedState>) -> impl IntoRespo
 
 /// Serves a non-media file from the music folder as a download.
 /// Used by the "Other" tab for files that don't have playlist IDs.
+/// Streams in STREAMING_CHUNK_BYTES chunks so the file is never held in RAM, safe for large files.
 pub async fn download_file(
     State(state): State<SharedState>,
     Path(filename): Path<String>,
@@ -580,29 +596,43 @@ pub async fn download_file(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    let data = tokio::fs::read(&path)
+    let file = tokio::fs::File::open(&path)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    tracing::info!(ip = %ip, file = %safe, bytes = data.len(), "Serving folder zip");
+    let file_size = tokio::fs::metadata(&path)
+        .await
+        .map(|m| m.len())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    tracing::info!(ip = %ip, file = %safe, bytes = file_size, "Serving file download");
+
+    let stream = ReaderStream::with_capacity(file, STREAMING_CHUNK_BYTES);
+    let body = axum::body::Body::from_stream(stream);
 
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_LENGTH, file_size.to_string())
         .header(
             header::CONTENT_DISPOSITION,
             format!("attachment; filename=\"{}\"", safe),
         )
-        .body(axum::body::Body::from(data))
+        .body(body)
         .unwrap())
 }
 
 /// Zips an entire subdirectory of the music folder and serves it as a download.
-/// The zip is written to a temp file on a blocking thread so the async runtime
-/// isn't blocked and so the zip crate can seek (it must seek to write the
-/// central directory).  The temp file is streamed back in 512 KB chunks and
-/// deleted automatically once the response body is fully consumed, the client
-/// disconnects, or zipping fails partway through, it can never leak.
+///
+/// Folders larger than MAX_ZIP_FOLDER_BYTES are rejected with 413 before any work is done.
+///
+/// For smaller folders the zip is written to a temp file on a blocking thread
+/// so the async runtime isn't blocked and the zip crate can seek (it must seek
+/// to write the central directory at the end). The temp file is then streamed
+/// back in STREAMING_CHUNK_BYTES chunks so neither the server nor the browser needs to hold
+/// the archive in RAM. The temp file is deleted by the DeleteOnDrop guard when
+/// the last byte is sent, the client disconnects, or zipping fails partway
+/// through, it can never leak.
 pub async fn download_folder(
     State(state): State<SharedState>,
     Path(foldername): Path<String>,
@@ -614,25 +644,40 @@ pub async fn download_folder(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    tracing::info!(folder = %safe, "Folder zip requested, starting zip...");
+    // Reject oversized folders before touching disk
+    let folder_size = dir_size_recursive(&path).map_err(|e| {
+        tracing::error!("Failed to measure folder size: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
-    // DeleteOnDrop is created immediately when the temp file is created so it
-    // is cleaned up on every exit path: success, zip error, and panic.
-    // On success we call .into_path() which moves ownership out and disarms it,
-    // then pass the path to a second DeleteOnDrop in the stream closure.
+    if folder_size > MAX_ZIP_FOLDER_BYTES {
+        tracing::warn!(
+            folder = %safe,
+            bytes = folder_size,
+            limit = MAX_ZIP_FOLDER_BYTES,
+            "Folder too large for zip download"
+        );
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    tracing::info!(folder = %safe, bytes = folder_size, "Folder zip requested, starting zip...");
+
+    // RAII guard: armed when the temp file is created, disarmed on success so
+    // the path can be handed to the stream-side guard. Any error or panic
+    // between creation and disarm deletes the partial file automatically.
     struct DeleteOnDrop(Option<std::path::PathBuf>);
-
     impl DeleteOnDrop {
         fn new(p: std::path::PathBuf) -> Self { Self(Some(p)) }
         // Disarms the guard and returns the path, caller takes ownership of cleanup
-        fn into_path(mut self) -> std::path::PathBuf { self.0.take().unwrap() }
+        fn disarm(&mut self) -> std::path::PathBuf { self.0.take().unwrap() }
     }
-    
     impl Drop for DeleteOnDrop {
         fn drop(&mut self) {
             if let Some(p) = self.0.take() {
                 if let Err(e) = std::fs::remove_file(&p) {
-                    tracing::warn!(path = %p.display(), "Failed to delete temp zip: {}", e);
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        tracing::warn!(path = %p.display(), "Failed to delete temp zip: {}", e);
+                    }
                 } else {
                     tracing::debug!(path = %p.display(), "Deleted temp zip");
                 }
@@ -643,12 +688,11 @@ pub async fn download_folder(
     let safe_clone = safe.clone();
     let tmp_path = tokio::task::spawn_blocking(move || -> std::io::Result<std::path::PathBuf> {
         let tmp = std::env::temp_dir().join(format!("stargzr_{}.zip", uuid::Uuid::new_v4()));
-
         tracing::info!(folder = %safe_clone, tmp = %tmp.display(), "Zipping to temp file");
 
         // Guard is armed immediately — any early return from this closure
         // (zip error, IO error, panic) will delete the partially-written file
-        let guard = DeleteOnDrop::new(tmp.clone());
+        let mut guard = DeleteOnDrop::new(tmp.clone());
 
         let file = std::fs::File::create(&tmp)?;
         // BufWriter reduces the number of seek + write syscalls the zip crate issues
@@ -660,7 +704,9 @@ pub async fn download_folder(
 
         // Disarm: zipping succeeded, hand path back to the async side which
         // will install its own DeleteOnDrop on the stream closure
-        Ok(guard.into_path())
+        // Meaning if everything above succeded it means there is no need to delete the temp file,
+        // so we 'disarm' the guard so it doesnt delete it, and we just return the tmp path so it can be used further. 
+        Ok(guard.disarm())
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -680,12 +726,13 @@ pub async fn download_folder(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Second guard on the stream side: deleted when the last byte is sent
-    // or when the client disconnects before the download finishes.
-    let stream_guard = DeleteOnDrop::new(tmp_path);
+    // Stream-side guard: file deleted when the last byte is sent or client disconnects
+    let mut stream_guard = DeleteOnDrop::new(tmp_path);
+    let stream_path = stream_guard.disarm();
+    let stream_guard = DeleteOnDrop::new(stream_path);
 
-    let stream = ReaderStream::with_capacity(file, 512 * 1024)
-        // The move keeps `stream_guard` alive for the lifetime of the stream.
+    let stream = ReaderStream::with_capacity(file, STREAMING_CHUNK_BYTES)
+        // The move keeps `stream_guard` alive for the lifetime of the stream, keeping it from being optimized out.
         // When the stream is dropped, `stream_guard` is dropped, deleting the temp file.
         .map(move |chunk| { let _ = &stream_guard; chunk });
 
@@ -704,14 +751,14 @@ pub async fn download_folder(
 }
 
 /// Walks `dir` recursively and writes every file into a zip archive.
-/// Called with a File-backed ZipWriter so the archive is never held in memory.
+/// Files are copied in 4MB chunks via BufReader + std::io::copy so the
+/// entire file is never held in RAM, peak memory per file is 4MB regardless
+/// of how large the file actually is.
 fn zip_dir_recursive<W: std::io::Write + std::io::Seek>(
     zip: &mut zip::ZipWriter<W>,
     dir: &std::path::Path,
     prefix: &str,
 ) -> std::io::Result<()> {
-    use std::io::Write;
-
     let options = zip::write::SimpleFileOptions::default();
 
     for entry in std::fs::read_dir(dir)? {
@@ -730,8 +777,13 @@ fn zip_dir_recursive<W: std::io::Write + std::io::Seek>(
         if meta.is_file() {
             zip.start_file(&zip_path, options)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
-            let data = std::fs::read(entry.path())?;
-            zip.write_all(&data)?;
+
+            // BufReader with 4MB capacity, only this much is in RAM at a time.
+            // std::io::copy drives the read/write loop without ever allocating a Vec
+            // for the whole file.
+            let src = std::fs::File::open(entry.path())?;
+            let mut reader = std::io::BufReader::with_capacity(4 * 1024 * 1024, src); // 4 MB
+            std::io::copy(&mut reader, zip)?;
         } else if meta.is_dir() {
             zip.add_directory(&zip_path, options)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -1023,6 +1075,7 @@ fn sanitize_filename(name: &str) -> String {
 }
 
 /// Sums the sizes of all files directly inside a directory (non-recursive).
+/// Used by upload_file to enforce the 5 GB library cap.
 async fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {
     let mut total = 0u64;
     let mut entries = tokio::fs::read_dir(path).await?;
@@ -1031,6 +1084,24 @@ async fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {
             if meta.is_file() {
                 total += meta.len();
             }
+        }
+    }
+    Ok(total)
+}
+
+/// Sums the sizes of all files recursively inside a directory.
+/// Used by download_folder to enforce MAX_ZIP_FOLDER_BYTES zip size limit, and by
+/// get_other_files to report accurate folder sizes to the frontend so it can
+/// hide the download button for oversized folders before the request is made.
+fn dir_size_recursive(path: &std::path::Path) -> std::io::Result<u64> {
+    let mut total = 0u64;
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let meta  = entry.metadata()?;
+        if meta.is_file() {
+            total += meta.len();
+        } else if meta.is_dir() {
+            total += dir_size_recursive(&entry.path())?;
         }
     }
     Ok(total)
