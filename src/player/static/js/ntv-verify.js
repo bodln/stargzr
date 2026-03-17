@@ -159,9 +159,16 @@ async function _startLookupAndProbe(channelId) {
       const text  = await probe.text();
       if (text.trim().startsWith("#EXTM3U")) {
         debugLog("NTV: manifest OK on attempt " + i + " — launching HLS");
-        _setStatus("✓ Live", "#28a745");
-        _setProgress("IP whitelisted. HLS stream active. Widget keeps re-verifying every 20 min.");
+        _setStatus("\u2713 Live", "#28a745");
         window.loadHlsStream(m3u8Url);
+        // Blank the iframe — reCAPTCHA done, no need to stream video.
+        // Pulse it for 20s every 18 min to re-verify without wasting bandwidth.
+        const iframe = document.getElementById("ntv-verify-iframe");
+        const verifyUrl = iframe ? iframe.src : null;
+        if (iframe) iframe.src = "";
+        _setProgress("Stream active. Re-verifying silently every 18 min.");
+        debugLog("NTV: iframe blanked — no double-streaming");
+        if (verifyUrl) _startPulseKeepalive(verifyUrl);
         return;
       }
       const snippet = text.slice(0, 80).replace(/\n/g, " ").trim();
@@ -195,7 +202,36 @@ window.ntvPlay = function(channelId) {
   else debugLog("NTV: no channel ID — call ntvPlay('premiumXXX')");
 };
 
+
+// ─── Pulse keepalive ─────────────────────────────────────────────────────────
+// Reloads ntv.cx iframe for 35s every 15 min — just long enough for reCAPTCHA
+// to re-verify, then blanks it. Uses almost no bandwidth vs streaming continuously.
+const PULSE_INTERVAL_MS = 15 * 60 * 1000;
+const PULSE_ACTIVE_MS   = 35 * 1000;
+let _pulseTimer    = null;
+let _pulseOffTimer = null;
+
+function _startPulseKeepalive(verifyUrl) {
+  if (_pulseTimer) clearInterval(_pulseTimer);
+  _pulseTimer = setInterval(function() {
+    debugLog("NTV keepalive: pulsing iframe for " + (PULSE_ACTIVE_MS/1000) + "s");
+    _setStatus("Re-verifying...", "#ffc107");
+    const f = document.getElementById("ntv-verify-iframe");
+    if (!f) return;
+    f.src = verifyUrl;
+    if (_pulseOffTimer) clearTimeout(_pulseOffTimer);
+    _pulseOffTimer = setTimeout(function() {
+      const ff = document.getElementById("ntv-verify-iframe");
+      if (ff) ff.src = "";
+      _setStatus("\u2713 Live", "#28a745");
+      debugLog("NTV keepalive: iframe blanked again");
+    }, PULSE_ACTIVE_MS);
+  }, PULSE_INTERVAL_MS);
+}
+
 function stopNtvWidget() {
+  if (_pulseTimer)    { clearInterval(_pulseTimer);   _pulseTimer    = null; }
+  if (_pulseOffTimer) { clearTimeout(_pulseOffTimer); _pulseOffTimer = null; }
   const f = document.getElementById("ntv-verify-iframe");
   if (f) f.src = "";
   const w = document.getElementById("ntv-widget");
