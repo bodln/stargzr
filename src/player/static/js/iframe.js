@@ -1,13 +1,9 @@
 // ─── iframe.js ───────────────────────────────────────────────────────────────
 //
-// Handles both:
-//   1. Regular iframe embeds (YouTube, Twitch, etc.)
-//   2. HLS / M3U8 streams — routed to hls-stream.js instead of an iframe
-//
-// HLS URLs detected:
-//   - Anything ending in .m3u8
-//   - chevy.soyspace.cyou/proxy/...  (disguised as .css)
-//   - Any URL containing /mono.css
+// Routes:
+//   ntv.cx embed code/URL → ntv-verify.js (persistent widget + HLS)
+//   HLS / M3U8 URLs       → hls-stream.js
+//   Everything else       → regular iframe embed
 
 function extractIframeSrc(text) {
   const m = text.match(/src=["']([^"']+)["']/i);
@@ -16,15 +12,21 @@ function extractIframeSrc(text) {
   return null;
 }
 
-// Remembers which media element was visible before the iframe took over
 let _preIframeMedia = null;
 
-function loadIframe(src) {
-  // ── Route HLS URLs to the dedicated HLS player ──────────────────────────
+function loadIframe(src, rawInput) {
+  // ── ntv.cx embed → verification widget + HLS ────────────────────────────
+  if (window.isNtvUrl?.(rawInput || src)) {
+    debugLog("ntv.cx embed detected, routing to verification flow");
+    window.loadNtvEmbed(rawInput || src);
+    document.getElementById("iframe-input").value = "";
+    return;
+  }
+
+  // ── HLS / M3U8 → HLS player ─────────────────────────────────────────────
   if (window.isHlsUrl?.(src)) {
-    debugLog(`HLS URL detected, routing to HLS player: ${src}`);
+    debugLog("HLS URL detected, routing to HLS player: " + src);
     window.loadHlsStream(src);
-    // Clear the input so the user sees it was accepted
     document.getElementById("iframe-input").value = "";
     return;
   }
@@ -32,13 +34,12 @@ function loadIframe(src) {
   // ── Regular iframe embed ─────────────────────────────────────────────────
   window._activeMedia?.pause();
 
-  // Save which element is currently shown so we can restore it on close
   const audio = document.getElementById("audio-player");
   const video = document.getElementById("video-player");
   _preIframeMedia =
     !audio.classList.contains("hidden") ? audio :
     !video.classList.contains("hidden") ? video :
-    audio; // fallback
+    audio;
 
   audio.classList.add("hidden");
   video.classList.add("hidden");
@@ -60,25 +61,22 @@ function loadIframe(src) {
     document.getElementById("next-btn").disabled = true;
   }
 
-  debugLog(`Iframe loaded: ${src}`);
+  debugLog("Iframe loaded: " + src);
 }
 
 function closeIframe() {
-  // ── If the close button was claimed by HLS, delegate to HLS close ────────
   const closeBtn = document.getElementById("iframe-close-btn");
   if (closeBtn?._hlsClose) {
     window.closeHlsStream();
     return;
   }
 
-  // ── Regular iframe close ─────────────────────────────────────────────────
   const el = document.getElementById("iframe-player");
   el.src = "";
   el.classList.add("hidden");
   closeBtn?.classList.add("hidden");
   document.getElementById("iframe-input").value = "";
 
-  // Restore whichever element was visible before the iframe
   if (_preIframeMedia) {
     _preIframeMedia.classList.remove("hidden");
     _preIframeMedia = null;
@@ -97,13 +95,12 @@ function closeIframe() {
 window.isIframeActive = () =>
   !document.getElementById("iframe-player").classList.contains("hidden");
 
-// ─── Button event bindings ────────────────────────────────────────────────────
+// ─── Event bindings ───────────────────────────────────────────────────────────
 
 document.getElementById("iframe-load-btn").addEventListener("click", () => {
-  const src = extractIframeSrc(
-    document.getElementById("iframe-input").value.trim(),
-  );
-  if (src) loadIframe(src);
+  const raw = document.getElementById("iframe-input").value.trim();
+  const src = extractIframeSrc(raw);
+  if (raw && (window.isNtvUrl?.(raw) || src)) loadIframe(src || raw, raw);
   else debugLog("Could not extract src from input");
 });
 
@@ -111,9 +108,8 @@ document.getElementById("iframe-close-btn").addEventListener("click", closeIfram
 
 document.getElementById("iframe-input").addEventListener("paste", () => {
   setTimeout(() => {
-    const src = extractIframeSrc(
-      document.getElementById("iframe-input").value.trim(),
-    );
-    if (src) loadIframe(src);
+    const raw = document.getElementById("iframe-input").value.trim();
+    const src = extractIframeSrc(raw);
+    if (raw && (window.isNtvUrl?.(raw) || src)) loadIframe(src || raw, raw);
   }, 0);
 });

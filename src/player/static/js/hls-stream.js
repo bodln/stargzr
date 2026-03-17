@@ -8,57 +8,29 @@ let _stallWatchdog = null;
 let _lastProgress = 0;
 let _hlsSrc = null;
 let _keyCache = {};
+
+// Guards against concurrent recovery attempts stacking on each other.
+// When _hardRecoverHls fires it sets this true; it's cleared once the
+// reattach completes (or fails). Any recovery path that finds this true
+// bails out immediately, preventing the rapid-fire NS_BINDING_ABORTED loop
+// where each new loadSource() aborts the previous in-flight request.
 let _recovering = false;
 
-// ─── PNG header stripping ─────────────────────────────────────────────────────
+// ─── Cache-busting helper ─────────────────────────────────────────────────────
 //
-// The proxy serves TS segments disguised as PNG files. Some segments have a
-// real PNG file header prepended before the MPEG-TS payload:
+// CRITICAL: only ever call this on FRAGMENT URLs, never on the manifest.
 //
-//   bytes 0-7:  \x89 P N G \r \n \x1a \n   ← PNG magic
-//   bytes 8+:   ... PNG chunks ...
-//   somewhere:  \x47 ...                    ← first TS sync byte
+// The manifest URL (e.g. chevy.soyspace.cyou/proxy/.../mono.css) has a
+// server-side session tied to the exact URL string. Appending ?_cb=timestamp
+// produces a URL the server has never whitelisted → it aborts the connection
+// before any bytes are sent (NS_BINDING_ABORTED in Firefox).
 //
-// Desktop HLS.js scans for the first sync byte so it silently works.
-// Mobile HLS.js (Chrome/Firefox Android) validates byte 0 strictly,
-// sees 0x89 instead of 0x47, and throws fragParsingError.
+// Segments (*.ts, *.png-disguised TS) have static-looking filenames and ARE
+// cached by the browser. Without busting them every fetch returns the same
+// bytes, causing HLS.js to decode the same audio/video in a loop.
 //
-// We scan for the first TS sync byte PAIR (0x47 at N, 0x47 at N+188)
-// which unambiguously marks the start of the TS payload, then slice off
-// everything before it. If byte 0 is already 0x47 it's returned untouched.
-const TS_SYNC = 0x47;
-const TS_PKT_SIZE = 188;
-const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-
-function _stripPngHeader(buffer) {
-  const view = new Uint8Array(buffer);
-
-  // Fast path: already starts with TS sync byte
-  if (view[0] === TS_SYNC) return buffer;
-
-  // Only bother scanning if it's actually a PNG
-  const hasPngMagic = PNG_MAGIC.every((b, i) => view[i] === b);
-  if (!hasPngMagic) return buffer;
-
-  // Find first valid TS sync-byte pair
-  const limit = view.length - TS_PKT_SIZE;
-  for (let i = 8; i < limit; i++) {
-    if (view[i] === TS_SYNC && view[i + TS_PKT_SIZE] === TS_SYNC) {
-      debugLog("HLS: stripped " + i + "b PNG header from segment");
-      return buffer.slice(i);
-    }
-  }
-
-  debugLog(
-    "HLS: PNG magic found but no TS sync pair — passing through unchanged",
-  );
-  return buffer;
-}
-
-// ─── Cache-bust helper ────────────────────────────────────────────────────────
-// Applied to FRAGMENT URLs only. Never touch the manifest URL — the server
-// ties the reCAPTCHA session to the exact URL string and will reject any
-// modification of it, including added query params.
+// HLS.js handles manifest cache-invalidation internally (it sets Cache-Control
+// headers and uses its own polling timer) so we don't need to touch it.
 function _cacheBust(url) {
   const sep = url.includes("?") ? "&" : "?";
   return url + sep + "_cb=" + Date.now();
@@ -123,77 +95,73 @@ function makeKeyLoader() {
   return KeyLoader;
 }
 
-// ─── Unified loader ───────────────────────────────────────────────────────────
-// manifest/level : add Cache-Control: no-cache (URL untouched)
-// fragment       : cache-bust URL + force arraybuffer + strip PNG header
-// key/other      : pass through unmodified
+// ─── Fragment loader factory ──────────────────────────────────────────────────
+// Two jobs:
+//   1. Force responseType=arraybuffer so .png-disguised TS segments pass
+//      through the browser's MIME type check and reach the MSE decoder.
+//   2. Cache-bust FRAGMENT URLs ONLY. See _cacheBust() comment above for why
+//      we must never apply this to the manifest.
 function makeFragLoaderClass() {
   const DefaultLoader = Hls.DefaultConfig.loader;
 
-  class UnifiedLoader extends DefaultLoader {
+  class FragLoader extends DefaultLoader {
     constructor(config) {
       super(config);
     }
 
     load(context, config, callbacks) {
-      const type = context.type;
-
-      if (type === "manifest" || type === "level") {
-        const origXhrSetup = config.xhrSetup;
-        return super.load(
-          context,
-          Object.assign({}, config, {
-            xhrSetup: function (xhr, url) {
-              xhr.setRequestHeader("Cache-Control", "no-cache");
-              xhr.setRequestHeader("Pragma", "no-cache");
-              if (origXhrSetup) origXhrSetup(xhr, url);
-            },
-          }),
-          callbacks,
-        );
+      if (context.type !== "fragment") {
+        // Manifest, playlist, key — pass through completely unmodified.
+        // The manifest URL must stay byte-for-byte identical to what the
+        // server whitelisted during session setup.
+        return super.load(context, config, callbacks);
       }
 
-      if (type === "fragment") {
-        const bustedContext = Object.assign({}, context, {
-          url: _cacheBust(context.url),
-        });
+      // Cache-bust fragment URLs so the browser never serves a stale copy.
+      // Shallow-clone context to avoid mutating HLS.js's internal object.
+      const bustedContext = Object.assign({}, context, {
+        url: _cacheBust(context.url),
+      });
 
-        const origSuccess = callbacks.onSuccess;
-        const wrappedCallbacks = Object.assign({}, callbacks, {
-          onSuccess: function (response, stats, ctx, networkDetails) {
-            if (response && response.data instanceof ArrayBuffer) {
-              response = Object.assign({}, response, {
-                data: _stripPngHeader(response.data),
-              });
-            }
-            origSuccess(response, stats, ctx, networkDetails);
-          },
-        });
+      const origSuccess = callbacks.onSuccess;
+      const wrappedCallbacks = Object.assign({}, callbacks, {
+        onSuccess: function (response, stats, ctx, networkDetails) {
+          origSuccess(response, stats, ctx, networkDetails);
+        },
+      });
 
-        const origXhrSetup = config.xhrSetup;
-        return super.load(
-          bustedContext,
-          Object.assign({}, config, {
-            xhrSetup: function (xhr, url) {
-              xhr.responseType = "arraybuffer";
-              if (origXhrSetup) origXhrSetup(xhr, url);
-            },
-          }),
-          wrappedCallbacks,
-        );
-      }
+      const origXhrSetup = config.xhrSetup;
+      const patchedConfig = Object.assign({}, config, {
+        xhrSetup: function (xhr, url) {
+          // Force arraybuffer so .png-labelled TS content isn't mangled
+          // by the browser's MIME-based response handling.
+          xhr.responseType = "arraybuffer";
+          if (origXhrSetup) origXhrSetup(xhr, url);
+        },
+      });
 
-      return super.load(context, config, callbacks);
+      super.load(bustedContext, patchedConfig, wrappedCallbacks);
     }
   }
 
-  return UnifiedLoader;
+  return FragLoader;
 }
 
 // ─── Hard recovery: detach + reattach ────────────────────────────────────────
+//
+// Used when startLoad(-1) didn't produce any new fragments (MSE SourceBuffer
+// state has diverged). detachMedia() nukes the MediaSource and SourceBuffers;
+// attachMedia() rebuilds and fires MEDIA_ATTACHED → loadSource(src).
+//
+// _recovering guards against concurrent calls. Without it, each aborted
+// manifest request fires bufferStalledError → another _hardRecoverHls → another
+// loadSource which aborts the previous one → tight NS_BINDING_ABORTED loop.
+//
+// The 300ms delay prevents InvalidStateError from browsers that close the old
+// MediaSource asynchronously.
 function _hardRecoverHls(src) {
   if (_recovering) {
-    debugLog("HLS: recovery in progress, skipping");
+    debugLog("HLS: hard recovery already in progress, skipping");
     return;
   }
   _recovering = true;
@@ -205,6 +173,9 @@ function _hardRecoverHls(src) {
     setTimeout(function () {
       try {
         _hlsInstance.attachMedia(_hlsVideoEl);
+        // MEDIA_ATTACHED fires → loadSource(src) called by existing listener.
+        // _recovering is cleared there, not here, so the guard stays active
+        // for the full async round-trip.
         _lastProgress = Date.now();
       } catch (e) {
         debugLog(
@@ -230,7 +201,7 @@ function _hardRecoverHls(src) {
 async function loadHlsStream(src) {
   _hlsSrc = src;
   _keyCache = {};
-  _recovering = false;
+  _recovering = false; // reset on every fresh load
   debugLog("HLS: loading stream: " + src);
   _showHlsBadge("Loading...", "#ffc107");
 
@@ -242,8 +213,6 @@ async function loadHlsStream(src) {
     return;
   }
 
-  // Use the URL exactly as pasted — the server tied a reCAPTCHA session to
-  // this exact string. Do NOT call server_lookup or modify this URL in any way.
   const audio = document.getElementById("audio-player");
   const video = document.getElementById("video-player");
   window._activeMedia?.pause();
@@ -304,12 +273,7 @@ async function loadHlsStream(src) {
       fragLoadingMaxRetryTimeout: 8000,
       keyLoader: makeKeyLoader(),
       loader: makeFragLoaderClass(),
-      // Must be false — when true, HLS.js transfers the ArrayBuffer to a Web
-      // Worker via postMessage() as a transferable before our onSuccess callback
-      // runs, so the worker receives the original PNG-wrapped bytes and throws
-      // fragParsingError. With the worker disabled, demuxing happens on the
-      // main thread and _stripPngHeader() is guaranteed to run first.
-      enableWorker: false,
+      enableWorker: true,
       lowLatencyMode: false,
     });
 
@@ -318,7 +282,10 @@ async function loadHlsStream(src) {
 
     _hlsInstance.on(Hls.Events.MEDIA_ATTACHED, function () {
       debugLog("HLS: media attached, loading source");
+      // Pass src UNMODIFIED. The server ties a reCAPTCHA/IP session to the
+      // exact URL; any query param we add produces an unknown URL → abort.
       _hlsInstance.loadSource(src);
+      // Clear the recovery guard here — we're back to a clean state.
       _recovering = false;
     });
 
@@ -363,44 +330,48 @@ async function loadHlsStream(src) {
           (data.response ? " HTTP " + data.response.code : ""),
       );
 
+      // bufferStalledError: first-pass live-edge jump.
+      // The _recovering guard prevents this from firing during an active
+      // hard recovery (which itself triggered the stall via abort).
       if (
         !data.fatal &&
         data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR
       ) {
         if (_recovering) {
-          debugLog("HLS: stall during recovery — ignoring");
+          debugLog(
+            "HLS: buffer stalled during recovery — ignoring, waiting for reattach",
+          );
           return;
         }
-        debugLog("HLS: buffer stalled — live-edge jump");
+        debugLog("HLS: buffer stalled — live-edge jump (startLoad -1)");
         _showHlsBadge("Recovering...", "#ffc107");
         _lastProgress = Date.now();
         try {
           _hlsInstance.stopLoad();
           _hlsInstance.startLoad(-1);
         } catch (e) {
+          debugLog("HLS: startLoad(-1) threw, escalating immediately");
           _hardRecoverHls(src);
         }
         return;
       }
 
-      if (!data.fatal && data.details === Hls.ErrorDetails.FRAG_PARSING_ERROR) {
-        debugLog("HLS: frag parsing error — hard recovering");
-        _hardRecoverHls(src);
-        return;
-      }
       if (!data.fatal && data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR) {
-        debugLog("HLS: frag load error");
+        debugLog("HLS: frag load error — proxy may have auth/token issues");
         return;
       }
       if (!data.fatal && data.details === Hls.ErrorDetails.FRAG_LOAD_TIMEOUT) {
         debugLog("HLS: frag load timeout");
         return;
       }
+
       if (
         !data.fatal &&
         data.details === Hls.ErrorDetails.BUFFER_APPENDING_ERROR
       ) {
-        debugLog("HLS: MSE append error — hard recovering");
+        debugLog(
+          "HLS: MSE append error — SourceBuffer rejected segment, hard recovering",
+        );
         _hardRecoverHls(src);
         return;
       }
@@ -432,9 +403,7 @@ async function loadHlsStream(src) {
       }
     });
   } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-    // iOS native HLS — PNG stripping not available (browser fetches segments
-    // itself, bypassing our loader). May fail on .png-wrapped segments.
-    debugLog("HLS: native Safari — PNG stripping unavailable");
+    debugLog("HLS: native Safari");
     _hlsVideoEl = video;
     video.src = src;
     video.play().catch(function (e) {
@@ -450,10 +419,15 @@ function _startStallWatchdog(video, src) {
   _lastProgress = Date.now();
   _stopStallWatchdog();
   _stallWatchdog = setInterval(function () {
-    if (video.paused || video.ended || _recovering) return;
+    if (video.paused || video.ended) return;
+    if (_recovering) return; // don't fire during active recovery
     const secs = (Date.now() - _lastProgress) / 1000;
     if (secs > 12) {
-      debugLog("HLS: stall " + secs.toFixed(1) + "s — hard recovering");
+      debugLog(
+        "HLS: stall " +
+          secs.toFixed(1) +
+          "s — startLoad(-1) failed, hard recovering",
+      );
       _hardRecoverHls(src);
     }
   }, 3000);
@@ -563,8 +537,3 @@ function _removeHlsBadge() {
 window.loadHlsStream = loadHlsStream;
 window.closeHlsStream = closeHlsStream;
 window.isHlsUrl = isHlsUrl;
-
-//TODO
-// attempt and fix this stuff for mobile
-// make the hls we have more effcient somehow
-// try and make it so sa y adevice with good internet can stream a hls and add a lot of buffer and broadcast such stream so that weaker internet clients can watch smoothly, basically have a device buffer as much as possible and then  distribute to weaker ones
