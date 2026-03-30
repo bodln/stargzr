@@ -559,10 +559,10 @@ async fn handle_client_message(
 
             if was_already_broadcasting {
                 tracing::debug!(
-                    "Already registered - updating state only (NOT incrementing counter)",
+                    "Already registered - updating state only",
                 );
             } else {
-                tracing::debug!("New broadcaster starting (incrementing counter)",);
+                tracing::debug!("New broadcaster starting updating broadcaster count too",);
             }
 
             tracing::info!(media_index, playback_time, is_playing, "Starting broadcast");
