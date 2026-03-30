@@ -26,11 +26,11 @@ COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/stargzr /app/s
 # Copy static files, CARGO_MANIFEST_DIR in the binary resolves to /app (the builder WORKDIR),
 # so the binary looks for static assets at /app/src/player/static at runtime
 COPY --from=builder /app/src/player/static /app/src/player/static
-# Create music directory
-RUN mkdir -p /app/music
+# Create media directory
+RUN mkdir -p /app/media
 # Expose the port
 EXPOSE 8083
 # Set environment variable
-ENV MUSIC_PATH=/app/music
+ENV MEDIA_PATH=/app/media
 # Run the binary
 CMD ["/app/stargzr"]

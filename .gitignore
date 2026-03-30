@@ -5,8 +5,8 @@
 Rust Atomics and Locks (Mara Bos) (Z-Library) open with aquile reader dont forget.pdf
 ~WRL0853.tmp
 ~$st notes formated.docx
-music/*
-!music/.gitkeep
+media/*
+!media/.gitkeep
 todo.txt
 .gitignore
 stress_test

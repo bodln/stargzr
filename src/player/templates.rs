@@ -29,9 +29,10 @@ impl IntoResponse for PlayerTemplate {
                 .header(
                     header::SET_COOKIE,
                     format!(
-                        "player_session={}; Path=/stargzr/player; HttpOnly; SameSite=Strict; Max-Age=3600",
-                        self.session_id
-                    ),
+                        "player_session={}; Path=/stargzr/player; HttpOnly; SameSite=Strict; Max-Age={}",
+                        self.session_id,
+                        1 * 24 * 3600
+                    )
                 )
                 .body(axum::body::Body::from(html))
                 .unwrap(),

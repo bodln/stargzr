@@ -337,7 +337,7 @@ pub async fn stream_audio_internal(
     headers: &HeaderMap,
     session_id: &str,
 ) -> Result<Response, StatusCode> {
-    let file_path = state.music_folder.join(&media.filename);
+    let file_path = state.media_folder.join(&media.filename);
     let file_size = media.size;
 
     // Touch the session so passive listeners don't get cleaned up mid-media.
@@ -441,7 +441,7 @@ pub async fn get_subtitles(
             .ok_or(StatusCode::NOT_FOUND)?
     };
 
-    let path = state.music_folder.join(&vtt_filename);
+    let path = state.media_folder.join(&vtt_filename);
 
     if !path.exists() {
         return Err(StatusCode::NOT_FOUND);
@@ -529,7 +529,7 @@ pub async fn get_playlist(State(state): State<SharedState>) -> impl IntoResponse
     axum::Json(medias)
 }
 
-/// Returns all non-media files and subdirectories inside the music folder.
+/// Returns all non-media files and subdirectories inside the media folder.
 /// Files carry their byte size; directories carry size 0 and is_dir: true.
 /// Directories sort before files, then everything sorts alphabetically.
 pub async fn get_other_files(State(state): State<SharedState>) -> impl IntoResponse {
@@ -542,7 +542,7 @@ pub async fn get_other_files(State(state): State<SharedState>) -> impl IntoRespo
 
     let mut entries: Vec<OtherFile> = Vec::new();
 
-    if let Ok(mut read_dir) = tokio::fs::read_dir(&*state.music_folder).await {
+    if let Ok(mut read_dir) = tokio::fs::read_dir(&*state.media_folder).await {
         while let Ok(Some(entry)) = read_dir.next_entry().await {
             if let Some(name) = entry.file_name().to_str() {
                     if let Ok(meta) = entry.metadata().await {
@@ -575,7 +575,7 @@ pub async fn get_other_files(State(state): State<SharedState>) -> impl IntoRespo
     axum::Json(entries)
 }
 
-/// Serves a non-media file from the music folder as a download.
+/// Serves a non-media file from the media folder as a download.
 /// Used by the "Other" tab for files that don't have playlist IDs.
 /// Streams in STREAMING_CHUNK_BYTES chunks so the file is never held in RAM, safe for large files.
 pub async fn download_file(
@@ -590,7 +590,7 @@ pub async fn download_file(
         .unwrap_or_else(|| "unknown".to_string());
 
     let safe = sanitize_filename(&filename);
-    let path = state.music_folder.join(&safe);
+    let path = state.media_folder.join(&safe);
 
     if !path.exists() || !path.is_file() {
         return Err(StatusCode::NOT_FOUND);
@@ -622,7 +622,7 @@ pub async fn download_file(
         .unwrap())
 }
 
-/// Zips an entire subdirectory of the music folder and serves it as a download.
+/// Zips an entire subdirectory of the media folder and serves it as a download.
 ///
 /// Folders larger than MAX_ZIP_FOLDER_BYTES are rejected with 413 before any work is done.
 ///
@@ -638,7 +638,7 @@ pub async fn download_folder(
     Path(foldername): Path<String>,
 ) -> Result<Response, StatusCode> {
     let safe = sanitize_filename(&foldername);
-    let path = state.music_folder.join(&safe);
+    let path = state.media_folder.join(&safe);
 
     if !path.exists() || !path.is_dir() {
         return Err(StatusCode::NOT_FOUND);
@@ -759,7 +759,8 @@ fn zip_dir_recursive<W: std::io::Write + std::io::Seek>(
     dir: &std::path::Path,
     prefix: &str,
 ) -> std::io::Result<()> {
-    let options = zip::write::SimpleFileOptions::default();
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored); // Makes it so we dont compress but only zip, so we save time
 
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -878,7 +879,7 @@ pub async fn upload_file(
         .unwrap_or_else(|| "unknown".to_string());
 
     // Check the total folder size before accepting any data
-    let folder_size = dir_size(&state.music_folder).await?;
+    let folder_size = dir_size(&state.media_folder).await?;
     if folder_size >= MAX_FOLDER_BYTES {
         return Err(PlayerError::UploadFailed(
             "Server library is full (5 GB limit reached)".into(),
@@ -957,7 +958,7 @@ pub async fn upload_file(
             continue;
         }
 
-        let dest = state.music_folder.join(&safe_name);
+        let dest = state.media_folder.join(&safe_name);
         if dest.exists() {
             file_errors.push(format!(
                 "'{}' already exists in the library",
@@ -989,8 +990,8 @@ pub async fn upload_file(
             MediaType::Video => {
                 let stem = safe_name.rsplit_once('.').map(|(s, _)| s).unwrap_or(&safe_name);
                 let mp4_name = format!("{}.mp4", stem);
-                let mp4_dest = state.music_folder.join(&mp4_name);
-                let vtt_dest = state.music_folder.join(format!("{}.vtt", stem));
+                let mp4_dest = state.media_folder.join(&mp4_name);
+                let vtt_dest = state.media_folder.join(format!("{}.vtt", stem));
 
                 tracing::info!(
                     ip = %ip,

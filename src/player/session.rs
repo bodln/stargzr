@@ -100,7 +100,7 @@ pub async fn cleanup_stale_sessions(state: Arc<AppState>) {
 
             state.sessions.retain(|session_id, session| {
                 let age = now.duration_since(session.last_activity);
-                let should_keep = age.as_secs() < 3600; // Only keep sessions younger than 1 hour
+                let should_keep = age.as_secs() < 1 * 24 * 3600; // Only keep sessions younger than 1 day
 
                 if !should_keep {
                     removed += 1;

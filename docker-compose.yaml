@@ -8,8 +8,8 @@ services:
     ports:
       - "8083:8083"
     volumes:
-      # CHANGE THIS PATH to your music folder location
-      - ./music:/app/music:ro
+      # CHANGE THIS PATH to your media folder location
+      - ./media:/app/media:ro
     environment:
-      - MUSIC_PATH=/app/music
+      - MEDIA_PATH=/app/media
     restart: unless-stopped

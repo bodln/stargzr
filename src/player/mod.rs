@@ -37,13 +37,13 @@ use handlers::{
 use rate_limit::RateLimiter;
 use session::cleanup_stale_sessions;
 
-/// Initializes the shared player state by scanning the music folder,
+/// Initializes the shared player state by scanning the media folder,
 /// building a playlist, and setting up broadcast channels and session tracking.
-async fn init_player_state(music_folder: PathBuf) -> SharedState {
+async fn init_player_state(media_folder: PathBuf) -> SharedState {
     let mut playlist = Vec::new();
 
-    // Read all files in the music folder asynchronously
-    if let Ok(mut entries) = tokio::fs::read_dir(&music_folder).await {
+    // Read all files in the media folder asynchronously
+    if let Ok(mut entries) = tokio::fs::read_dir(&media_folder).await {
         while let Ok(Some(entry)) = entries.next_entry().await {
             if let Some(filename) = entry.file_name().to_str() {
                 // Accept all supported audio and video formats
@@ -71,7 +71,7 @@ async fn init_player_state(music_folder: PathBuf) -> SharedState {
     // Return the shared application state wrapped in Arc for multi-threaded use
     Arc::new(AppState {
         playlist: Arc::new(RwLock::new(playlist)),
-        music_folder: Arc::new(music_folder),
+        media_folder: Arc::new(media_folder),
         sessions: DashMap::new(),
         broadcast_states: DashMap::new(),
         broadcast_channels: DashMap::new(),
@@ -86,7 +86,7 @@ async fn init_player_state(music_folder: PathBuf) -> SharedState {
     })
 }
 
-/// Creates an Axum router with all the player routes, using the given music folder.
+/// Creates an Axum router with all the player routes, using the given media folder.
 /// Returns a future because state initialization is async.
 pub fn create_player_router(state: Arc<AppState>) -> impl std::future::Future<Output = Router> {
     async move {

@@ -91,7 +91,7 @@ pub struct AppState {
     // All read paths (streaming, playlist fetch, radio) acquire a read guard.
     // The upload handler acquires the write guard only during the insert.
     pub playlist: Arc<RwLock<Vec<MediaInfo>>>,
-    pub music_folder: Arc<PathBuf>,
+    pub media_folder: Arc<PathBuf>,
 
     pub sessions: DashMap<String, PlayerSession>,
 

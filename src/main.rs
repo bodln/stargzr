@@ -4,14 +4,12 @@ use std::env;
 
 #[tokio::main]
 async fn main() {
-    // Try to get music path from environment variable, otherwise use default
-    let music_path = env::var("MUSIC_PATH")
-        .unwrap_or_else(|_| "music".to_string());
+    // Try to get media path from environment variable, otherwise use default
+    let media_path = env::var("MEDIA_PATH")
+        .unwrap_or_else(|_| "media".to_string());
     
-    println!("Starting stargzr with music path: {}", music_path);
+    println!("Starting stargzr with media path: {}", media_path);
     
-    player::initialize(PathBuf::from(music_path)).await;
+    player::initialize(PathBuf::from(media_path)).await;
 }
 // DOCUMENT ENTIRE WORK FLOW WITH CODE SNIPPETS
-// TODO 
-// Rename these here and in docker to media, rename the folder also
