@@ -23,7 +23,7 @@ pub enum MediaType {
 pub fn media_type_for(filename: &str) -> Option<MediaType> {
     let ext = filename.rsplit('.').next()?.to_lowercase();
     match ext.as_str() {
-        "mp3" | "m4a" | "wav" | "flac" => Some(MediaType::Audio),
+        "mp3" | "m4a" | "wav" | "flac" | "ogg" => Some(MediaType::Audio),
         "mp4" | "webm" | "mkv" | "mov" | "avi"  => Some(MediaType::Video),
         _ => None,
     }

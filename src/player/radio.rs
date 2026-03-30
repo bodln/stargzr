@@ -382,7 +382,13 @@ async fn handle_client_message(
                     .unwrap_or_else(|| format!("Unknown media #{}", media_index))
             };
 
-            tracing::debug!(media_name, media_index, playback_time, is_playing, "Broadcast update");
+            tracing::debug!(
+                media_name,
+                media_index,
+                playback_time,
+                is_playing,
+                "Broadcast update"
+            );
 
             // If the session isn't broadcasting don't update
             if !state.broadcast_states.contains_key(&broadcaster_id) {
@@ -605,12 +611,13 @@ async fn handle_client_message(
                         broadcaster_id: broadcaster_id.clone(),
                     }));
 
-                state
-                    .global_broadcast_tx
-                    .send(broadcasting_msg)
-                    .map_err(|_| PlayerError::BroadcastSendError)?;
-
+                match state.global_broadcast_tx.send(broadcasting_msg) {
+                    Ok(count) => tracing::info!(clients = count, "BroadcasterOnline sent"),
+                    Err(_) => tracing::debug!("BroadcasterOnline: no listeners yet"),
+                }
                 tracing::info!("Broadcaster came online");
+
+                broadcast_analytics(state);
             }
 
             broadcast_analytics(state);
@@ -687,7 +694,7 @@ async fn handle_client_message(
 
             if let Some(tx) = state.broadcast_channels.get(&broadcaster_id) {
                 match tx.send(msg) {
-                    Ok(n)  => tracing::debug!(listeners = n, "AutoNext fanned out"),
+                    Ok(n) => tracing::debug!(listeners = n, "AutoNext fanned out"),
                     Err(_) => tracing::debug!("AutoNext sent but no active listeners"),
                 }
             }

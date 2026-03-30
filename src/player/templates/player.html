@@ -7,6 +7,21 @@
   <body>
     <h1>stargzr</h1>
 
+    <div
+      class="analytics-stats"
+      style="
+        display: flex;
+        gap: 16px;
+        margin-bottom: 10px;
+        font-size: 13px;
+        color: var(--color-text-secondary, #666);
+      "
+    >
+      <span>Connections: <strong id="stat-connections">0</strong></span>
+      <span>Broadcasters: <strong id="stat-broadcasters">0</strong></span>
+      <span>Listeners: <strong id="stat-listeners">0</strong></span>
+    </div>
+    
     <div class="broadcasters-container">
       <h3>📻 Live Broadcasts</h3>
       <div id="broadcasters-list">
