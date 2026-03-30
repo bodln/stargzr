@@ -1,42 +1,42 @@
 class RadioPlayer {
   constructor(audioElement, sessionId) {
-    this.audio     = audioElement;
+    this.audio = audioElement;
     this.sessionId = sessionId;
-    this.mode      = "private";
-    this.tunedBroadcaster   = null;
-    this.ws                 = null;
-    this.heartbeatInterval  = null;
-    this.targetTime         = 0;
-    this.isBroadcasting     = false;
+    this.mode = "private";
+    this.tunedBroadcaster = null;
+    this.ws = null;
+    this.heartbeatInterval = null;
+    this.targetTime = 0;
+    this.isBroadcasting = false;
     this.isStartingBroadcast = false;
-    this.wakeLock           = null;
-    this.pageHiddenAt       = null;
+    this.wakeLock = null;
+    this.pageHiddenAt = null;
 
     // Queued next media received from AutoNext while listener's current track
     // is still playing. Cleared once the local 'ended' event fires.
     this.pendingAutoNextIndex = null;
-    this.pendingAutoNextTime  = 0;
+    this.pendingAutoNextTime = 0;
 
     // Guards against duplicate canplay handlers when the same media-change
     // produces more than one Sync before the browser fires canplay.
-    this._loadingMediaIndex  = null;
-    this._pendingSeekTime   = 0;
-    this._pendingIsPlaying  = false;
+    this._loadingMediaIndex = null;
+    this._pendingSeekTime = 0;
+    this._pendingIsPlaying = false;
 
     // Set to Date.now() when TuneIn is sent; cleared after the first Sync.
     // Used to compensate for server-to-listener transit on initial sync.
     this._tuneInSentAt = null;
 
     // Reconnection state
-    this.reconnectAttempts    = 0;
+    this.reconnectAttempts = 0;
     this.maxReconnectAttempts = 10;
-    this.baseReconnectDelay   = 500;
-    this.maxReconnectDelay    = 30000;
-    this.reconnectTimer       = null;
+    this.baseReconnectDelay = 500;
+    this.maxReconnectDelay = 30000;
+    this.reconnectTimer = null;
     this.isIntentionalDisconnect = false;
 
     // Event listener tracking for cleanup
-    this.boundHandlers      = new Map();
+    this.boundHandlers = new Map();
     this.audioEventHandlers = new Map();
 
     this.connectionState = "disconnected";
@@ -52,14 +52,16 @@ class RadioPlayer {
   }
 
   isMobile() {
-    return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+      navigator.userAgent,
+    );
   }
 
   setupPageVisibilityHandling() {
-    let visibilityProp  = "hidden";
+    let visibilityProp = "hidden";
     let visibilityEvent = "visibilitychange";
     if (typeof document.webkitHidden !== "undefined") {
-      visibilityProp  = "webkitHidden";
+      visibilityProp = "webkitHidden";
       visibilityEvent = "webkitvisibilitychange";
     }
     document.addEventListener(visibilityEvent, () => {
@@ -82,9 +84,13 @@ class RadioPlayer {
   }
 
   onPageVisible() {
-    const hiddenDuration = this.pageHiddenAt ? (Date.now() - this.pageHiddenAt) / 1000 : 0;
+    const hiddenDuration = this.pageHiddenAt
+      ? (Date.now() - this.pageHiddenAt) / 1000
+      : 0;
     this.pageHiddenAt = null;
-    debugLog(`👁️ Page visible again (was hidden for ${hiddenDuration.toFixed(1)}s)`);
+    debugLog(
+      `👁️ Page visible again (was hidden for ${hiddenDuration.toFixed(1)}s)`,
+    );
 
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       debugLog("WebSocket disconnected, reconnecting...");
@@ -95,7 +101,8 @@ class RadioPlayer {
       if (hiddenDuration < 40) {
         debugLog("✓ Resuming broadcast (short background duration)");
         this.requestWakeLock();
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) this.sendHeartbeat();
+        if (this.ws && this.ws.readyState === WebSocket.OPEN)
+          this.sendHeartbeat();
       } else {
         debugLog("⚠️ Long background duration - verifying broadcast state");
         this.verifyBroadcastState();
@@ -104,11 +111,16 @@ class RadioPlayer {
   }
 
   async requestWakeLock() {
-    if (!("wakeLock" in navigator)) { debugLog("Wake Lock API not supported"); return; }
+    if (!("wakeLock" in navigator)) {
+      debugLog("Wake Lock API not supported");
+      return;
+    }
     try {
       this.wakeLock = await navigator.wakeLock.request("screen");
       debugLog("✓ Wake lock acquired - screen will stay on");
-      this.wakeLock.addEventListener("release", () => debugLog("Wake lock released"));
+      this.wakeLock.addEventListener("release", () =>
+        debugLog("Wake lock released"),
+      );
     } catch (err) {
       debugLog(`Wake lock error: ${err.message}`);
     }
@@ -116,53 +128,84 @@ class RadioPlayer {
 
   async releaseWakeLock() {
     if (!this.wakeLock) return;
-    try { await this.wakeLock.release(); this.wakeLock = null; debugLog("Wake lock released"); }
-    catch (err) { debugLog(`Wake lock release error: ${err.message}`); }
+    try {
+      await this.wakeLock.release();
+      this.wakeLock = null;
+      debugLog("Wake lock released");
+    } catch (err) {
+      debugLog(`Wake lock release error: ${err.message}`);
+    }
   }
 
   async verifyBroadcastState() {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     debugLog("Querying broadcast state from server");
-    this.ws.send(JSON.stringify({ type: "QueryBroadcastState", session_id: this.sessionId }));
+    this.ws.send(
+      JSON.stringify({
+        type: "QueryBroadcastState",
+        session_id: this.sessionId,
+      }),
+    );
   }
 
   getReconnectDelay() {
-    const exponential = this.baseReconnectDelay * Math.pow(2, this.reconnectAttempts);
-    const jitter      = exponential * 0.2 * (Math.random() - 0.5);
-    return Math.min(Math.max(this.baseReconnectDelay, exponential + jitter), this.maxReconnectDelay);
+    const exponential =
+      this.baseReconnectDelay * Math.pow(2, this.reconnectAttempts);
+    const jitter = exponential * 0.2 * (Math.random() - 0.5);
+    return Math.min(
+      Math.max(this.baseReconnectDelay, exponential + jitter),
+      this.maxReconnectDelay,
+    );
   }
 
   updateConnectionState(newState) {
     this.connectionState = newState;
     const states = {
-      connected:    { icon: "🟢", text: "Connected",        color: "#28a745" },
-      connecting:   { icon: "🟡", text: "Connecting...",    color: "#ffc107" },
-      disconnected: { icon: "⚪", text: "Disconnected",     color: "#6c757d" },
-      error:        { icon: "🔴", text: "Connection Error", color: "#dc3545" },
+      connected: { icon: "🟢", text: "Connected", color: "#28a745" },
+      connecting: { icon: "🟡", text: "Connecting...", color: "#ffc107" },
+      disconnected: { icon: "⚪", text: "Disconnected", color: "#6c757d" },
+      error: { icon: "🔴", text: "Connection Error", color: "#dc3545" },
     };
     const cfg = states[newState] ?? states.disconnected;
-    document.getElementById("connection-indicator").textContent  = cfg.icon;
+    document.getElementById("connection-indicator").textContent = cfg.icon;
     const text = document.getElementById("connection-text");
-    text.textContent  = cfg.text;
-    text.style.color  = cfg.color;
+    text.textContent = cfg.text;
+    text.style.color = cfg.color;
 
-    document.dispatchEvent(new CustomEvent("connectionStateChange", {
-      detail: { state: newState, attempt: this.reconnectAttempts, maxAttempts: this.maxReconnectAttempts },
-    }));
+    document.dispatchEvent(
+      new CustomEvent("connectionStateChange", {
+        detail: {
+          state: newState,
+          attempt: this.reconnectAttempts,
+          maxAttempts: this.maxReconnectAttempts,
+        },
+      }),
+    );
   }
 
   connectWebSocket() {
-    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
-      debugLog(`WebSocket already ${this.ws.readyState === WebSocket.OPEN ? "connected" : "connecting"}, skipping...`);
+    if (
+      this.ws &&
+      (this.ws.readyState === WebSocket.OPEN ||
+        this.ws.readyState === WebSocket.CONNECTING)
+    ) {
+      debugLog(
+        `WebSocket already ${this.ws.readyState === WebSocket.OPEN ? "connected" : "connecting"}, skipping...`,
+      );
       return;
     }
-    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
 
     this.updateConnectionState("connecting");
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl    = `${protocol}//${window.location.host}/stargzr/player/radio`;
-    debugLog(`Connecting to WebSocket: ${wsUrl} (attempt ${this.reconnectAttempts + 1})`);
+    const wsUrl = `${protocol}//${window.location.host}/stargzr/player/radio`;
+    debugLog(
+      `Connecting to WebSocket: ${wsUrl} (attempt ${this.reconnectAttempts + 1})`,
+    );
 
     try {
       this.ws = new WebSocket(wsUrl);
@@ -188,60 +231,89 @@ class RadioPlayer {
 
     const onMessage = (event) => {
       debugLog(`Received: ${event.data}`);
-      try { this.handleRadioMessage(JSON.parse(event.data)); }
-      catch (error) { debugLog(`Failed to parse message: ${error.message}`); }
+      try {
+        this.handleRadioMessage(JSON.parse(event.data));
+      } catch (error) {
+        debugLog(`Failed to parse message: ${error.message}`);
+      }
     };
 
-    const onError = () => { debugLog("✗ WebSocket error"); this.updateConnectionState("error"); };
+    const onError = () => {
+      debugLog("✗ WebSocket error");
+      this.updateConnectionState("error");
+    };
 
     const onClose = async (event) => {
-      debugLog(`WebSocket closed (code: ${event.code}, clean: ${event.wasClean})`);
+      debugLog(
+        `WebSocket closed (code: ${event.code}, clean: ${event.wasClean})`,
+      );
       this.updateConnectionState("disconnected");
       this.removeWebSocketHandlers();
 
       if (event.code === 1006 && !this.isIntentionalDisconnect) {
         try {
           const resp = await fetch("/stargzr/player/session/check");
-          if (resp.status === 401) { debugLog("Session expired on WS connect, reloading..."); window.location.reload(); return; }
+          if (resp.status === 401) {
+            debugLog("Session expired on WS connect, reloading...");
+            window.location.reload();
+            return;
+          }
         } catch (_) {}
       }
 
       if (!this.isIntentionalDisconnect) this.scheduleReconnect();
-      else { debugLog("Intentional disconnect, not reconnecting"); this.isIntentionalDisconnect = false; }
+      else {
+        debugLog("Intentional disconnect, not reconnecting");
+        this.isIntentionalDisconnect = false;
+      }
     };
 
-    this.boundHandlers.set("open",    onOpen);
+    this.boundHandlers.set("open", onOpen);
     this.boundHandlers.set("message", onMessage);
-    this.boundHandlers.set("error",   onError);
-    this.boundHandlers.set("close",   onClose);
+    this.boundHandlers.set("error", onError);
+    this.boundHandlers.set("close", onClose);
 
-    this.ws.addEventListener("open",    onOpen);
+    this.ws.addEventListener("open", onOpen);
     this.ws.addEventListener("message", onMessage);
-    this.ws.addEventListener("error",   onError);
-    this.ws.addEventListener("close",   onClose);
+    this.ws.addEventListener("error", onError);
+    this.ws.addEventListener("close", onClose);
   }
 
   scheduleReconnect() {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      debugLog(`Max reconnection attempts (${this.maxReconnectAttempts}) reached`);
+      debugLog(
+        `Max reconnection attempts (${this.maxReconnectAttempts}) reached`,
+      );
       this.updateConnectionState("error");
-      alert("Unable to connect to server after multiple attempts. Please refresh the page.");
+      alert(
+        "Unable to connect to server after multiple attempts. Please refresh the page.",
+      );
       return;
     }
     const delay = this.getReconnectDelay();
-    debugLog(`Scheduling reconnection in ${delay}ms (attempt ${this.reconnectAttempts + 1}/${this.maxReconnectAttempts})`);
-    this.reconnectTimer = setTimeout(() => { this.reconnectAttempts++; this.connectWebSocket(); }, delay);
+    debugLog(
+      `Scheduling reconnection in ${delay}ms (attempt ${this.reconnectAttempts + 1}/${this.maxReconnectAttempts})`,
+    );
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectAttempts++;
+      this.connectWebSocket();
+    }, delay);
   }
 
   removeWebSocketHandlers() {
     if (!this.ws) return;
-    this.boundHandlers.forEach((handler, event) => this.ws.removeEventListener(event, handler));
+    this.boundHandlers.forEach((handler, event) =>
+      this.ws.removeEventListener(event, handler),
+    );
     this.boundHandlers.clear();
   }
 
   disconnect() {
     this.isIntentionalDisconnect = true;
-    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.isBroadcasting) this.stopBroadcasting();
 
     if (this.mode === "radio" && this.ws?.readyState === WebSocket.OPEN) {
@@ -249,7 +321,11 @@ class RadioPlayer {
     }
     if (this.ws) {
       this.removeWebSocketHandlers();
-      if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) this.ws.close();
+      if (
+        this.ws.readyState === WebSocket.OPEN ||
+        this.ws.readyState === WebSocket.CONNECTING
+      )
+        this.ws.close();
       this.ws = null;
     }
     this.updateConnectionState("disconnected");
@@ -260,27 +336,40 @@ class RadioPlayer {
     if (msg.type === "Sync" && msg.broadcaster_id === this.sessionId) return;
     debugLog(`Handling message type: ${msg.type}, mode: ${this.mode}`);
 
-    if (msg.type === "Analytics") { updateAnalyticsDisplay(msg); return; }
+    if (msg.type === "Analytics") {
+      updateAnalyticsDisplay(msg);
+      return;
+    }
 
     if (msg.type === "BroadcastStateResponse") {
-      debugLog(`Server says broadcasting: ${msg.is_broadcasting}, client thinks: ${this.isBroadcasting}`);
+      debugLog(
+        `Server says broadcasting: ${msg.is_broadcasting}, client thinks: ${this.isBroadcasting}`,
+      );
       if (msg.is_broadcasting !== this.isBroadcasting) {
         debugLog("⚠️ State mismatch detected!");
         if (msg.is_broadcasting && !this.isBroadcasting) {
           this.isBroadcasting = true;
           this.updateBroadcastingUI(true);
-          if (this.isMobile()) document.getElementById("mobile-warning").classList.remove("hidden");
+          if (this.isMobile())
+            document
+              .getElementById("mobile-warning")
+              .classList.remove("hidden");
         } else if (!msg.is_broadcasting && this.isBroadcasting) {
-          debugLog("🔄 Server lost our session - resuming broadcast automatically");
+          debugLog(
+            "🔄 Server lost our session - resuming broadcast automatically",
+          );
           const initMsg = {
             type: "StartBroadcasting",
             broadcaster_id: this.sessionId,
-            media_index:    this.getCurrentMediaIndex(),
+            media_index: this.getCurrentMediaIndex(),
             playback_time: this.audio.currentTime,
-            is_playing:    !this.audio.paused,
+            is_playing: !this.audio.paused,
           };
-          debugLog(`Resuming broadcast: media ${initMsg.media_index}, time ${initMsg.playback_time.toFixed(2)}s`);
-          if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(initMsg));
+          debugLog(
+            `Resuming broadcast: media ${initMsg.media_index}, time ${initMsg.playback_time.toFixed(2)}s`,
+          );
+          if (this.ws?.readyState === WebSocket.OPEN)
+            this.ws.send(JSON.stringify(initMsg));
         }
       }
       return;
@@ -288,8 +377,16 @@ class RadioPlayer {
 
     if (msg.type === "Error") {
       debugLog(`Server error: ${msg.message}`);
-      if (msg.message.includes("BroadcasterNotFound") || msg.message.includes("not broadcasting")) {
-        if (this.isBroadcasting) { this.stopBroadcasting(); alert("Your broadcast session ended. Please start broadcasting again if needed."); }
+      if (
+        msg.message.includes("BroadcasterNotFound") ||
+        msg.message.includes("not broadcasting")
+      ) {
+        if (this.isBroadcasting) {
+          this.stopBroadcasting();
+          alert(
+            "Your broadcast session ended. Please start broadcasting again if needed.",
+          );
+        }
       } else {
         alert(`Error: ${msg.message}. Please try and refresh the page.`);
       }
@@ -300,46 +397,66 @@ class RadioPlayer {
       if (this.tunedBroadcaster === msg.broadcaster_id) {
         debugLog(`Broadcaster ${msg.broadcaster_id} went offline`);
         this.tuneOut("broadcaster_offline");
-        alert("The broadcaster you were listening to has stopped broadcasting.");
+        alert(
+          "The broadcaster you were listening to has stopped broadcasting.",
+        );
       }
       return;
     }
 
     if (msg.type === "BroadcasterOnline") {
-      if (this.tunedBroadcaster === msg.broadcaster_id) debugLog(`User ${msg.broadcaster_id} is now broadcasting`);
+      if (this.tunedBroadcaster === msg.broadcaster_id)
+        debugLog(`User ${msg.broadcaster_id} is now broadcasting`);
       return;
     }
 
     if (msg.type === "AutoNext") {
       if (this.mode !== "radio") return;
-      debugLog(`AutoNext received: queuing media index ${msg.next_media_index} for after current track ends`);
+      debugLog(
+        `AutoNext received: queuing media index ${msg.next_media_index} for after current track ends`,
+      );
       this.pendingAutoNextIndex = msg.next_media_index;
-      this.pendingAutoNextTime  = 0;
+      this.pendingAutoNextTime = 0;
 
-      this.audio.addEventListener("ended", () => {
-        if (this.pendingAutoNextIndex === null) return;
-        const idx    = this.pendingAutoNextIndex;
-        const seekTo = this.pendingAutoNextTime;
-        this.pendingAutoNextIndex = null;
-        this.pendingAutoNextTime  = 0;
+      this.audio.addEventListener(
+        "ended",
+        () => {
+          if (this.pendingAutoNextIndex === null) return;
+          const idx = this.pendingAutoNextIndex;
+          const seekTo = this.pendingAutoNextTime;
+          this.pendingAutoNextIndex = null;
+          this.pendingAutoNextTime = 0;
 
-        const mediaId = window.playlistManager?.getMediaIdByServerIndex(idx) ?? null;
+          const mediaId =
+            window.playlistManager?.getMediaIdByServerIndex(idx) ?? null;
 
-        // Switch to the correct element before loading the next media
-        const nextMedia = mediaId ? window.playlistManager?.getMediaById(mediaId) : window.playlistManager?.originalMedias[idx];
-        window.switchMediaElement?.(nextMedia?.media_type === "video");
+          // Switch to the correct element before loading the next media
+          const nextMedia = mediaId
+            ? window.playlistManager?.getMediaById(mediaId)
+            : window.playlistManager?.originalMedias[idx];
+          window.switchMediaElement?.(nextMedia?.media_type === "video");
 
-        this.audio.src = mediaId ? `/stargzr/player/stream/id/${mediaId}` : `/stargzr/player/stream/${idx}`;
-        this._updateSubtitleTrack(mediaId, nextMedia?.media_type === "video");
-        this.audio.load();
+          this.audio.src = mediaId
+            ? `/stargzr/player/stream/id/${mediaId}`
+            : `/stargzr/player/stream/${idx}`;
+          this._updateSubtitleTrack(mediaId, nextMedia?.media_type === "video");
+          this.audio.load();
 
-        this.audio.addEventListener("canplay", () => {
-          this.audio.currentTime = seekTo;
-          this._radioPlay();
-        }, { once: true });
+          this.audio.addEventListener(
+            "canplay",
+            () => {
+              this.audio.currentTime = seekTo;
+              this._radioPlay();
+            },
+            { once: true },
+          );
 
-        debugLog(`AutoNext: switched to media index ${idx} at ${seekTo.toFixed(2)}s after local track ended`);
-      }, { once: true });
+          debugLog(
+            `AutoNext: switched to media index ${idx} at ${seekTo.toFixed(2)}s after local track ended`,
+          );
+        },
+        { once: true },
+      );
       return;
     }
 
@@ -364,59 +481,88 @@ class RadioPlayer {
 
     // First Sync after TuneIn: compensate for server-to-listener transit time
     if (this._tuneInSentAt !== null) {
-      const elapsed  = (Date.now() - this._tuneInSentAt) / 1000;
+      const elapsed = (Date.now() - this._tuneInSentAt) / 1000;
       this._tuneInSentAt = null;
-      const duration = isFinite(this.audio.duration) ? this.audio.duration : Infinity;
+      const duration = isFinite(this.audio.duration)
+        ? this.audio.duration
+        : Infinity;
       const adjusted = playback_time + elapsed;
       if (adjusted < duration) playback_time = adjusted;
-      debugLog(`TuneIn latency compensation: +${elapsed.toFixed(3)}s to ${playback_time.toFixed(2)}s`);
+      debugLog(
+        `TuneIn latency compensation: +${elapsed.toFixed(3)}s to ${playback_time.toFixed(2)}s`,
+      );
     }
 
     // Broadcaster is still on the pending AutoNext media: update position only
-    if (this.pendingAutoNextIndex !== null && msg.media_index === this.pendingAutoNextIndex) {
+    if (
+      this.pendingAutoNextIndex !== null &&
+      msg.media_index === this.pendingAutoNextIndex
+    ) {
       this.pendingAutoNextTime = playback_time;
       debugLog(`AutoNext position updated to ${playback_time.toFixed(2)}s`);
       return;
     }
 
     // Any manual broadcaster action clears the pending AutoNext
-    if (this.pendingAutoNextIndex !== null && msg.media_index !== this.pendingAutoNextIndex) {
-      debugLog(`Manual broadcaster action cleared pendingAutoNextIndex (was ${this.pendingAutoNextIndex})`);
+    if (
+      this.pendingAutoNextIndex !== null &&
+      msg.media_index !== this.pendingAutoNextIndex
+    ) {
+      debugLog(
+        `Manual broadcaster action cleared pendingAutoNextIndex (was ${this.pendingAutoNextIndex})`,
+      );
       this.pendingAutoNextIndex = null;
     }
 
     const currentIndex = this.getCurrentMediaIndex();
 
-    if (currentIndex !== media_index || this._loadingMediaIndex === media_index) {
-      this._pendingSeekTime  = playback_time;
+    if (
+      currentIndex !== media_index ||
+      this._loadingMediaIndex === media_index
+    ) {
+      this._pendingSeekTime = playback_time;
       this._pendingIsPlaying = is_playing;
 
       if (this._loadingMediaIndex !== media_index) {
-        debugLog(`Switching from media ${currentIndex} to media ${media_index}`);
+        debugLog(
+          `Switching from media ${currentIndex} to media ${media_index}`,
+        );
         this._loadingMediaIndex = media_index;
 
-        const mediaId   = window.playlistManager?.getMediaIdByServerIndex(media_index) ?? null;
-        const nextMedia = mediaId ? window.playlistManager?.getMediaById(mediaId) : window.playlistManager?.originalMedias[media_index];
+        const mediaId =
+          window.playlistManager?.getMediaIdByServerIndex(media_index) ?? null;
+        const nextMedia = mediaId
+          ? window.playlistManager?.getMediaById(mediaId)
+          : window.playlistManager?.originalMedias[media_index];
 
         // Switch media element before loading so the browser targets the right one
         window.switchMediaElement?.(nextMedia?.media_type === "video");
 
-        this.audio.src = mediaId ? `/stargzr/player/stream/id/${mediaId}` : `/stargzr/player/stream/${media_index}`;
+        this.audio.src = mediaId
+          ? `/stargzr/player/stream/id/${mediaId}`
+          : `/stargzr/player/stream/${media_index}`;
         this._updateSubtitleTrack(mediaId, nextMedia?.media_type === "video");
         this.audio.load();
 
-        this.audio.addEventListener("canplay", () => {
-          this._loadingMediaIndex = null;
-          const seekTo = this._pendingSeekTime < 1.0 ? 0 : this._pendingSeekTime;
-          debugLog(`canplay, seeking to ${seekTo.toFixed(2)}s (broadcaster at ${this._pendingSeekTime.toFixed(2)}s)`);
-          this.audio.currentTime = seekTo;
-          if (this._pendingIsPlaying) this._radioPlay();
-        }, { once: true });
+        this.audio.addEventListener(
+          "canplay",
+          () => {
+            this._loadingMediaIndex = null;
+            const seekTo =
+              this._pendingSeekTime < 1.0 ? 0 : this._pendingSeekTime;
+            debugLog(
+              `canplay, seeking to ${seekTo.toFixed(2)}s (broadcaster at ${this._pendingSeekTime.toFixed(2)}s)`,
+            );
+            this.audio.currentTime = seekTo;
+            if (this._pendingIsPlaying) this._radioPlay();
+          },
+          { once: true },
+        );
       }
     } else {
       this._loadingMediaIndex = null;
       this.audio.currentTime = playback_time;
-      if (is_playing)  this._radioPlay();
+      if (is_playing) this._radioPlay();
       if (!is_playing && !this.audio.paused) this.audio.pause();
     }
   }
@@ -437,19 +583,28 @@ class RadioPlayer {
     // Snapshot private playback state before entering radio mode for the first time
     if (this.mode !== "radio") {
       const snapMediaId = window.playlistManager?.currentMediaId ?? null;
-      const snapMedia   = snapMediaId ? window.playlistManager?.getMediaById(snapMediaId) : null;
+      const snapMedia = snapMediaId
+        ? window.playlistManager?.getMediaById(snapMediaId)
+        : null;
       this.preRadioSnapshot = {
-        src:         this.audio.src || this.audio.querySelector?.("source")?.getAttribute("src") || null,
+        src:
+          this.audio.src ||
+          this.audio.querySelector?.("source")?.getAttribute("src") ||
+          null,
         currentTime: this.audio.currentTime,
-        paused:      this.audio.paused,
-        mediaId:      snapMediaId,
+        paused: this.audio.paused,
+        mediaId: snapMediaId,
         // Remember whether the pre-radio media was video so tuneOut can restore the right element
-        isVideo:     snapMedia?.media_type === "video",
+        isVideo: snapMedia?.media_type === "video",
       };
-      debugLog(`Saved pre-radio state: ${this.preRadioSnapshot.src} @ ${this.preRadioSnapshot.currentTime.toFixed(2)}s`);
+      debugLog(
+        `Saved pre-radio state: ${this.preRadioSnapshot.src} @ ${this.preRadioSnapshot.currentTime.toFixed(2)}s`,
+      );
 
       // Show listener controls when first entering radio mode
-      document.getElementById("radio-listener-controls")?.classList.remove("hidden");
+      document
+        .getElementById("radio-listener-controls")
+        ?.classList.remove("hidden");
 
       // Unmute on tune in whatever mute state the user had in private mode
       // does not carry over into radio mode. The mute button starts fresh.
@@ -458,7 +613,7 @@ class RadioPlayer {
         document.getElementById("audio-player"),
         document.getElementById("video-player"),
       ].filter(Boolean);
-      allMediaEls.forEach(el => el.muted = false);
+      allMediaEls.forEach((el) => (el.muted = false));
       const muteBtn = document.getElementById("mute-btn");
       if (muteBtn) muteBtn.textContent = "🔇 Mute";
 
@@ -470,12 +625,14 @@ class RadioPlayer {
       }
     }
 
-    this.mode            = "radio";
+    this.mode = "radio";
     this.tunedBroadcaster = broadcasterId;
-    this._tuneInSentAt    = Date.now();
+    this._tuneInSentAt = Date.now();
 
     debugLog(`Sending TuneIn: ${broadcasterId}`);
-    this.ws.send(JSON.stringify({ type: "TuneIn", broadcaster_id: broadcasterId }));
+    this.ws.send(
+      JSON.stringify({ type: "TuneIn", broadcaster_id: broadcasterId }),
+    );
 
     this.audio.controls = false;
     document.getElementById("broadcast-progress").classList.remove("hidden");
@@ -484,15 +641,16 @@ class RadioPlayer {
 
   tuneOut(reason = "manual") {
     debugLog(`Leaving radio mode: ${reason}`);
-    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: "TuneOut" }));
+    if (this.ws?.readyState === WebSocket.OPEN)
+      this.ws.send(JSON.stringify({ type: "TuneOut" }));
 
-    this.mode             = "private";
+    this.mode = "private";
     this.tunedBroadcaster = null;
     this.pendingAutoNextIndex = null;
-    this.pendingAutoNextTime  = 0;
+    this.pendingAutoNextTime = 0;
 
-    document.getElementById("mode-display").textContent  = "Private Mode";
-    document.getElementById("mode-display").className    = "mode-badge private";
+    document.getElementById("mode-display").textContent = "Private Mode";
+    document.getElementById("mode-display").className = "mode-badge private";
     document.getElementById("broadcaster-info").classList.add("hidden");
     document.getElementById("tune-out-btn").classList.add("hidden");
     document.getElementById("tune-in-btn").classList.remove("hidden");
@@ -511,7 +669,7 @@ class RadioPlayer {
       document.getElementById("audio-player"),
       document.getElementById("video-player"),
     ].filter(Boolean);
-    allMediaEls.forEach(el => el.muted = false);
+    allMediaEls.forEach((el) => (el.muted = false));
     const muteBtn = document.getElementById("mute-btn");
     if (muteBtn) muteBtn.textContent = "🔇 Mute";
 
@@ -521,20 +679,27 @@ class RadioPlayer {
       this.preRadioSnapshot = null;
 
       if (snap.src) {
-        debugLog(`Restoring pre-radio state: ${snap.src} @ ${snap.currentTime.toFixed(2)}s`);
+        debugLog(
+          `Restoring pre-radio state: ${snap.src} @ ${snap.currentTime.toFixed(2)}s`,
+        );
         // Restore the correct element type for the pre-radio media
         window.switchMediaElement?.(snap.isVideo);
         this.audio.src = snap.src;
         this.audio.load();
-        this.audio.addEventListener("canplay", () => {
-          this.audio.currentTime = snap.currentTime;
-          if (!snap.paused) this.audio.play();
-        }, { once: true });
+        this.audio.addEventListener(
+          "canplay",
+          () => {
+            this.audio.currentTime = snap.currentTime;
+            if (!snap.paused) this.audio.play();
+          },
+          { once: true },
+        );
       } else {
         // No saved src, default back to the audio element
         window.switchMediaElement?.(false);
       }
-      if (window.playlistManager && snap.mediaId) window.playlistManager.currentMediaId = snap.mediaId;
+      if (window.playlistManager && snap.mediaId)
+        window.playlistManager.currentMediaId = snap.mediaId;
     } else {
       window.switchMediaElement?.(false);
     }
@@ -551,26 +716,48 @@ class RadioPlayer {
       document.getElementById("video-player"),
     ].filter(Boolean);
     this.audioEventHandlers.forEach((handler, event) => {
-      allMediaEls.forEach(el => el.removeEventListener(event, handler));
+      allMediaEls.forEach((el) => el.removeEventListener(event, handler));
     });
     this.audioEventHandlers.clear();
   }
 
   sendHeartbeat() {
-    if (!this.isBroadcasting || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    const msg = { type: "Heartbeat", broadcaster_id: this.sessionId, playback_time: this.audio.currentTime, client_timestamp_ms: Date.now() };
-    debugLog(`Heartbeat: media ${this.getCurrentMediaIndex()}, time ${msg.playback_time.toFixed(2)}s`);
+    if (
+      !this.isBroadcasting ||
+      !this.ws ||
+      this.ws.readyState !== WebSocket.OPEN
+    )
+      return;
+    const msg = {
+      type: "Heartbeat",
+      broadcaster_id: this.sessionId,
+      playback_time: this.audio.currentTime,
+      client_timestamp_ms: Date.now(),
+    };
+    debugLog(
+      `Heartbeat: media ${this.getCurrentMediaIndex()}, time ${msg.playback_time.toFixed(2)}s`,
+    );
     this.ws.send(JSON.stringify(msg));
   }
 
   sendAutoNext(nextMediaIndex) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     debugLog(`Sending AutoNext: next media index ${nextMediaIndex}`);
-    this.ws.send(JSON.stringify({ type: "AutoNext", broadcaster_id: this.sessionId, next_media_index: nextMediaIndex, server_timestamp_ms: 0 }));
+    this.ws.send(
+      JSON.stringify({
+        type: "AutoNext",
+        broadcaster_id: this.sessionId,
+        next_media_index: nextMediaIndex,
+        server_timestamp_ms: 0,
+      }),
+    );
   }
 
   startBroadcasting() {
-    if (this.isStartingBroadcast) { debugLog("Already starting broadcast, ignoring duplicate request"); return; }
+    if (this.isStartingBroadcast) {
+      debugLog("Already starting broadcast, ignoring duplicate request");
+      return;
+    }
     this.isStartingBroadcast = true;
 
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
@@ -580,36 +767,57 @@ class RadioPlayer {
       setTimeout(() => this.startBroadcasting(), 500);
       return;
     }
-    if (this.isBroadcasting) { debugLog("Already broadcasting, cleaning up first"); this.stopBroadcasting(); }
+    if (this.isBroadcasting) {
+      debugLog("Already broadcasting, cleaning up first");
+      this.stopBroadcasting();
+    }
 
     this.removeAudioBroadcastListeners();
     this.isBroadcasting = true;
     debugLog(`Broadcasting as: ${this.sessionId}`);
 
-    if (this.isMobile()) document.getElementById("mobile-warning").classList.remove("hidden");
+    if (this.isMobile())
+      document.getElementById("mobile-warning").classList.remove("hidden");
     this.requestWakeLock();
 
     let broadcastUpdateTimer = null;
     const sendUpdate = () => {
-      if (!this.isBroadcasting || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      if (
+        !this.isBroadcasting ||
+        !this.ws ||
+        this.ws.readyState !== WebSocket.OPEN
+      )
+        return;
       clearTimeout(broadcastUpdateTimer);
       broadcastUpdateTimer = setTimeout(() => {
-        if (!this.isBroadcasting || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+        if (
+          !this.isBroadcasting ||
+          !this.ws ||
+          this.ws.readyState !== WebSocket.OPEN
+        )
+          return;
         const msg = {
-          type: "BroadcastUpdate", broadcaster_id: this.sessionId,
-          media_index: this.getCurrentMediaIndex(), playback_time: this.audio.currentTime,
-          is_playing: !this.audio.paused, client_timestamp_ms: Date.now(),
+          type: "BroadcastUpdate",
+          broadcaster_id: this.sessionId,
+          media_index: this.getCurrentMediaIndex(),
+          playback_time: this.audio.currentTime,
+          is_playing: !this.audio.paused,
+          client_timestamp_ms: Date.now(),
         };
-        debugLog(`Broadcasting: media ${msg.media_index}, time ${msg.playback_time.toFixed(2)}s`);
+        debugLog(
+          `Broadcasting: media ${msg.media_index}, time ${msg.playback_time.toFixed(2)}s`,
+        );
         this.ws.send(JSON.stringify(msg));
       }, 150);
     };
 
     // Skip the pause broadcast if the track ended naturally
-    const sendPauseUpdate = () => { if (!this.audio.ended) sendUpdate(); };
+    const sendPauseUpdate = () => {
+      if (!this.audio.ended) sendUpdate();
+    };
 
-    this.audioEventHandlers.set("play",   sendUpdate);
-    this.audioEventHandlers.set("pause",  sendPauseUpdate);
+    this.audioEventHandlers.set("play", sendUpdate);
+    this.audioEventHandlers.set("pause", sendPauseUpdate);
     this.audioEventHandlers.set("seeked", sendUpdate);
 
     // Attach to both elements so switching media type mid-broadcast still fires updates
@@ -618,16 +826,24 @@ class RadioPlayer {
       document.getElementById("video-player"),
     ].filter(Boolean);
 
-    allMediaEls.forEach(el => {
-      el.addEventListener("play",   sendUpdate);
-      el.addEventListener("pause",  sendPauseUpdate);
+    allMediaEls.forEach((el) => {
+      el.addEventListener("play", sendUpdate);
+      el.addEventListener("pause", sendPauseUpdate);
       el.addEventListener("seeked", sendUpdate);
     });
 
     this.heartbeatInterval = setInterval(() => this.sendHeartbeat(), 2000);
 
-    const initMsg = { type: "StartBroadcasting", broadcaster_id: this.sessionId, media_index: this.getCurrentMediaIndex(), playback_time: this.audio.currentTime, is_playing: !this.audio.paused };
-    debugLog(`Starting broadcast: media ${initMsg.media_index}, time ${initMsg.playback_time.toFixed(2)}s`);
+    const initMsg = {
+      type: "StartBroadcasting",
+      broadcaster_id: this.sessionId,
+      media_index: this.getCurrentMediaIndex(),
+      playback_time: this.audio.currentTime,
+      is_playing: !this.audio.paused,
+    };
+    debugLog(
+      `Starting broadcast: media ${initMsg.media_index}, time ${initMsg.playback_time.toFixed(2)}s`,
+    );
     this.ws.send(JSON.stringify(initMsg));
 
     this.updateBroadcastingUI(true);
@@ -635,26 +851,43 @@ class RadioPlayer {
   }
 
   stopBroadcasting() {
-    if (!this.isBroadcasting) { debugLog("Not broadcasting, nothing to stop"); return; }
+    if (!this.isBroadcasting) {
+      debugLog("Not broadcasting, nothing to stop");
+      return;
+    }
     this.isBroadcasting = false;
 
-    if (this.heartbeatInterval) { clearInterval(this.heartbeatInterval); this.heartbeatInterval = null; }
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
     this.removeAudioBroadcastListeners();
     this.releaseWakeLock();
 
     document.getElementById("mobile-warning").classList.add("hidden");
 
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: "StopBroadcasting", broadcaster_id: this.sessionId }));
+      this.ws.send(
+        JSON.stringify({
+          type: "StopBroadcasting",
+          broadcaster_id: this.sessionId,
+        }),
+      );
     }
     this.updateBroadcastingUI(false);
     debugLog("Broadcasting stopped");
   }
 
   updateBroadcastingUI(isBroadcasting) {
-    document.getElementById("broadcast-status").classList.toggle("hidden",    !isBroadcasting);
-    document.getElementById("broadcast-btn").classList.toggle("hidden",        isBroadcasting);
-    document.getElementById("stop-broadcast-btn").classList.toggle("hidden",  !isBroadcasting);
+    document
+      .getElementById("broadcast-status")
+      .classList.toggle("hidden", !isBroadcasting);
+    document
+      .getElementById("broadcast-btn")
+      .classList.toggle("hidden", isBroadcasting);
+    document
+      .getElementById("stop-broadcast-btn")
+      .classList.toggle("hidden", !isBroadcasting);
   }
 
   // Wrapper around play() used by all radio playback paths.
@@ -693,19 +926,22 @@ class RadioPlayer {
     debugLog("Resyncing to broadcaster position...");
     // Clear any stale loading state so the incoming Sync is handled cleanly
     this._loadingMediaIndex = null;
-    this._pendingSeekTime   = 0;
-    this._pendingIsPlaying  = false;
+    this._pendingSeekTime = 0;
+    this._pendingIsPlaying = false;
     this.pendingAutoNextIndex = null;
-    this.pendingAutoNextTime  = 0;
+    this.pendingAutoNextTime = 0;
     // Set tuneInSentAt so latency compensation runs on the fresh Sync
     this._tuneInSentAt = Date.now();
-    this.ws.send(JSON.stringify({ type: "TuneIn", broadcaster_id: this.tunedBroadcaster }));
+    this.ws.send(
+      JSON.stringify({ type: "TuneIn", broadcaster_id: this.tunedBroadcaster }),
+    );
   }
 
   // Returns the server's numeric index for the currently playing media
   getCurrentMediaIndex() {
     const idMatch = this.audio.src.match(/\/stream\/id\/([^/?]+)/);
-    if (idMatch && window.playlistManager) return window.playlistManager.getServerIndexById(idMatch[1]);
+    if (idMatch && window.playlistManager)
+      return window.playlistManager.getServerIndexById(idMatch[1]);
     const indexMatch = this.audio.src.match(/\/stream\/(\d+)(?:\?|$)/);
     return indexMatch ? parseInt(indexMatch[1]) : 0;
   }
@@ -723,5 +959,7 @@ class RadioPlayer {
     }
   }
 
-  isInRadioMode() { return this.mode === "radio"; }
+  isInRadioMode() {
+    return this.mode === "radio";
+  }
 }

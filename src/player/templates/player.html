@@ -153,17 +153,6 @@
       Your browser doesn't support video.
     </video>
 
-    <!-- Iframe element: hidden until an embed is loaded via the iframe section below -->
-    <iframe
-      id="iframe-player"
-      class="hidden"
-      width="800"
-      height="450"
-      frameborder="0"
-      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-      allowfullscreen
-    ></iframe>
-
     <div
       id="video-loading-overlay"
       class="hidden"
@@ -203,21 +192,6 @@
       <div id="upload-status"></div>
       <div id="upload-progress" style="display: none">
         <div class="upload-bar-outer"><div id="upload-bar"></div></div>
-      </div>
-    </div>
-
-    <!-- Embed Stream -->
-    <div class="upload-container">
-      <h3>📺 Embed Stream</h3>
-      <div class="upload-row">
-        <input
-          type="text"
-          id="iframe-input"
-          placeholder="Paste iframe code or stream URL..."
-          style="flex: 1"
-        />
-        <button id="iframe-load-btn">Load</button>
-        <button id="iframe-close-btn" class="hidden">✕ Close</button>
       </div>
     </div>
 
@@ -318,9 +292,6 @@
       upload.js       — registers the #upload-btn listener before the page is live.
       admin.js        — starts polling immediately on parse, harmless before boot.
       search.js       — registers the search listener before the page is live.
-      iframe.js       — registers iframe listeners; uses window.switchMediaElement
-                        and window.player which main.js sets up, safe because those
-                        are only called on user interaction after main.js has run.
 
       main.js         — must be last. Instantiates both classes, assigns
                         window.player and window.playlistManager, patches audio.play(),
@@ -334,9 +305,6 @@
     <script src="/stargzr/static/js/upload.js" defer></script>
     <script src="/stargzr/static/js/admin.js" defer></script>
     <script src="/stargzr/static/js/search.js" defer></script>
-    <script src="/stargzr/static/js/hls-stream.js" defer></script>
-    <script src="/stargzr/static/js/ntv-verify.js" defer></script>
-    <script src="/stargzr/static/js/iframe.js" defer></script>
     <script src="/stargzr/static/js/main.js" defer></script>
   </body>
 </html>
