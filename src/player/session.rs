@@ -84,7 +84,7 @@ pub fn now_ms() -> u128 {
 
 /// Periodically cleans up stale player sessions and broadcaster channels.
 pub async fn cleanup_stale_sessions(state: Arc<AppState>) {
-    let mut interval = tokio::time::interval(Duration::from_secs(1800));
+    let mut interval = tokio::time::interval(Duration::from_secs(3600));
 
     loop {
         // Wait for the next tick (initially fires immediately, then every 1h)

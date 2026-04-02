@@ -190,7 +190,7 @@ pub async fn initialize(path_buf: PathBuf) {
     // Set up Prometheus metrics recorder (global, must be called once before any metrics)
     metrics::init_metrics();
 
-    tracing::info!("Starting MP3 Player server");
+    tracing::info!("Starting stargzr server");
 
     // Bind TCP listener to localhost:8083
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8083")
@@ -199,7 +199,7 @@ pub async fn initialize(path_buf: PathBuf) {
 
     let addr = listener.local_addr().unwrap();
 
-    tracing::info!("✓ MP3 Player listening on http://{}/stargzr", addr);
+    tracing::info!("✓ stargzr listening on http://{}/stargzr", addr);
 
     // Initialize the shared state asynchronously
     let state = init_player_state(path_buf).await;
