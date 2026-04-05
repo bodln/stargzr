@@ -10,6 +10,7 @@ pub struct PlayerTemplate {
     pub current_index: usize,
     pub total_medias: usize,
     pub session_id: String,
+    pub is_video: bool,
 }
 
 #[derive(Template)]

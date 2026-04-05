@@ -8,8 +8,23 @@
 const audioEl = document.getElementById("audio-player");
 const videoEl = document.getElementById("video-player");
 
-window._activeMedia = audioEl;
-videoEl.classList.add("hidden");
+// window._initialIsVideo is set server-side in an inline <script> before this
+// file runs. It tells us which element the server already made visible at first
+// paint so we don't undo that work here.
+const initialIsVideo =
+document.getElementById("init-flags")?.dataset.isVideo === "true";
+window._activeMedia = initialIsVideo ? videoEl : audioEl;
+
+// Only hide the element that isn't active. The server already applied the
+// correct hidden class, but we re-assert here to be safe in case of a cached
+// page where the inline script value differs from the DOM state.
+if (initialIsVideo) {
+  audioEl.classList.add("hidden");
+  videoEl.classList.remove("hidden");
+} else {
+  videoEl.classList.add("hidden");
+  audioEl.classList.remove("hidden");
+}
 
 window.switchMediaElement = function switchMediaElement(toVideo) {
   const incoming = toVideo ? videoEl : audioEl;
@@ -208,7 +223,9 @@ window.updateMediaSession = function updateMediaSession(filename) {
 
 // ─── Core instances ────────────────────────────────────────────────────────────────────────────────
 const sessionId = document.getElementById("my-session-id").textContent;
-const player = new RadioPlayer(audioEl, sessionId);
+// Pass the already-correct _activeMedia so RadioPlayer is wired to the right
+// element from the start, whether that is audio or video.
+const player = new RadioPlayer(window._activeMedia, sessionId);
 const playlistManager = new PlaylistManager(sessionId);
 
 window.player = player;

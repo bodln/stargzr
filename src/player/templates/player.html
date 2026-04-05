@@ -135,13 +135,17 @@
       <div>Track {{ current_index + 1 }} of {{ total_medias }}</div>
     </div>
 
-    <!-- Audio element: default, shown for audio files -->
-    <audio id="audio-player" controls>
+    <!-- Audio element: default, shown for audio files.
+         Hidden at first paint when the current track is a video file so the
+         browser never renders a broken audio player for a video source. -->
+    <audio id="audio-player" controls{% if is_video %} class="hidden"{% endif %}>
+      {% if !is_video %}
       <source
         src="/stargzr/player/stream/{{ current_index }}"
         type="audio/mpeg"
       />
       Your browser doesn't support audio playback.
+      {% endif %}
     </audio>
 
     <!-- Shown only in radio mode; moved next to whichever media element is active -->
@@ -153,11 +157,19 @@
       🔄 Resync
     </button>
 
+    <meta id="init-flags" data-is-video="{{ is_video }}">
+    
     <!-- Video element: hidden until a video file is played.
      hidden class is set here so it's invisible from first paint,
      not waiting for JS to run. switchMediaElement() in main.js
      toggles visibility and keeps _activeMedia in sync. -->
-    <video id="video-player" class="hidden" controls preload="metadata">
+    <video id="video-player" controls preload="metadata"{% if !is_video %} class="hidden"{% endif %}>
+      {% if is_video %}
+      <source
+        src="/stargzr/player/stream/{{ current_index }}"
+        type="video/mp4"
+      />
+      {% endif %}
       <track
         id="subtitle-track"
         kind="subtitles"

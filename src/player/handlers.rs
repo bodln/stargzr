@@ -50,31 +50,34 @@ fn content_type_for(filename: &str) -> &'static str {
         _      => "application/octet-stream",
     }
 }
-
 /// Renders the main player page for the current user session.
 pub async fn player_page(State(state): State<SharedState>, headers: HeaderMap) -> PlayerTemplate {
     // Identify the user session (cookie-based, falls back to UUID)
     let session_id = get_session_id(&headers);
-
     // Fetch or initialize the session's current playlist index
     let current_index = get_or_create_position(&state, &session_id);
-
     // Acquire a read lock, clone what we need, then drop the guard before any await
-    let (current_media, total_medias) = {
+    let (current_media, total_medias, is_video) = {
         let playlist = state.playlist.read().await;
-        let media = playlist
-            .get(current_index)
+        let media_info = playlist.get(current_index);
+        let media = media_info
             .map(|s| s.filename.clone())
             .unwrap_or_else(|| "No medias found".to_string());
-        (media, playlist.len())
-    };
+        // Check whether the track at current_index is a video file.
+        // So in the html we know which player to load initially.
+        let is_video = media_info
+            .map(|s| matches!(s.media_type, MediaType::Video))
+            .unwrap_or(false);
 
+        (media, playlist.len(), is_video)
+    };
     // Render the full player page
     PlayerTemplate {
         current_media,
         current_index,
         total_medias,
         session_id,
+        is_video,
     }
 }
 
