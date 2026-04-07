@@ -719,14 +719,14 @@ class PlaylistManager {
 
   playNext() {
     if (!window.player?.isInRadioMode()) {
-      const s = this.getNextMedia();
-      if (s) this.playMedia(s.id);
+      const m = this.getNextMedia();
+      if (m) this.playMedia(m.id);
     }
   }
   playPrev() {
     if (!window.player?.isInRadioMode()) {
-      const s = this.getPrevMedia();
-      if (s) this.playMedia(s.id);
+      const m = this.getPrevMedia();
+      if (m) this.playMedia(m.id);
     }
   }
 

@@ -855,6 +855,7 @@ class RadioPlayer {
       debugLog("Not broadcasting, nothing to stop");
       return;
     }
+    
     this.isBroadcasting = false;
 
     if (this.heartbeatInterval) {
