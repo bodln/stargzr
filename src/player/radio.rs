@@ -250,6 +250,18 @@ async fn handle_client_message(
 
             tracing::info!(broadcaster_id = %session_id, "Client tuning in");
 
+            // Retrieve current broadcast state if it exists, return early if not found
+            // before touching any listener sets so we don't leave orphaned entries on failure
+            let maybe_state = state
+                .broadcast_states
+                .get(&broadcaster_id)
+                .map(|b| b.clone());
+
+            let b_state = match maybe_state {
+                Some(s) => s,
+                None => return Err(PlayerError::BroadcasterNotFound(broadcaster_id)),
+            };
+
             // If already tuned to someone, remove from their listener set first
             if let Some((_, old_broadcaster)) = state.session_tuned_to.remove(validated_session_id)
             {
@@ -278,57 +290,46 @@ async fn handle_client_message(
                 broadcast.listener_count = count;
             }
 
-            // Retrieve current broadcast state if it exists
-            let maybe_state = state
-                .broadcast_states
-                .get(&broadcaster_id)
-                .map(|b| b.clone());
-
-            if let Some(b_state) = maybe_state {
-                // Estimate the broadcaster's real position at this moment:
-                //   stored_playback_time - position when last heartbeat/update was sent
-                //   + time_since_last_update - playback has continued since then (only if playing)
-                //   + transmission_latency_ms - broadcaster to server lag in that measurement
-                // The frontend then adds the server to listener leg via _tuneInSentAt.
-                let time_since_last_update_secs = if b_state.is_playing {
-                    (now_ms().saturating_sub(b_state.server_timestamp_ms)) as f64 / 1000.0
-                } else {
-                    0.0
-                };
-                let adjusted_playback_time = b_state.playback_time
-                    + time_since_last_update_secs
-                    + (b_state.transmission_latency_ms as f64 / 1000.0);
-
-                // Send a Sync message with the current state to the newly tuned client
-                tracing::debug!(
-                    broadcaster_id = %broadcaster_id,
-                    media_index = b_state.media_index,
-                    playback_time = adjusted_playback_time,
-                    "Sending initial sync"
-                );
-
-                let sync_msg = RadioMessage::Sync {
-                    broadcaster_id: broadcaster_id.clone(),
-                    media_index: b_state.media_index,
-                    playback_time: adjusted_playback_time,
-                    is_playing: b_state.is_playing,
-                    server_timestamp_ms: now_ms(),
-                };
-
-                tuned_tx.send(Some(broadcaster_id.clone())).map_err(|_| {
-                    PlayerError::WebSocketError("Failed to send tune change".into())
-                })?;
-
-                out_tx
-                    .send(sync_msg)
-                    .await
-                    .map_err(|_| PlayerError::WebSocketError("Failed to send sync".into()))?;
-
-                broadcast_analytics_throttled(state);
+            // Estimate the broadcaster's real position at this moment:
+            //   stored_playback_time - position when last heartbeat/update was sent
+            //   + time_since_last_update - playback has continued since then (only if playing)
+            //   + transmission_latency_ms - broadcaster to server lag in that measurement
+            // The frontend then adds the server to listener leg via _tuneInSentAt.
+            let time_since_last_update_secs = if b_state.is_playing {
+                (now_ms().saturating_sub(b_state.server_timestamp_ms)) as f64 / 1000.0
             } else {
-                // No broadcaster found with this ID
-                return Err(PlayerError::BroadcasterNotFound(broadcaster_id));
-            }
+                0.0
+            };
+            let adjusted_playback_time = b_state.playback_time
+                + time_since_last_update_secs
+                + (b_state.transmission_latency_ms as f64 / 1000.0);
+
+            // Send a Sync message with the current state to the newly tuned client
+            tracing::debug!(
+                broadcaster_id = %broadcaster_id,
+                media_index = b_state.media_index,
+                playback_time = adjusted_playback_time,
+                "Sending initial sync"
+            );
+
+            let sync_msg = RadioMessage::Sync {
+                broadcaster_id: broadcaster_id.clone(),
+                media_index: b_state.media_index,
+                playback_time: adjusted_playback_time,
+                is_playing: b_state.is_playing,
+                server_timestamp_ms: now_ms(),
+            };
+
+            tuned_tx.send(Some(broadcaster_id.clone())).map_err(|_| {
+                PlayerError::WebSocketError("Failed to send tune change".into())
+            })?;
+
+            out_tx
+                .send(sync_msg)
+                .await
+                .map_err(|_| PlayerError::WebSocketError("Failed to send sync".into()))?;
+
+            broadcast_analytics_throttled(state);
         }
 
         RadioMessage::TuneOut => {
