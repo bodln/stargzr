@@ -1,0 +1,1896 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>stargzr — how it works</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,300;0,400;0,600;1,300;1,400&family=JetBrains+Mono:wght@400;500&family=Bebas+Neue&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+<style>
+:root {
+  --bg:        #07090f;
+  --bg2:       #0d1219;
+  --bg3:       #111823;
+  --border:    #1c2a3a;
+  --border2:   #253548;
+  --text:      #b8ccdc;
+  --text-dim:  #5a7a94;
+  --text-head: #ddeeff;
+  --gold:      #e8a428;
+  --gold-dim:  #7a5212;
+  --blue:      #4a9ede;
+  --blue-dim:  #1a3f5c;
+  --green:     #44c288;
+  --red:       #e05050;
+  --code-bg:   #09111a;
+  --radius:    6px;
+  --sidebar-w: 240px;
+  --content-w: 760px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { scroll-behavior: smooth; font-size: 17px; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Crimson Pro', Georgia, serif;
+  font-weight: 300;
+  line-height: 1.75;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* ── stars ──────────────────────────────────────────────── */
+body::before {
+  content: '';
+  position: fixed; inset: 0;
+  pointer-events: none;
+  background-image:
+    radial-gradient(1px 1px at 15%  8%,  rgba(200,220,255,.55) 0%, transparent 100%),
+    radial-gradient(1px 1px at 37%  19%, rgba(200,220,255,.40) 0%, transparent 100%),
+    radial-gradient(1.5px 1.5px at 52% 3%,  rgba(232,164,40,.50)  0%, transparent 100%),
+    radial-gradient(1px 1px at 68%  14%, rgba(200,220,255,.35) 0%, transparent 100%),
+    radial-gradient(1px 1px at 81%  5%,  rgba(200,220,255,.50) 0%, transparent 100%),
+    radial-gradient(1px 1px at 92%  22%, rgba(200,220,255,.30) 0%, transparent 100%),
+    radial-gradient(1px 1px at 7%   30%, rgba(200,220,255,.25) 0%, transparent 100%),
+    radial-gradient(1px 1px at 24%  44%, rgba(200,220,255,.30) 0%, transparent 100%),
+    radial-gradient(1.5px 1.5px at 48% 38%, rgba(200,220,255,.45) 0%, transparent 100%),
+    radial-gradient(1px 1px at 73%  28%, rgba(200,220,255,.25) 0%, transparent 100%),
+    radial-gradient(1px 1px at 89%  41%, rgba(232,164,40,.35)  0%, transparent 100%),
+    radial-gradient(1px 1px at 11%  58%, rgba(200,220,255,.20) 0%, transparent 100%),
+    radial-gradient(1px 1px at 33%  67%, rgba(200,220,255,.25) 0%, transparent 100%),
+    radial-gradient(1.5px 1.5px at 58% 54%, rgba(200,220,255,.40) 0%, transparent 100%),
+    radial-gradient(1px 1px at 79%  63%, rgba(200,220,255,.20) 0%, transparent 100%),
+    radial-gradient(1px 1px at 96%  72%, rgba(200,220,255,.30) 0%, transparent 100%),
+    radial-gradient(1px 1px at 4%   80%, rgba(232,164,40,.30)  0%, transparent 100%),
+    radial-gradient(1px 1px at 21%  88%, rgba(200,220,255,.20) 0%, transparent 100%),
+    radial-gradient(1px 1px at 44%  92%, rgba(200,220,255,.25) 0%, transparent 100%),
+    radial-gradient(1px 1px at 63%  79%, rgba(200,220,255,.20) 0%, transparent 100%),
+    radial-gradient(1.5px 1.5px at 85% 85%, rgba(200,220,255,.35) 0%, transparent 100%);
+  z-index: 0;
+}
+
+/* ── progress bar ───────────────────────────────────────── */
+#progress-bar {
+  position: fixed; top: 0; left: 0; height: 2px;
+  background: linear-gradient(90deg, var(--gold), var(--blue));
+  width: 0%; z-index: 1000;
+  transition: width .1s linear;
+  box-shadow: 0 0 8px var(--gold);
+}
+
+/* ── layout ─────────────────────────────────────────────── */
+.page-wrap {
+  position: relative; z-index: 1;
+  max-width: calc(var(--sidebar-w) + var(--content-w) + 120px);
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: var(--sidebar-w) 1fr;
+  gap: 0 60px;
+  padding: 0 24px;
+}
+
+/* ── sidebar ─────────────────────────────────────────────── */
+#sidebar {
+  position: sticky; top: 0;
+  height: 100vh;
+  overflow-y: auto;
+  padding: 48px 0 48px 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border2) transparent;
+}
+#sidebar::-webkit-scrollbar { width: 4px; }
+#sidebar::-webkit-scrollbar-track { background: transparent; }
+#sidebar::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+.toc-brand {
+  font-family: 'Bebas Neue', sans-serif;
+  font-size: 1.1rem;
+  letter-spacing: .15em;
+  color: var(--gold);
+  margin-bottom: 32px;
+  display: block;
+}
+
+.toc-section { margin-bottom: 4px; }
+
+.toc-group-label {
+  display: flex; align-items: center; gap: 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: .62rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 6px 0 4px;
+  cursor: pointer;
+  user-select: none;
+  border: none; background: none;
+  width: 100%; text-align: left;
+}
+.toc-group-label:hover { color: var(--text); }
+.toc-arrow { transition: transform .2s; font-size: .7rem; }
+.toc-group-label.open .toc-arrow { transform: rotate(90deg); }
+
+.toc-items { overflow: hidden; transition: max-height .25s ease; }
+.toc-items.collapsed { max-height: 0; }
+
+.toc-link {
+  display: block;
+  padding: 3px 0 3px 14px;
+  font-size: .82rem;
+  color: var(--text-dim);
+  text-decoration: none;
+  border-left: 2px solid transparent;
+  transition: color .15s, border-color .15s;
+  line-height: 1.4;
+}
+.toc-link:hover { color: var(--text); border-left-color: var(--border2); }
+.toc-link.active { color: var(--gold); border-left-color: var(--gold); }
+
+/* ── main content ────────────────────────────────────────── */
+main {
+  padding: 0 0 120px;
+  min-width: 0;
+}
+
+/* ── hero ────────────────────────────────────────────────── */
+.hero {
+  padding: 80px 0 64px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 72px;
+}
+
+.hero-eyebrow {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: .7rem;
+  letter-spacing: .2em;
+  text-transform: uppercase;
+  color: var(--gold);
+  margin-bottom: 20px;
+  display: flex; align-items: center; gap: 12px;
+}
+.hero-eyebrow::after {
+  content: '';
+  flex: 1; height: 1px;
+  background: linear-gradient(90deg, var(--gold-dim), transparent);
+}
+
+h1 {
+  font-family: 'Bebas Neue', sans-serif;
+  font-size: clamp(3rem, 8vw, 5.5rem);
+  letter-spacing: .04em;
+  color: var(--text-head);
+  line-height: 1;
+  margin-bottom: 24px;
+}
+
+.hero-sub {
+  font-size: 1.15rem;
+  color: var(--text-dim);
+  max-width: 560px;
+  line-height: 1.6;
+  font-style: italic;
+}
+
+.hero-badges {
+  display: flex; flex-wrap: wrap; gap: 10px;
+  margin-top: 32px;
+}
+
+.badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: .68rem;
+  padding: 4px 12px;
+  border-radius: 3px;
+  border: 1px solid;
+  letter-spacing: .05em;
+}
+.badge-rust  { color: #f4944a; border-color: #7a3a18; background: #1a0f08; }
+.badge-js    { color: #f0d060; border-color: #5a4a10; background: #14110a; }
+.badge-ws    { color: var(--blue); border-color: var(--blue-dim); background: #08111c; }
+.badge-http  { color: var(--green); border-color: #1a4a34; background: #081410; }
+
+/* ── sections ────────────────────────────────────────────── */
+section {
+  margin-bottom: 80px;
+  scroll-margin-top: 32px;
+}
+
+.section-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: .62rem;
+  letter-spacing: .18em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 12px;
+}
+
+h2 {
+  font-family: 'Bebas Neue', sans-serif;
+  font-size: 2.4rem;
+  letter-spacing: .05em;
+  color: var(--text-head);
+  margin-bottom: 24px;
+  line-height: 1.1;
+}
+
+h3 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--text-head);
+  margin: 40px 0 14px;
+  display: flex; align-items: center; gap: 10px;
+}
+h3::before {
+  content: '';
+  display: inline-block; width: 3px; height: 1.1em;
+  background: var(--gold);
+  flex-shrink: 0;
+}
+
+h4 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--blue);
+  margin: 28px 0 10px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: .85rem;
+}
+
+p { margin-bottom: 16px; }
+p:last-child { margin-bottom: 0; }
+
+a { color: var(--gold); text-decoration: none; border-bottom: 1px solid var(--gold-dim); }
+a:hover { border-bottom-color: var(--gold); }
+
+/* ── file subsections ────────────────────────────────────── */
+.file-block {
+  margin: 48px 0;
+  padding-left: 24px;
+  border-left: 1px solid var(--border2);
+}
+
+.file-header {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 16px;
+}
+
+.file-name {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: .85rem;
+  color: var(--gold);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  padding: 4px 12px;
+  border-radius: var(--radius);
+}
+
+.file-lang {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: .65rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: .1em;
+}
+
+.file-summary { color: var(--text); margin-bottom: 20px; }
+
+/* ── deep dive ───────────────────────────────────────────── */
+.deep-dive {
+  margin-top: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.deep-dive-toggle {
+  display: flex; align-items: center; justify-content: space-between;
+  width: 100%; padding: 12px 18px;
+  background: var(--bg2);
+  border: none; cursor: pointer;
+  color: var(--blue);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: .72rem;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  text-align: left;
+  transition: background .15s;
+}
+.deep-dive-toggle:hover { background: var(--bg3); }
+.deep-dive-toggle .dd-icon {
+  font-size: 1rem;
+  transition: transform .25s;
+  color: var(--text-dim);
+}
+.deep-dive-toggle.open .dd-icon { transform: rotate(45deg); }
+
+.deep-dive-body {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height .4s ease;
+  background: var(--code-bg);
+}
+.deep-dive-body.open { max-height: 9999px; }
+
+.deep-dive-inner {
+  padding: 24px 24px 28px;
+  border-top: 1px solid var(--border);
+}
+
+/* ── code ────────────────────────────────────────────────── */
+pre[class*="language-"] {
+  background: var(--code-bg) !important;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin: 20px 0;
+  font-size: .78rem;
+  line-height: 1.65;
+  overflow-x: auto;
+}
+
+code[class*="language-"] {
+  font-family: 'JetBrains Mono', monospace !important;
+}
+
+:not(pre) > code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: .78em;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  padding: 1px 6px;
+  border-radius: 3px;
+  color: #c8e0f4;
+}
+
+/* ── callouts ─────────────────────────────────────────────── */
+.callout {
+  padding: 16px 20px;
+  border-radius: var(--radius);
+  margin: 24px 0;
+  font-size: .92rem;
+  border-left: 3px solid;
+}
+.callout-why  { background: #0e1820; border-color: var(--blue); }
+.callout-warn { background: #1a1206; border-color: var(--gold); }
+.callout-key  { background: #091410; border-color: var(--green); }
+
+.callout-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: .65rem;
+  text-transform: uppercase;
+  letter-spacing: .12em;
+  margin-bottom: 8px;
+}
+.callout-why  .callout-label { color: var(--blue); }
+.callout-warn .callout-label { color: var(--gold); }
+.callout-key  .callout-label { color: var(--green); }
+
+/* ── flow diagram ─────────────────────────────────────────── */
+.flow {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: .75rem;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px 28px;
+  margin: 24px 0;
+  overflow-x: auto;
+  color: var(--text);
+  line-height: 1.9;
+  white-space: pre;
+}
+.flow-gold { color: var(--gold); }
+.flow-blue { color: var(--blue); }
+.flow-green { color: var(--green); }
+.flow-dim  { color: var(--text-dim); }
+
+/* ── list ────────────────────────────────────────────────── */
+ul, ol { padding-left: 1.4em; margin: 12px 0 16px; }
+li { margin-bottom: 6px; }
+li::marker { color: var(--gold); }
+
+/* ── table ───────────────────────────────────────────────── */
+table {
+  width: 100%; border-collapse: collapse;
+  margin: 20px 0; font-size: .88rem;
+}
+th {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: .65rem; text-transform: uppercase; letter-spacing: .1em;
+  color: var(--text-dim); font-weight: 400;
+  padding: 8px 14px; text-align: left;
+  border-bottom: 1px solid var(--border2);
+}
+td { padding: 10px 14px; border-bottom: 1px solid var(--border); }
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: var(--bg2); }
+
+/* ── divider ─────────────────────────────────────────────── */
+hr {
+  border: none; border-top: 1px solid var(--border);
+  margin: 56px 0;
+}
+
+/* ── mobile ──────────────────────────────────────────────── */
+@media (max-width: 860px) {
+  .page-wrap { grid-template-columns: 1fr; gap: 0; padding: 0 20px; }
+  #sidebar { display: none; }
+  .file-block { padding-left: 16px; }
+}
+</style>
+</head>
+<body>
+
+<div id="progress-bar"></div>
+
+<div class="page-wrap">
+
+<!-- ══ SIDEBAR ══════════════════════════════════════════════ -->
+<aside id="sidebar">
+  <span class="toc-brand">★ stargzr</span>
+
+  <nav id="toc">
+    <div class="toc-section">
+      <a href="#overview" class="toc-link">Overview</a>
+    </div>
+
+    <div class="toc-section">
+      <button class="toc-group-label open" data-target="toc-backend">
+        <span class="toc-arrow">▶</span> backend · rust
+      </button>
+      <div class="toc-items" id="toc-backend">
+        <a href="#types"      class="toc-link">types.rs — shared state</a>
+        <a href="#session"    class="toc-link">session.rs — sessions</a>
+        <a href="#streaming"  class="toc-link">handlers.rs — streaming</a>
+        <a href="#radio"      class="toc-link">radio.rs — websocket</a>
+        <a href="#ratelimit"  class="toc-link">rate_limit.rs</a>
+        <a href="#validation" class="toc-link">validation.rs</a>
+        <a href="#errors"     class="toc-link">error.rs</a>
+        <a href="#startup"    class="toc-link">mod.rs — startup</a>
+      </div>
+    </div>
+
+    <div class="toc-section">
+      <button class="toc-group-label open" data-target="toc-frontend">
+        <span class="toc-arrow">▶</span> frontend · js
+      </button>
+      <div class="toc-items" id="toc-frontend">
+        <a href="#radio-player"   class="toc-link">radio-player.js</a>
+        <a href="#playlist"       class="toc-link">playlist.js</a>
+        <a href="#main"           class="toc-link">main.js</a>
+        <a href="#analytics-js"   class="toc-link">analytics.js</a>
+        <a href="#upload-js"      class="toc-link">upload.js</a>
+        <a href="#search-js"      class="toc-link">search.js</a>
+      </div>
+    </div>
+
+    <div class="toc-section">
+      <button class="toc-group-label open" data-target="toc-protocol">
+        <span class="toc-arrow">▶</span> protocol
+      </button>
+      <div class="toc-items" id="toc-protocol">
+        <a href="#messages"   class="toc-link">message types</a>
+        <a href="#lifecycle"  class="toc-link">broadcast lifecycle</a>
+        <a href="#latency"    class="toc-link">latency compensation</a>
+      </div>
+    </div>
+
+    <div class="toc-section">
+      <a href="#decisions" class="toc-link">design decisions</a>
+    </div>
+  </nav>
+</aside>
+
+<!-- ══ MAIN ═════════════════════════════════════════════════ -->
+<main>
+
+<!-- ── hero ─────────────────────────────────────────── -->
+<div class="hero" id="top">
+  <div class="hero-eyebrow">deep dive</div>
+  <h1>stargzr</h1>
+  <p class="hero-sub">a self-hosted media player with live radio broadcasting — built from scratch in Rust and vanilla JavaScript, with no database and no framework.</p>
+  <div class="hero-badges">
+    <span class="badge badge-rust">Rust · Axum · Tokio</span>
+    <span class="badge badge-js">Vanilla JavaScript</span>
+    <span class="badge badge-ws">WebSockets</span>
+    <span class="badge badge-http">HTTP range streaming</span>
+  </div>
+</div>
+
+<!-- ── overview ─────────────────────────────────────── -->
+<section id="overview">
+  <div class="section-label">00 — introduction</div>
+  <h2>What is this?</h2>
+
+  <p>stargzr is a web app that runs from a single Rust binary. You point it at a folder of audio and video files, and it gives everyone on your network a browser-based media player. Any user can start <em>broadcasting</em> — sharing their current playback state over a WebSocket — and other users can <em>tune in</em> and hear exactly what the broadcaster is hearing, synchronized in real time. Think of it as a private radio station where you can see who is playing what and jump into their stream.</p>
+
+  <p>the architecture below shows the two main flows. private mode (left) is a straightforward client-server media player. radio mode (right) adds a real-time sync layer on top.</p>
+
+  <div class="flow">
+<span class="flow-dim">PRIVATE MODE                    RADIO MODE</span>
+
+<span class="flow-gold">Browser A</span>                       <span class="flow-gold">Browser B (broadcaster)</span>
+  │ GET /stream/id/{id}              │ BroadcastUpdate (WebSocket)
+  │ Range: bytes=…                   │
+  ▼                                  ▼
+<span class="flow-blue">Rust Server</span>                     <span class="flow-blue">Rust Server</span>
+  │ 206 Partial Content               │ serialise once → Arc&lt;PreparedMessage&gt;
+  │ 1MB chunks                        │ fan out through broadcast channel
+  ▼                                  ▼
+<span class="flow-gold">Browser A plays</span>                 <span class="flow-green">Browser C (listener)</span>
+                                     <span class="flow-green">Browser D (listener)</span>
+                                     <span class="flow-green">Browser E (listener)</span>
+                                       each seeks to broadcaster's position</div>
+
+  <p>the interesting engineering lives in the gap between those two sides: compensating for network latency so listeners stay in sync, recovering state after a disconnection, handling video versus audio with the same code path, and making it all fast enough that a seek feels instant even with many listeners.</p>
+</section>
+
+<hr>
+
+<!-- ══════════════════════════════════════════════════════════
+     BACKEND
+═════════════════════════════════════════════════════════════ -->
+<section>
+  <div class="section-label">01 — backend</div>
+  <h2>The Rust Server</h2>
+  <p>the server is built on <strong>Axum</strong>, a web framework built on <strong>Tokio</strong> (async runtime) and <strong>Hyper</strong> (HTTP). A few Rust concepts worth knowing before diving in:</p>
+
+  <table>
+    <tr><th>concept</th><th>what it means</th></tr>
+    <tr><td><code>Arc&lt;T&gt;</code></td><td>atomically reference-counted pointer. cheap to clone; lets multiple threads share the same data without copying it.</td></tr>
+    <tr><td><code>RwLock&lt;T&gt;</code></td><td>multiple readers <em>or</em> one writer at a time. readers never block each other.</td></tr>
+    <tr><td><code>DashMap&lt;K,V&gt;</code></td><td>concurrent hash map. internally sharded so operations on different keys rarely contend.</td></tr>
+    <tr><td><code>.await</code></td><td>suspend this async task until the future resolves; yield the thread to other tasks.</td></tr>
+    <tr><td><code>Result&lt;T, E&gt;</code></td><td>either success (<code>Ok(T)</code>) or failure (<code>Err(E)</code>). the <code>?</code> operator returns early on error.</td></tr>
+  </table>
+</section>
+
+<!-- ── types.rs ──────────────────────────────────────── -->
+<section id="types">
+
+  <div class="file-block">
+    <div class="file-header">
+      <span class="file-name">types.rs</span>
+      <span class="file-lang">rust</span>
+    </div>
+    <p class="file-summary">defines every shared data structure: the application state, all WebSocket message variants, and the media/session/broadcast types. everything else imports from here.</p>
+
+    <div class="deep-dive">
+      <button class="deep-dive-toggle" data-target="dd-types">
+        ↓ deep dive — shared state design &amp; the message protocol
+        <span class="dd-icon">+</span>
+      </button>
+      <div class="deep-dive-body" id="dd-types">
+        <div class="deep-dive-inner">
+
+          <h4>AppState — the single source of truth</h4>
+          <p>every handler function receives a clone of <code>Arc&lt;AppState&gt;</code>. cloning an <code>Arc</code> only increments a counter — the underlying data is not copied. this is the standard Rust pattern for sharing state across threads without locks at the top level.</p>
+
+<pre><code class="language-rust">pub struct AppState {
+    pub playlist:           Arc&lt;RwLock&lt;Vec&lt;MediaInfo&gt;&gt;&gt;,
+    pub sessions:           DashMap&lt;String, PlayerSession&gt;,
+    pub broadcast_states:   DashMap&lt;String, BroadcastState&gt;,
+    pub broadcast_channels: DashMap&lt;String, broadcast::Sender&lt;Arc&lt;PreparedMessage&gt;&gt;&gt;,
+    pub broadcaster_listeners: DashMap&lt;String, HashSet&lt;String&gt;&gt;,
+    pub session_tuned_to:   DashMap&lt;String, String&gt;,
+    pub global_broadcast_tx: broadcast::Sender&lt;Arc&lt;PreparedMessage&gt;&gt;,
+    pub active_connections: AtomicUsize,
+    pub last_analytics_ms:  AtomicU64,
+    pub ws_rate_limiter:    RateLimiter,
+    pub upload_quotas:      DashMap&lt;String, u64&gt;,
+    pub conversion_semaphore: Arc&lt;Semaphore&gt;,
+}</code></pre>
+
+          <h4>why DashMap instead of RwLock&lt;HashMap&gt;?</h4>
+          <p>a <code>RwLock&lt;HashMap&gt;</code> serialises every write across the <em>entire</em> map. a heartbeat from broadcaster A would block a TuneIn from listener B even though they touch completely different keys. <code>DashMap</code> shards internally — by default into roughly 4× the number of CPU cores — so operations on different keys almost never block each other.</p>
+
+          <h4>why is playlist wrapped differently?</h4>
+          <p>the playlist is behind <code>RwLock&lt;Vec&gt;</code> rather than <code>DashMap</code> because it is a <em>sequential structure</em> accessed by integer index. the only time an exclusive write lock is needed is during uploads (inserting a new entry in sorted position). everything else — streaming, playlist fetches, radio sync — needs only a read lock, and many read locks can be held simultaneously.</p>
+
+          <h4>PreparedMessage — serialize once, fan out to N listeners</h4>
+<pre><code class="language-rust">pub struct PreparedMessage {
+    pub json: String,
+}
+impl PreparedMessage {
+    pub fn new(msg: &amp;RadioMessage) -&gt; Self {
+        Self { json: serde_json::to_string(msg).unwrap() }
+    }
+}</code></pre>
+          <p>when a broadcaster seeks, the server needs to push a <code>Sync</code> message to potentially hundreds of listeners. serialising the same struct once per listener would be wasteful. instead the server serialises once into a <code>PreparedMessage</code>, wraps it in <code>Arc</code>, and sends that arc through the broadcast channel. each listener's send task receives a clone of the arc — which is just a pointer increment — and writes the same bytes to their socket. this is zero-copy fan-out.</p>
+
+          <h4>the RadioMessage enum</h4>
+          <p>all WebSocket messages are variants of a single <code>RadioMessage</code> enum. Serde's <code>#[serde(tag = "type")]</code> attribute serialises the variant name as a <code>"type"</code> field in JSON:</p>
+
+<pre><code class="language-rust">#[derive(Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum RadioMessage {
+    Sync         { broadcaster_id: String, media_index: usize, playback_time: f64, is_playing: bool, server_timestamp_ms: u128 },
+    Heartbeat    { broadcaster_id: String, playback_time: f64, client_timestamp_ms: u64 },
+    TuneIn       { broadcaster_id: String },
+    TuneOut,
+    BroadcastUpdate { broadcaster_id: String, media_index: usize, playback_time: f64, is_playing: bool, client_timestamp_ms: u64 },
+    StartBroadcasting { .. },
+    StopBroadcasting  { .. },
+    BroadcasterOnline  { broadcaster_id: String },
+    BroadcasterOffline { broadcaster_id: String },
+    AutoNext     { broadcaster_id: String, next_media_index: usize, server_timestamp_ms: u64 },
+    Analytics    { .. },
+    QueryBroadcastState   { session_id: String },
+    BroadcastStateResponse { .. },
+    ServerShutdown { message: String },
+    Error          { message: String },
+}</code></pre>
+          <p>on the wire this becomes <code>{"type":"TuneIn","broadcaster_id":"...uuid..."}</code>. the JavaScript frontend uses the same <code>type</code> field in its switch statement.</p>
+
+          <div class="callout callout-why">
+            <div class="callout-label">why a single enum?</div>
+            having all messages as one type means the compiler can enforce that every variant is handled in <code>match</code> blocks. if you add a new message type, every <code>match</code> that doesn't handle it becomes a compile error. no forgotten cases at runtime.
+          </div>
+
+          <h4>BroadcastState — what the server knows about a broadcaster</h4>
+<pre><code class="language-rust">pub struct BroadcastState {
+    pub broadcaster_id:          String,
+    pub media_index:             usize,
+    pub media_name:              String,
+    pub playback_time:           f64,   // raw, as reported by broadcaster
+    pub is_playing:              bool,
+    pub server_timestamp_ms:     u128,  // when this was recorded
+    pub listener_count:          usize,
+    pub transmission_latency_ms: u64,   // estimated one-way lag
+}</code></pre>
+          <p><code>transmission_latency_ms</code> is computed from the <code>client_timestamp_ms</code> field each broadcaster stamps on every outgoing message. subtracting it from the server's wall clock gives the one-way transit time. this is stored on the state so that late-joining listeners can receive an already-adjusted position via TuneIn.</p>
+
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── session.rs ────────────────────────────────────── -->
+<section id="session">
+  <div class="file-block">
+    <div class="file-header">
+      <span class="file-name">session.rs</span>
+      <span class="file-lang">rust</span>
+    </div>
+    <p class="file-summary">manages browser sessions (via cookies), tracks per-user playlist position, and runs the hourly cleanup task that removes stale sessions.</p>
+
+    <div class="deep-dive">
+      <button class="deep-dive-toggle" data-target="dd-session">
+        ↓ deep dive — cookie-based sessions, cleanup strategy
+        <span class="dd-icon">+</span>
+      </button>
+      <div class="deep-dive-body" id="dd-session">
+        <div class="deep-dive-inner">
+
+          <h4>how sessions are created</h4>
+          <p>when a browser loads the player page, the server looks for a <code>player_session</code> cookie. if absent, a UUID v4 is generated and set as a cookie in the HTTP response. from then on every request from that tab carries that UUID.</p>
+
+<pre><code class="language-rust">pub fn get_session_id(headers: &amp;HeaderMap) -&gt; String {
+    headers.get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| {
+            cookies.split(';').find_map(|c| {
+                c.trim().strip_prefix("player_session=")
+            })
+        })
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| Uuid::new_v4().to_string())
+}</code></pre>
+          <p>there is no login, no password, no database lookup. the cookie is simply a random identifier. this works because all users of stargzr are assumed to be on the same trusted network.</p>
+
+          <h4>get_or_create_position — the DashMap entry API</h4>
+<pre><code class="language-rust">pub fn get_or_create_position(state: &amp;AppState, session_id: &amp;str) -&gt; usize {
+    // fast path — read without taking an exclusive lock
+    if let Some(session) = state.sessions.get(session_id) {
+        return session.current_index;
+    }
+    // slow path — create entry if it doesn't exist yet
+    let mut session = state.sessions
+        .entry(session_id.to_string())
+        .or_insert_with(|| PlayerSession {
+            current_index: 0,
+            last_activity: std::time::Instant::now(),
+        });
+    session.last_activity = std::time::Instant::now();
+    session.current_index
+}</code></pre>
+          <p>the fast path avoids taking any exclusive lock by using DashMap's read-only <code>get()</code>. only new sessions hit the <code>entry</code> path which needs to acquire a shard write lock.</p>
+
+          <h4>cleanup_stale_sessions — two different TTLs</h4>
+          <p>the cleanup task wakes every hour and applies different rules to different kinds of sessions:</p>
+          <ul>
+            <li><strong>player sessions</strong> — kept alive for 24 hours of inactivity. range requests during playback automatically touch <code>last_activity</code>, so an active listener never gets cleaned up.</li>
+            <li><strong>broadcaster sessions</strong> — considered stale after 30 seconds without a heartbeat. heartbeats fire every 2 seconds normally, so 30 seconds allows several missed beats before declaring the broadcaster gone.</li>
+          </ul>
+
+          <div class="callout callout-warn">
+            <div class="callout-label">note</div>
+            custom playlist order is stored in <code>localStorage</code> in the browser, not on the server. so even if a session is cleaned up, reopening the page will restore the user's playlist order. only the current track position resets.
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── handlers.rs ───────────────────────────────────── -->
+<section id="streaming">
+  <div class="file-block">
+    <div class="file-header">
+      <span class="file-name">handlers.rs</span>
+      <span class="file-lang">rust</span>
+    </div>
+    <p class="file-summary">all HTTP handlers: serving the player page, media streaming with range support, file/folder downloads, uploads with ffmpeg video conversion, and the admin state endpoint.</p>
+
+    <div class="deep-dive">
+      <button class="deep-dive-toggle" data-target="dd-handlers">
+        ↓ deep dive — HTTP range requests, MP4 quirks, video conversion, RAII cleanup
+        <span class="dd-icon">+</span>
+      </button>
+      <div class="deep-dive-body" id="dd-handlers">
+        <div class="deep-dive-inner">
+
+          <h4>HTTP range requests (RFC 7233)</h4>
+          <p>browsers do not download audio/video files completely before playing. they issue <em>range requests</em>: <code>Range: bytes=2000000-3000000</code>. this is what makes seeking work — the browser asks for exactly the bytes it needs and the server delivers only those bytes.</p>
+
+<pre><code class="language-rust">fn parse_range_header(headers: &amp;HeaderMap, file_size: u64) -&gt; Option&lt;(u64, u64)&gt; {
+    let range_str = headers.get(header::RANGE)?.to_str().ok()?;
+    let range_str = range_str.strip_prefix("bytes=")?;
+    let (start_str, end_str) = range_str.split_once('-')?;
+    let start: u64 = start_str.parse().ok()?;
+    let end: u64 = if end_str.is_empty() {
+        file_size - 1                          // "bytes=2M-" means from 2M to end
+    } else {
+        end_str.parse::&lt;u64&gt;().ok()?.min(file_size - 1)
+    };
+    Some((start, end))
+}</code></pre>
+
+          <p>when a range is present the server seeks the file handle to <code>start</code>, wraps it in a <code>ReaderStream</code> limited to <code>end - start + 1</code> bytes, and responds with HTTP <strong>206 Partial Content</strong>.</p>
+
+          <h4>why always 206, even for a full-file response?</h4>
+          <p>when no range header is present — the browser's first request — the server still responds with 206 and a full-file <code>Content-Range: bytes 0-N/N</code> header, rather than the more natural 200.</p>
+
+          <div class="callout callout-warn">
+            <div class="callout-label">the MP4 moov atom problem</div>
+            MP4 files store a metadata block called the <em>moov atom</em> that contains duration, codec info, and sample offsets. when this atom is at the <em>end</em> of the file (the default from most encoders), the browser must download the entire file before it can begin playback. a plain <code>200</code> response triggers this path. responding with <code>206</code> signals that this server supports range requests, which causes the browser to skip ahead and issue targeted range requests for the moov atom, enabling near-instant playback start. ffmpeg's <code>-movflags +faststart</code> flag moves the moov atom to the front, but the 206 path handles files that weren't encoded with faststart too.
+          </div>
+
+          <h4>streaming in 1 MB chunks</h4>
+<pre><code class="language-rust">const STREAMING_CHUNK_BYTES: usize = 1 * 1024 * 1024;
+let stream = ReaderStream::with_capacity(file, STREAMING_CHUNK_BYTES);</code></pre>
+          <p>at most 1 MB of any file lives in RAM at once, regardless of file size. Axum streams the body directly from the <code>ReaderStream</code> — each chunk is read from disk, sent over the socket, and then dropped.</p>
+
+          <h4>aggressive cache headers</h4>
+<pre><code class="language-rust">.header(header::CACHE_CONTROL, "public, max-age=31536000")</code></pre>
+          <p>one year of caching. because media files never change (they are immutable once uploaded), the browser can cache every byte range it fetches. a user who has already played a file and seeks back through it costs zero bytes of network traffic the second time.</p>
+
+          <h4>video upload &amp; ffmpeg conversion</h4>
+          <p>uploaded videos are immediately converted to H.264/AAC MP4 so they work in every browser. the ffmpeg command is chosen carefully:</p>
+
+<pre><code class="language-bash">ffmpeg -i input.mkv \
+  -map 0:v:0 -map 0:a:0 \
+  -c:v libx264 -crf 23 -maxrate 2M -bufsize 4M \
+  -c:a aac -b:a 192k -ac 2 \
+  -movflags +faststart \
+  output.mp4 \
+  -map 0:s:0 -c:s webvtt output.vtt</code></pre>
+
+          <table>
+            <tr><th>flag</th><th>what it does</th></tr>
+            <tr><td><code>-crf 23</code></td><td>constant quality factor. lower = higher quality and larger file. 23 is a good all-round default.</td></tr>
+            <tr><td><code>-maxrate 2M -bufsize 4M</code></td><td>caps bitrate spikes that cause buffer underruns during HTTP streaming</td></tr>
+            <tr><td><code>-ac 2</code></td><td>force stereo. AAC 5.1 surround has a known bug (PCE issue) causing silent playback in Chrome/Firefox</td></tr>
+            <tr><td><code>-movflags +faststart</code></td><td>moves the moov atom to the front of the file. enables playback before the full file downloads.</td></tr>
+            <tr><td><code>-c:s webvtt output.vtt</code></td><td>extracts embedded subtitles as a separate .vtt file. MP4 cannot embed WebVTT natively.</td></tr>
+          </table>
+
+          <p>only one conversion runs at a time, enforced by a <code>Semaphore</code> with a count of 1. this prevents CPU saturation on low-power servers when multiple users upload videos simultaneously.</p>
+
+          <h4>DeleteOnDrop — RAII temp file cleanup</h4>
+          <p>when zipping a folder for download, the server writes to a temp file. if anything fails partway through — disk error, client disconnects, code bug — the temp file must not be left behind.</p>
+
+<pre><code class="language-rust">struct DeleteOnDrop(Option&lt;std::path::PathBuf&gt;);
+impl Drop for DeleteOnDrop {
+    fn drop(&amp;mut self) {
+        if let Some(p) = self.0.take() {
+            std::fs::remove_file(&amp;p).ok();
+        }
+    }
+}
+// disarm: take ownership without triggering cleanup
+fn disarm(&amp;mut self) -&gt; std::path::PathBuf { self.0.take().unwrap() }</code></pre>
+          <p>RAII (resource acquisition is initialization) is a Rust/C++ pattern: tie the lifetime of a resource to an object. when the object is dropped (goes out of scope, returns early, panics), the resource is released. here "release" means "delete the temp file". the <code>disarm()</code> method hands ownership to the streaming side, which installs its own guard to delete the file once the last byte is sent.</p>
+
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── radio.rs ──────────────────────────────────────── -->
+<section id="radio">
+  <div class="file-block">
+    <div class="file-header">
+      <span class="file-name">radio.rs</span>
+      <span class="file-lang">rust</span>
+    </div>
+    <p class="file-summary">the heart of stargzr. manages each WebSocket connection using two concurrent tasks, routes all radio messages, fans out sync updates to listeners, and handles latency compensation.</p>
+
+    <div class="deep-dive">
+      <button class="deep-dive-toggle" data-target="dd-radio">
+        ↓ deep dive — two-task architecture, select! ordering, channel design, analytics throttling
+        <span class="dd-icon">+</span>
+      </button>
+      <div class="deep-dive-body" id="dd-radio">
+        <div class="deep-dive-inner">
+
+          <h4>the two-task architecture</h4>
+          <p>each WebSocket connection spawns two Tokio tasks that run concurrently:</p>
+          <ul>
+            <li><strong>receive task</strong> — reads frames from the socket, deserialises them, calls <code>handle_client_message</code></li>
+            <li><strong>send task</strong> — waits on three channel sources and writes frames to the socket</li>
+          </ul>
+          <p>they communicate through:</p>
+          <ul>
+            <li><code>out_tx / out_rx</code> — an <code>mpsc</code> channel from receive→send for direct replies (e.g., the initial Sync on TuneIn)</li>
+            <li><code>tuned_tx / tuned_rx</code> — a <code>watch</code> channel that carries the broadcaster ID the listener is currently tuned to</li>
+          </ul>
+
+<pre><code class="language-rust">let (out_tx, mut out_rx)  = mpsc::channel::&lt;RadioMessage&gt;(32);
+let (tuned_tx, mut tuned_rx) = tokio::sync::watch::channel::&lt;Option&lt;String&gt;&gt;(None);
+let mut global_broadcast_rx = state.global_broadcast_tx.subscribe();</code></pre>
+
+          <h4>the send task's biased select!</h4>
+<pre><code class="language-rust">tokio::select! {
+    biased;  // ← check branches in order, not randomly
+
+    // 1. broadcaster's channel — hottest path, checked first
+    Ok(msg) = async {
+        match &amp;mut current_tuned_broadcaster_rx {
+            Some(rx) =&gt; rx.recv().await,
+            None =&gt; std::future::pending().await,  // never ready if not tuned
+        }
+    } =&gt; { send_prepared(&amp;mut sender, &amp;msg).await }
+
+    // 2. global announcements (BroadcasterOnline, Analytics, Shutdown)
+    Ok(msg) = global_broadcast_rx.recv() =&gt; {
+        send_prepared(&amp;mut sender, &amp;msg).await
+    }
+
+    // 3. direct replies from the receive task
+    Some(msg) = out_rx.recv() =&gt; {
+        send_message(&amp;mut sender, &amp;msg).await
+    }
+
+    // 4. broadcaster tuning changed
+    Ok(()) = tuned_rx.changed() =&gt; { /* swap current_tuned_broadcaster_rx */ }
+}</code></pre>
+
+          <p><code>biased</code> skips Tokio's default random branch selection. the tuned broadcaster's channel is the busiest path at runtime (every seek fires there), so having it always checked first reduces latency on the critical path.</p>
+
+          <p>when <code>current_tuned_broadcaster_rx</code> is <code>None</code> (not tuned to anyone), the <code>std::future::pending().await</code> inside returns a future that never resolves. the branch effectively disappears from the select without requiring any special-casing outside.</p>
+
+          <h4>the watch channel for tuning changes</h4>
+          <p>a <code>watch</code> channel always holds the latest value and notifies the receiver whenever it changes. when the receive task processes a <code>TuneIn</code> message it writes the broadcaster ID to <code>tuned_tx</code>. the send task's <code>tuned_rx.changed()</code> branch fires, looks up the broadcaster's per-channel <code>broadcast::Sender</code>, calls <code>.subscribe()</code> on it, and stores the resulting receiver as <code>current_tuned_broadcaster_rx</code>. from that moment on, every Sync the broadcaster triggers goes directly into the send loop.</p>
+
+          <div class="callout callout-why">
+            <div class="callout-label">why mpsc for out_rx but broadcast for the broadcaster channel?</div>
+            <code>mpsc</code> (multi-producer single-consumer) is point-to-point: one sender, one receiver. it is used for direct replies from receive→send because only one send task should receive each reply.<br><br>
+            <code>broadcast</code> is one-to-many: one sender, many independent receivers. it is used for broadcaster sync messages because the same Sync message must reach every listener simultaneously. each listener's send task has its own independent receiver and processes messages at its own pace.
+          </div>
+
+          <h4>BroadcastUpdate — latency compensation on the server side</h4>
+<pre><code class="language-rust">// client stamps Date.now() before sending; server subtracts on receipt
+let latency_ms = (now_ms() as u64).saturating_sub(client_timestamp_ms);
+
+// only adjust on same-media updates (seeks, play/pause)
+// media switches start from 0 intentionally — adding latency would skip the intro
+let adjusted_playback_time = if is_same_media {
+    playback_time + (latency_ms as f64 / 1000.0)
+} else {
+    playback_time
+};
+
+// store raw playback_time on BroadcastState so TuneIn can apply
+// the same compensation consistently for late-joining listeners
+state.broadcast_states.insert(broadcaster_id.clone(), BroadcastState {
+    playback_time,  // raw, not adjusted
+    transmission_latency_ms: latency_ms,
+    ..
+});</code></pre>
+
+          <h4>analytics throttling — preventing thundering herds</h4>
+          <p><code>BroadcastUpdate</code> can fire on every seek frame — potentially many times per second. if each one triggered a full analytics broadcast to every connected client, the overhead would be significant. throttling is applied using an atomic compare-exchange:</p>
+
+<pre><code class="language-rust">pub fn broadcast_analytics_throttled(state: &amp;SharedState) {
+    let now  = now_ms() as u64;
+    let last = state.last_analytics_ms.load(Relaxed);
+
+    if now.saturating_sub(last) &lt; ANALYTICS_THROTTLE_MS { return; }
+
+    // compare_exchange: only one concurrent caller wins the race
+    // the loser finds last != expected and returns is_err(), skipping the broadcast
+    if state.last_analytics_ms
+           .compare_exchange(last, now, Relaxed, Relaxed)
+           .is_ok()
+    {
+        broadcast_analytics(state);
+    }
+}</code></pre>
+          <p>without <code>compare_exchange</code>, many concurrent <code>BroadcastUpdate</code> handlers could all pass the time check simultaneously and all fire analytics broadcasts. the atomic swap ensures only one wins.</p>
+
+          <h4>ensure_same_session — impersonation prevention</h4>
+<pre><code class="language-rust">fn ensure_same_session(expected: &amp;str, actual: &amp;str) -&gt; Result&lt;(), PlayerError&gt; {
+    (expected == actual).then_some(()).ok_or_else(|| {
+        tracing::warn!(session_id = %actual, attempted_as = %expected,
+                       "Session impersonation attempt");
+        PlayerError::BroadcastUnauthorized("...")
+    })
+}</code></pre>
+          <p>the session ID is recorded at WebSocket handshake time. every broadcaster message includes a <code>broadcaster_id</code> field. this check ensures the ID in the message matches the one from the handshake — a client cannot claim to be someone else after connecting.</p>
+
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── rate_limit.rs ─────────────────────────────────── -->
+<section id="ratelimit">
+  <div class="file-block">
+    <div class="file-header">
+      <span class="file-name">rate_limit.rs</span>
+      <span class="file-lang">rust</span>
+    </div>
+    <p class="file-summary">token bucket rate limiter. each session or IP gets a bucket with a capacity and a refill rate. requests consume tokens; empty buckets reject requests.</p>
+
+    <div class="deep-dive">
+      <button class="deep-dive-toggle" data-target="dd-rate">
+        ↓ deep dive — token bucket algorithm, per-path limits
+        <span class="dd-icon">+</span>
+      </button>
+      <div class="deep-dive-body" id="dd-rate">
+        <div class="deep-dive-inner">
+
+          <h4>how a token bucket works</h4>
+          <p>imagine a bucket that can hold <code>capacity</code> tokens. tokens refill at a constant rate. each request costs one token. if the bucket is empty the request is rejected. this allows short bursts (the full bucket) while limiting the sustained rate (the refill rate).</p>
+
+<pre><code class="language-rust">pub struct RateLimiter {
+    buckets:     DashMap&lt;String, TokenBucket&gt;,
+    capacity:    f64,
+    refill_rate: f64,  // tokens per second
+}
+
+pub fn check_and_consume(&amp;self, session_id: &amp;str) -&gt; PlayerResult&lt;()&gt; {
+    let mut bucket = self.buckets.entry(session_id.to_string())
+        .or_insert_with(|| TokenBucket { tokens: self.capacity, last_refill: Instant::now() });
+
+    let elapsed = Instant::now().duration_since(bucket.last_refill).as_secs_f64();
+    bucket.tokens = (bucket.tokens + elapsed * self.refill_rate).min(self.capacity);
+    bucket.last_refill = Instant::now();
+
+    if bucket.tokens &gt;= 1.0 {
+        bucket.tokens -= 1.0;
+        Ok(())
+    } else {
+        Err(PlayerError::RateLimitExceeded(session_id.to_string()))
+    }
+}</code></pre>
+
+          <table>
+            <tr><th>limiter</th><th>capacity</th><th>refill</th><th>rationale</th></tr>
+            <tr><td>heartbeat</td><td>5 tokens</td><td>0.5/s → 1 per 2s</td><td>heartbeats are timer-driven; strict limit catches runaway timers</td></tr>
+            <tr><td>broadcast</td><td>10 tokens</td><td>2/s</td><td>allows seek bursts while limiting sustained spam</td></tr>
+            <tr><td>websocket</td><td>5 tokens</td><td>0.1/s → 1 per 10s</td><td>per-IP; prevents connection flood attacks</td></tr>
+          </table>
+
+          <p>old buckets are cleaned up every hour via <code>cleanup_old_buckets()</code> — any bucket whose last refill was over an hour ago is removed. without this cleanup the DashMap would grow indefinitely as new IPs connect and disconnect.</p>
+
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── validation.rs ─────────────────────────────────── -->
+<section id="validation">
+  <div class="file-block">
+    <div class="file-header">
+      <span class="file-name">validation.rs</span>
+      <span class="file-lang">rust</span>
+    </div>
+    <p class="file-summary">the newtype pattern for session IDs — parse-don't-validate applied to UUIDs.</p>
+
+    <div class="deep-dive">
+      <button class="deep-dive-toggle" data-target="dd-validation">
+        ↓ deep dive — parse-don't-validate, newtype pattern
+        <span class="dd-icon">+</span>
+      </button>
+      <div class="deep-dive-body" id="dd-validation">
+        <div class="deep-dive-inner">
+
+          <h4>parse-don't-validate</h4>
+          <p>instead of validating a <code>String</code> wherever it is used, the code converts it into a type that <em>can only be constructed</em> through validation. this is the "parse-don't-validate" principle.</p>
+
+<pre><code class="language-rust">pub struct SessionId(String);  // newtype — just a wrapper
+
+impl SessionId {
+    pub fn new(id: String) -&gt; PlayerResult&lt;Self&gt; {
+        uuid::Uuid::parse_str(&amp;id)
+            .map_err(|_| PlayerError::InvalidSessionId(format!(
+                "Session ID must be a valid UUID, got: {}", id
+            )))?;
+        Ok(SessionId(id))
+    }
+
+    pub fn as_str(&amp;self) -&gt; &amp;str { &amp;self.0 }
+    pub fn into_inner(self) -&gt; String { self.0 }
+}</code></pre>
+
+          <p>any function that accepts a <code>SessionId</code> parameter carries a compile-time guarantee that UUID validation has already passed — no defensive re-checking needed further down the call chain. the Rust orphan rule prevents implementing traits on foreign types, which is why the newtype exists instead of using <code>String</code> directly.</p>
+
+          <div class="callout callout-key">
+            <div class="callout-label">the orphan rule</div>
+            Rust only allows implementing a trait for a type if either the trait or the type is defined in your crate. <code>SessionId</code> is defined here, so you can implement any trait for it — including the <code>Connected</code> trait from Axum used for <code>PeerAddr</code> in <code>mod.rs</code>.
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── error.rs ──────────────────────────────────────── -->
+<section id="errors">
+  <div class="file-block">
+    <div class="file-header">
+      <span class="file-name">error.rs</span>
+      <span class="file-lang">rust</span>
+    </div>
+    <p class="file-summary">a custom error enum that implements Axum's IntoResponse — errors become HTTP responses automatically, and the <code>?</code> operator propagates them up the call stack.</p>
+
+    <div class="deep-dive">
+      <button class="deep-dive-toggle" data-target="dd-error">
+        ↓ deep dive — IntoResponse, the ? operator, #[from] conversions
+        <span class="dd-icon">+</span>
+      </button>
+      <div class="deep-dive-body" id="dd-error">
+        <div class="deep-dive-inner">
+
+<pre><code class="language-rust">#[derive(Error, Debug)]
+pub enum PlayerError {
+    #[error("Media index {0} out of bounds (playlist size: {1})")]
+    InvalidMediaIndex(usize, usize),
+
+    #[error("IO error: {0}")]
+    IoError(#[from] std::io::Error),      // ← auto-convert from std::io::Error
+
+    #[error("JSON serialization failed: {0}")]
+    SerializationError(#[from] serde_json::Error),  // ← auto-convert from serde errors
+    // ...
+}
+
+impl IntoResponse for PlayerError {
+    fn into_response(self) -&gt; Response {
+        let (status, message) = match self {
+            PlayerError::InvalidMediaIndex(_, _) =&gt; (StatusCode::NOT_FOUND, self.to_string()),
+            PlayerError::RateLimitExceeded(_) =&gt; (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
+            _ =&gt; (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".into()),
+        };
+        (status, message).into_response()
+    }
+}</code></pre>
+
+          <p>the <code>#[from]</code> attribute on <code>IoError</code> and <code>SerializationError</code> auto-generates a <code>From&lt;std::io::Error&gt; for PlayerError</code> impl. this means any code that calls a file IO function can use <code>?</code> and the error is automatically wrapped into a <code>PlayerError::IoError</code>. handlers return <code>Result&lt;T, PlayerError&gt;</code>, and Axum calls <code>into_response()</code> on the error automatically — no manual error handling in each handler.</p>
+
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── mod.rs ────────────────────────────────────────── -->
+<section id="startup">
+  <div class="file-block">
+    <div class="file-header">
+      <span class="file-name">mod.rs</span>
+      <span class="file-lang">rust</span>
+    </div>
+    <p class="file-summary">server startup: binds the TCP listener, builds the router, scans the media folder to build the initial playlist, spawns background tasks, and handles graceful shutdown.</p>
+
+    <div class="deep-dive">
+      <button class="deep-dive-toggle" data-target="dd-startup">
+        ↓ deep dive — TCP_NODELAY, graceful shutdown, the NoDelay listener
+        <span class="dd-icon">+</span>
+      </button>
+      <div class="deep-dive-body" id="dd-startup">
+        <div class="deep-dive-inner">
+
+          <h4>TCP_NODELAY — disabling Nagle's algorithm</h4>
+          <p>Nagle's algorithm is a TCP optimisation that batches small outgoing packets together to reduce the number of network segments. it improves bulk throughput but adds latency to small, time-sensitive writes. WebSocket sync messages are tiny JSON frames that must arrive as fast as possible. the server wraps the Tokio <code>TcpListener</code> in a <code>NoDelayListener</code> that sets <code>TCP_NODELAY</code> on every accepted socket:</p>
+
+<pre><code class="language-rust">struct NoDelayListener(tokio::net::TcpListener);
+
+impl axum::serve::Listener for NoDelayListener {
+    async fn accept(&amp;mut self) -&gt; (Self::Io, Self::Addr) {
+        loop {
+            match self.0.accept().await {
+                Ok((stream, addr)) =&gt; {
+                    stream.set_nodelay(true).ok();  // ← disable Nagle
+                    return (stream, addr);
+                }
+                Err(e) =&gt; tracing::error!("Accept error: {}", e),
+            }
+        }
+    }
+}</code></pre>
+
+          <h4>graceful shutdown</h4>
+          <p>when the server receives SIGTERM (Docker stop, systemctl stop) or SIGINT (Ctrl+C), it does not just kill connections. it:</p>
+          <ol>
+            <li>sends a <code>ServerShutdown</code> message through the global broadcast channel so every browser knows the server is restarting and will try to reconnect</li>
+            <li>sends <code>BroadcasterOffline</code> for every active broadcaster so listeners gracefully leave radio mode</li>
+            <li>sleeps 1 second to give the WebSocket send tasks time to flush those messages before Axum starts draining connections</li>
+          </ol>
+
+          <h4>the orphan rule and PeerAddr</h4>
+          <p>Axum's <code>ConnectInfo</code> extractor lets handlers receive the peer's socket address without relying on headers (which can be spoofed). but implementing Axum's <code>Connected</code> trait for <code>std::net::SocketAddr</code> would violate the orphan rule — both types are foreign. the fix is a local newtype:</p>
+
+<pre><code class="language-rust">#[derive(Clone)]
+pub struct PeerAddr(pub std::net::SocketAddr);  // defined here → orphan rule satisfied
+
+impl axum::extract::connect_info::Connected&lt;...&gt; for PeerAddr {
+    fn connect_info(target: ...) -&gt; Self { PeerAddr(*target.remote_addr()) }
+}</code></pre>
+
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr>
+
+<!-- ══════════════════════════════════════════════════════════
+     FRONTEND
+═════════════════════════════════════════════════════════════ -->
+<section>
+  <div class="section-label">02 — frontend</div>
+  <h2>The JavaScript Client</h2>
+
+  <p>the browser side is eight files loaded in dependency order using <code>defer</code>. each file either defines a class used elsewhere, or registers event listeners that depend on those classes. <code>main.js</code> is always last.</p>
+
+<pre><code class="language-html">&lt;script src="utils.js" defer&gt;&lt;/script&gt;        &lt;!-- debugLog() — called at parse time --&gt;
+&lt;script src="playlist.js" defer&gt;&lt;/script&gt;     &lt;!-- PlaylistManager class --&gt;
+&lt;script src="radio-player.js" defer&gt;&lt;/script&gt; &lt;!-- RadioPlayer class --&gt;
+&lt;script src="analytics.js" defer&gt;&lt;/script&gt;   &lt;!-- updateAnalyticsDisplay() --&gt;
+&lt;script src="upload.js" defer&gt;&lt;/script&gt;       &lt;!-- upload button listener --&gt;
+&lt;script src="admin.js" defer&gt;&lt;/script&gt;        &lt;!-- admin panel polling --&gt;
+&lt;script src="search.js" defer&gt;&lt;/script&gt;       &lt;!-- search listener --&gt;
+&lt;script src="main.js" defer&gt;&lt;/script&gt;         &lt;!-- instantiates everything --&gt;</code></pre>
+</section>
+
+<!-- ── radio-player.js ───────────────────────────────── -->
+<section id="radio-player">
+  <div class="file-block">
+    <div class="file-header">
+      <span class="file-name">radio-player.js</span>
+      <span class="file-lang">javascript</span>
+    </div>
+    <p class="file-summary">the RadioPlayer class owns the WebSocket connection and all radio-mode logic: connecting, tuning in/out, syncing to a broadcaster, handling reconnections with exponential backoff, and managing wake locks for mobile.</p>
+
+    <div class="deep-dive">
+      <button class="deep-dive-toggle" data-target="dd-radioplayer">
+        ↓ deep dive — WebSocket lifecycle, tuneIn snapshot, syncToBroadcaster, AutoNext, Bluetooth mode
+        <span class="dd-icon">+</span>
+      </button>
+      <div class="deep-dive-body" id="dd-radioplayer">
+        <div class="deep-dive-inner">
+
+          <h4>WebSocket lifecycle &amp; reconnection</h4>
+          <p>event handlers are stored in <code>this.boundHandlers</code> because <code>removeEventListener</code> requires the same function reference that was passed to <code>addEventListener</code>. anonymous functions cannot be removed — storing named references solves this.</p>
+
+<pre><code class="language-javascript">connectWebSocket() {
+    this.ws = new WebSocket(wsUrl);
+
+    const onOpen    = () =&gt; { this.reconnectAttempts = 0; /* re-tune if needed */ };
+    const onMessage = (event) =&gt; { this.handleRadioMessage(JSON.parse(event.data)); };
+    const onClose   = async (event) =&gt; {
+        this.removeWebSocketHandlers();
+        if (!this.isIntentionalDisconnect) this.scheduleReconnect();
+    };
+
+    // store so removeWebSocketHandlers can find them later
+    this.boundHandlers.set("open", onOpen);
+    this.boundHandlers.set("close", onClose);
+    this.ws.addEventListener("open", onOpen);
+    this.ws.addEventListener("close", onClose);
+}</code></pre>
+
+          <h4>reconnection with exponential backoff + jitter</h4>
+<pre><code class="language-javascript">getReconnectDelay() {
+    const exponential = this.baseReconnectDelay * Math.pow(2, this.reconnectAttempts);
+    const jitter = exponential * 0.2 * (Math.random() - 0.5);
+    return Math.min(
+        Math.max(this.baseReconnectDelay, exponential + jitter),
+        this.maxReconnectDelay
+    );
+}</code></pre>
+          <p>jitter is critical: if fifty clients all disconnect simultaneously (server restart) and all reconnect after the same backoff, they flood the server again. randomising the delay spreads the reconnection load across a wider window.</p>
+
+          <h4>tuneIn — snapshotting private state</h4>
+          <p>before entering radio mode, the player saves everything about the current private playback into <code>preRadioSnapshot</code>:</p>
+
+<pre><code class="language-javascript">this.preRadioSnapshot = {
+    src:         this.audio.src,
+    currentTime: this.audio.currentTime,
+    paused:      this.audio.paused,
+    mediaId:     window.playlistManager?.currentMediaId,
+    isVideo:     snapMedia?.media_type === "video",
+};</code></pre>
+
+          <p><code>tuneOut</code> reads this back and restores it exactly — including switching back to the audio or video element that was active, restoring the playback position, and resuming if it was playing. without this, tuning out would reset the user to wherever the browser's element happened to be after following the broadcaster.</p>
+
+          <h4>_tuneInSentAt — client-side latency compensation</h4>
+<pre><code class="language-javascript">// in tuneIn():
+this._tuneInSentAt = Date.now();
+
+// in syncToBroadcaster(), first Sync after TuneIn:
+if (this._tuneInSentAt !== null) {
+    const elapsed = (Date.now() - this._tuneInSentAt) / 1000;
+    this._tuneInSentAt = null;
+    const adjusted = playback_time + elapsed;
+    if (adjusted &lt; duration) playback_time = adjusted;
+}</code></pre>
+          <p>the server compensates for broadcaster→server latency. this compensates for server→listener latency. together they give the listener a playback time that is close to what the broadcaster is actually at right now, not at the moment the update was recorded.</p>
+
+          <h4>syncToBroadcaster — three-way logic</h4>
+<pre><code class="language-javascript">syncToBroadcaster(msg) {
+    const currentIndex = this.getCurrentMediaIndex();
+
+    if (currentIndex !== media_index || this._loadingMediaIndex === media_index) {
+        // case 1 OR 2: wrong track (or already loading this track)
+        this._pendingSeekTime   = playback_time;
+        this._pendingIsPlaying  = is_playing;
+
+        if (this._loadingMediaIndex !== media_index) {
+            // case 1: different track — start loading
+            this._loadingMediaIndex = media_index;
+            this.audio.src = `/stream/id/${mediaId}`;
+            this.audio.load();
+            this.audio.addEventListener("canplay", () =&gt; {
+                this._loadingMediaIndex = null;
+                this.audio.currentTime  = this._pendingSeekTime;
+                if (this._pendingIsPlaying) this._radioPlay();
+            }, { once: true });
+        }
+        // case 2: already loading this track — just update _pendingSeekTime
+        // the in-flight canplay handler will pick it up
+
+    } else {
+        // case 3: same track, not loading — direct seek
+        this.audio.currentTime = playback_time;
+        if (is_playing) this._radioPlay();
+        if (!is_playing &amp;&amp; !this.audio.paused) this.audio.pause();
+    }
+}</code></pre>
+
+          <p>the <code>syncTimer</code> debounce (80ms) collapses rapid Sync messages — common during a seek — into a single call to <code>syncToBroadcaster</code>. without this, a fast seek could queue up dozens of competing load/seek operations.</p>
+
+          <h4>AutoNext — finishing your own copy before switching</h4>
+          <p>when a broadcaster's track ends and they move to the next, they send <code>AutoNext</code>. listeners do not immediately jump — they have a few seconds of buffered audio left from the current track that they should play out. <code>pendingAutoNextIndex</code> queues the next track index, and a one-shot <code>ended</code> listener triggers the switch when the listener's local copy actually finishes:</p>
+
+<pre><code class="language-javascript">// on receiving AutoNext:
+this.pendingAutoNextIndex = msg.next_media_index;
+
+this.audio.addEventListener("ended", () =&gt; {
+    if (this.pendingAutoNextIndex === null) return;
+    const idx = this.pendingAutoNextIndex;
+    this.pendingAutoNextIndex = null;
+    this.audio.src = `/stream/id/${mediaId}`;
+    this.audio.load();
+    this.audio.addEventListener("canplay", () =&gt; {
+        this.audio.currentTime = seekTo;
+        this._radioPlay();
+    }, { once: true });
+}, { once: true });</code></pre>
+
+          <h4>Bluetooth mode — muting during seeks</h4>
+          <p>some Bluetooth codecs re-negotiate when audio is interrupted mid-stream. the re-negotiation takes 200–500ms and produces a harsh click. muting during seeks and unmuting 1 second after <code>playing</code> fires covers the codec setup window:</p>
+
+<pre><code class="language-javascript">el.addEventListener("seeking", () =&gt; {
+    setTimeout(() =&gt; {
+        if (el.currentTime &gt; 0.5) btMute();  // don't mute seeks to the start
+    }, 0);  // defer to let browser update currentTime first
+});
+
+const btUnmuteOnPlaying = () =&gt; {
+    if (!btMuted) return;
+    setTimeout(() =&gt; {
+        btMuted = false;
+        window._activeMedia.muted = false;
+    }, 1000);  // wait for codec re-negotiation
+};</code></pre>
+
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── playlist.js ───────────────────────────────────── -->
+<section id="playlist">
+  <div class="file-block">
+    <div class="file-header">
+      <span class="file-name">playlist.js</span>
+      <span class="file-lang">javascript</span>
+    </div>
+    <p class="file-summary">PlaylistManager handles loading, rendering, filtering, drag-and-drop reordering, search, and downloads. it maintains two parallel arrays — the user's custom order and the server's original order — and translates between them for broadcasting.</p>
+
+    <div class="deep-dive">
+      <button class="deep-dive-toggle" data-target="dd-playlist">
+        ↓ deep dive — dual arrays, filter system, touch drag, folder zip download
+        <span class="dd-icon">+</span>
+      </button>
+      <div class="deep-dive-body" id="dd-playlist">
+        <div class="deep-dive-inner">
+
+          <h4>originalMedias vs medias — why two arrays?</h4>
+<pre><code class="language-javascript">this.originalMedias = serverMedias;  // server order, never changes
+this.medias         = [...serverMedias];  // user's display order, can be reordered</code></pre>
+
+          <p>the server's <code>/stream/{index}</code> endpoint is index-based. when broadcasting, the app must report the <em>server's</em> index for the currently playing file. if the user reorders their playlist, <code>this.medias[3]</code> might be a different file than <code>this.originalMedias[3]</code>. <code>getServerIndexById()</code> translates from media ID to server index by searching <code>originalMedias</code>:</p>
+
+<pre><code class="language-javascript">getServerIndexById(mediaId) {
+    return this.originalMedias.findIndex((s) =&gt; s.id === mediaId);
+}</code></pre>
+
+          <h4>custom order persistence</h4>
+<pre><code class="language-javascript">saveCustomOrder() {
+    const orderIds = this.medias.map((s) =&gt; s.id);
+    localStorage.setItem(this.storageKey, JSON.stringify(orderIds));
+}
+
+loadCustomOrder() {
+    const savedOrder = localStorage.getItem(this.storageKey);
+    const orderIds = JSON.parse(savedOrder);
+    // filter out IDs that no longer exist on the server (deleted files)
+    const validIds = orderIds.filter((id) =&gt; this.medias.some((s) =&gt; s.id === id));
+    // build ordered array, append any new server files at the end
+    const ordered = validIds.map((id) =&gt; this.medias.find((s) =&gt; s.id === id));
+    this.medias.forEach((m) =&gt; { if (!validIds.includes(m.id)) ordered.push(m); });
+    this.medias = ordered;
+}</code></pre>
+
+          <p>the storage key includes the session ID (<code>playlist_order_${sessionId}</code>), so each browser tab gets its own independent ordering. the validation step against the current server list means deleted files disappear cleanly and newly uploaded files appear at the end.</p>
+
+          <h4>the filter system</h4>
+          <p>the filter (All / Audio / Video / Other) gates <em>only</em> next/prev navigation. direct play clicks always work regardless of the active filter:</p>
+
+<pre><code class="language-javascript">_filteredMedias() {
+    if (this.mediaFilter === "all") return this.medias;
+    return this.medias.filter((m) =&gt;
+        this.mediaFilter === "video" ? this.isVideo(m) : !this.isVideo(m)
+    );
+}
+
+getNextMedia() {
+    const pool = this._filteredMedias();
+    const currentInPool = pool.findIndex((m) =&gt; m.id === this.currentMediaId);
+    return pool[(currentInPool + 1) % pool.length];
+}</code></pre>
+
+          <h4>touch drag-and-drop on mobile</h4>
+          <p>mobile browsers fire <code>touchmove</code> on the viewport, not on DOM elements. the handler must listen globally and use <code>document.elementFromPoint(x, y)</code> to find what is under the finger. the event is attached to the drag handle only (not the whole row) to preserve normal scrolling.</p>
+
+<pre><code class="language-javascript">handleTouchMove(e) {
+    e.preventDefault();  // prevents scroll while dragging
+    const touch = e.touches[0];
+
+    // move the clone to follow the finger
+    this.touchClone.style.top = `${touch.clientY - this.touchGrabOffsetY}px`;
+
+    // auto-scroll the list when clone reaches the edge
+    const container = document.getElementById("playlist-display");
+    if (cloneRect.bottom &gt; cRect.bottom + 30) container.scrollTop += 8;
+
+    // find what the finger is over
+    this.touchClone.style.display = "none";  // hide clone so it doesn't block elementFromPoint
+    const target = document.elementFromPoint(touch.clientX, touch.clientY);
+    this.touchClone.style.display = "";
+
+    const targetItem = target?.closest(".playlist-item");
+    const targetIndex = parseInt(targetItem?.dataset.index);
+
+    // only reorder once the clone's edge crosses the target's midpoint
+    const targetMid = targetRect.top + targetRect.height / 2;
+    const movingDown = targetIndex &gt; this.touchDragCurrentIndex;
+    if (movingDown &amp;&amp; touch.clientY &lt; targetMid) return;
+    if (!movingDown &amp;&amp; touch.clientY &gt; targetMid) return;
+
+    // do the swap
+    const media = this.medias[this.touchDragCurrentIndex];
+    this.medias.splice(this.touchDragCurrentIndex, 1);
+    this.medias.splice(targetIndex, 0, media);
+    navigator.vibrate(15);  // haptic feedback
+    this.renderForDrag(targetIndex);
+}</code></pre>
+
+          <h4>folder download flow</h4>
+          <p>clicking a folder download fires a hidden <code>&lt;a&gt;</code> navigation. the server zips the folder on a blocking thread (to avoid stalling the async executor) then streams the temp file. the front end shows "Zipping…" for 4 seconds then "Done" for 2 seconds, then clears. the actual download progress runs in the browser's own download manager — the JavaScript has no visibility into it after the navigation fires.</p>
+
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── main.js ───────────────────────────────────────── -->
+<section id="main">
+  <div class="file-block">
+    <div class="file-header">
+      <span class="file-name">main.js</span>
+      <span class="file-lang">javascript</span>
+    </div>
+    <p class="file-summary">bootstrap file. sets up the dual audio/video element system, patches play() on both elements to handle seek races, wires all button listeners, registers the OS media session, and kicks off the WebSocket connection and playlist load.</p>
+
+    <div class="deep-dive">
+      <button class="deep-dive-toggle" data-target="dd-main">
+        ↓ deep dive — switchMediaElement, seek-aware play() patch, Media Session API
+        <span class="dd-icon">+</span>
+      </button>
+      <div class="deep-dive-body" id="dd-main">
+        <div class="deep-dive-inner">
+
+          <h4>the dual media element system</h4>
+          <p>the page always has both <code>&lt;audio&gt;</code> and <code>&lt;video&gt;</code> elements in the DOM. only one is visible at a time. <code>window._activeMedia</code> always points to whichever is active. <code>switchMediaElement(toVideo)</code> swaps them:</p>
+
+<pre><code class="language-javascript">window.switchMediaElement = function(toVideo) {
+    const incoming = toVideo ? videoEl : audioEl;
+    const outgoing = toVideo ? audioEl : videoEl;
+
+    if (incoming === window._activeMedia) return;
+
+    outgoing.pause();
+    outgoing.src = "";
+    outgoing.classList.add("hidden");
+
+    seekPending = false;  // reset to prevent deferred play on wrong element
+
+    incoming.classList.remove("hidden");
+    window._activeMedia = incoming;
+
+    if (window.player) window.player.audio = incoming;  // update RadioPlayer's reference
+};</code></pre>
+
+          <p>the initial active element is set server-side: if the current track is a video, the server renders the audio element with <code>class="hidden"</code> and omits its <code>&lt;source&gt;</code> tag. this prevents the browser from ever trying to decode a video file through the audio element before JavaScript runs.</p>
+
+          <h4>the seek-aware play() patch</h4>
+          <p>there is a race condition in the HTML5 media API: if you set <code>src</code>, call <code>load()</code>, set <code>currentTime</code>, and immediately call <code>play()</code>, the play often fails with an <code>AbortError</code> because the seek is still pending. the fix is to defer <code>play()</code> until the <code>seeked</code> event fires:</p>
+
+<pre><code class="language-javascript">function patchPlay(el, originalPlay) {
+    el.play = () =&gt; {
+        if (!seekPending) return originalPlay();  // normal path
+        return new Promise((resolve, reject) =&gt; {
+            el.addEventListener(
+                "seeked",
+                () =&gt; originalPlay().then(resolve).catch(reject),
+                { once: true }
+            );
+        });
+    };
+}
+patchPlay(audioEl, originalPlayAudio);
+patchPlay(videoEl, originalPlayVideo);</code></pre>
+
+          <p>both elements are patched because switching media types calls <code>play()</code> on whichever element just became active, and it might still be seeking.</p>
+
+          <h4>Media Session API — OS-level controls</h4>
+<pre><code class="language-javascript">if ("mediaSession" in navigator) {
+    navigator.mediaSession.setActionHandler("play",         () =&gt; window._activeMedia?.play());
+    navigator.mediaSession.setActionHandler("pause",        () =&gt; window._activeMedia?.pause());
+    navigator.mediaSession.setActionHandler("nexttrack",    () =&gt; {
+        if (window.player?.isInRadioMode()) return;  // can't skip broadcaster's track
+        window.playlistManager?.playNext();
+    });
+    navigator.mediaSession.setActionHandler("previoustrack", () =&gt; { ... });
+}
+
+window.updateMediaSession = function(filename) {
+    navigator.mediaSession.metadata = new MediaMetadata({ title: filename, artist: "stargzr" });
+    navigator.mediaSession.playbackState = "playing";  // keeps lock screen visible during load gaps
+};</code></pre>
+
+          <p>action handlers are registered once at startup so the OS never loses them between track changes. <code>playbackState = "playing"</code> is set during <code>load()</code> to keep the notification shade visible in the gap before <code>canplay</code> fires.</p>
+
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── analytics.js ──────────────────────────────────── -->
+<section id="analytics-js">
+  <div class="file-block">
+    <div class="file-header">
+      <span class="file-name">analytics.js</span>
+      <span class="file-lang">javascript</span>
+    </div>
+    <p class="file-summary">receives Analytics messages from the server and updates the live broadcast list and connection counters in real time. the server throttles these to at most one every 500ms.</p>
+
+    <div class="deep-dive">
+      <button class="deep-dive-toggle" data-target="dd-analytics">
+        ↓ deep dive — broadcaster card rendering, tuneInToBroadcaster
+        <span class="dd-icon">+</span>
+      </button>
+      <div class="deep-dive-body" id="dd-analytics">
+        <div class="deep-dive-inner">
+
+          <h4>broadcaster cards</h4>
+          <p>each broadcaster in the <code>Analytics.broadcasters</code> array is rendered as a card showing their session ID, current track, play/pause state, elapsed time, and listener count. the card has three visual states:</p>
+          <ul>
+            <li><strong>self-broadcasting</strong> — a "You" badge, the Tune In button is disabled</li>
+            <li><strong>currently-tuned</strong> — the card is highlighted, the button shows "Tuned In ✓" and is disabled</li>
+            <li><strong>available</strong> — normal card with a "Tune In 📻" button</li>
+          </ul>
+
+<pre><code class="language-javascript">const isSelf    = b.broadcaster_id === window.player?.sessionId;
+const isTunedIn = window.player?.tunedBroadcaster === b.broadcaster_id;
+
+let buttonHTML;
+if (isSelf)         buttonHTML = '&lt;button disabled&gt;You&lt;/button&gt;';
+else if (isTunedIn) buttonHTML = '&lt;button disabled&gt;Tuned In ✓&lt;/button&gt;';
+else                buttonHTML = `&lt;button onclick="tuneInToBroadcaster('${b.broadcaster_id}')"&gt;Tune In&lt;/button&gt;`;</code></pre>
+
+          <h4>tuneInToBroadcaster</h4>
+          <p>clicking a card calls <code>tuneInToBroadcaster(id)</code> which sets the text input value and calls <code>window.player.tuneIn()</code>. there is no special code path for clicking a card — it goes through the same <code>tuneIn</code> function as pasting an ID manually. this is the single-responsibility principle in action: TuneIn logic lives in one place.</p>
+
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── upload.js ─────────────────────────────────────── -->
+<section id="upload-js">
+  <div class="file-block">
+    <div class="file-header">
+      <span class="file-name">upload.js</span>
+      <span class="file-lang">javascript</span>
+    </div>
+    <p class="file-summary">handles file uploads via XHR with a real-time progress bar. batch uploads report per-file successes and failures without reloading the page.</p>
+
+    <div class="deep-dive">
+      <button class="deep-dive-toggle" data-target="dd-upload">
+        ↓ deep dive — XHR vs fetch, per-file error reporting
+        <span class="dd-icon">+</span>
+      </button>
+      <div class="deep-dive-body" id="dd-upload">
+        <div class="deep-dive-inner">
+
+          <h4>why XHR instead of fetch?</h4>
+          <p>the Fetch API does not expose upload progress events in a straightforward way. <code>XMLHttpRequest</code> has <code>xhr.upload.addEventListener("progress", ...)</code> which fires repeatedly during the upload with <code>event.loaded</code> and <code>event.total</code>. this drives the progress bar.</p>
+
+<pre><code class="language-javascript">xhr.upload.addEventListener("progress", (e) =&gt; {
+    if (e.lengthComputable)
+        bar.style.width = (e.loaded / e.total) * 100 + "%";
+});</code></pre>
+
+          <h4>per-file error reporting</h4>
+          <p>the server processes each file in a batch independently and collects errors. on full success it returns an empty body with HTTP 200. when some files fail it returns 200 with newline-separated error messages. the frontend distinguishes the two cases by checking whether the response body is non-empty:</p>
+
+<pre><code class="language-javascript">xhr.addEventListener("load", async () =&gt; {
+    if (xhr.status === 200) {
+        await window.playlistManager.loadPlaylist();  // refresh without page reload
+
+        const warnings = xhr.responseText.trim();
+        if (warnings) {
+            status.textContent = "Some files failed:\n" + warnings;
+            status.style.color = "#ffc107";  // amber — partial success
+        } else {
+            status.textContent = "Upload complete.";
+            status.style.color = "#28a745";  // green — full success
+        }
+    }
+});</code></pre>
+
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── search.js ─────────────────────────────────────── -->
+<section id="search-js">
+  <div class="file-block">
+    <div class="file-header">
+      <span class="file-name">search.js</span>
+      <span class="file-lang">javascript</span>
+    </div>
+    <p class="file-summary">entirely client-side search. filters the already-loaded playlist on every keystroke, shows a dropdown of matches, and scrolls + highlights the selected item. no server requests.</p>
+
+    <div class="deep-dive">
+      <button class="deep-dive-toggle" data-target="dd-search">
+        ↓ deep dive — scroll + highlight, outside-click dismiss
+        <span class="dd-icon">+</span>
+      </button>
+      <div class="deep-dive-body" id="dd-search">
+        <div class="deep-dive-inner">
+
+<pre><code class="language-javascript">searchInput.addEventListener("input", () =&gt; {
+    const query = searchInput.value.trim().toLowerCase();
+    if (!query) { searchResultsEl.classList.add("hidden"); return; }
+
+    const matches = window.playlistManager.medias
+        .filter((s) =&gt; s.filename.toLowerCase().includes(query));
+
+    searchResultsEl.innerHTML = matches
+        .map((s) =&gt; `&lt;div class="search-result-item" data-media-id="${s.id}"&gt;${s.filename}&lt;/div&gt;`)
+        .join("");
+    searchResultsEl.classList.remove("hidden");
+});</code></pre>
+
+          <p>clicking a result scrolls the playlist list container (not the whole page — the list is a scrollable div) to the matching item:</p>
+
+<pre><code class="language-javascript">const targetScrollTop = container.scrollTop + (iRect.top - cRect.top) - 16;
+container.scrollTo({ top: Math.max(0, targetScrollTop), behavior: "smooth" });
+
+el.classList.add("search-highlight");
+setTimeout(() =&gt; el.classList.remove("search-highlight"), 1500);</code></pre>
+
+          <p>the dropdown is dismissed by a document-level click listener that checks whether the click target is inside the <code>.search-row</code> wrapper. this is the standard "outside click closes dropdown" pattern.</p>
+
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr>
+
+<!-- ══════════════════════════════════════════════════════════
+     PROTOCOL
+═════════════════════════════════════════════════════════════ -->
+<section>
+  <div class="section-label">03 — protocol</div>
+  <h2>The Radio Protocol</h2>
+</section>
+
+<section id="messages">
+  <h3>Message types</h3>
+  <table>
+    <tr><th>message</th><th>direction</th><th>purpose</th></tr>
+    <tr><td><code>TuneIn</code></td><td>client→server</td><td>subscribe to a broadcaster's channel; server replies with initial <code>Sync</code></td></tr>
+    <tr><td><code>TuneOut</code></td><td>client→server</td><td>unsubscribe; server removes from listener set</td></tr>
+    <tr><td><code>StartBroadcasting</code></td><td>client→server</td><td>register as broadcaster; server sends <code>BroadcasterOnline</code> globally</td></tr>
+    <tr><td><code>BroadcastUpdate</code></td><td>client→server</td><td>play/pause/seek event; server adjusts for latency and fans out <code>Sync</code></td></tr>
+    <tr><td><code>Heartbeat</code></td><td>client→server</td><td>every 2s; keeps broadcast state fresh; updates latency estimate</td></tr>
+    <tr><td><code>StopBroadcasting</code></td><td>client→server</td><td>clean broadcast stop; server sends <code>BroadcasterOffline</code> globally</td></tr>
+    <tr><td><code>AutoNext</code></td><td>client↔server↔clients</td><td>track ended naturally; listeners finish current track then switch</td></tr>
+    <tr><td><code>QueryBroadcastState</code></td><td>client→server</td><td>mobile page-visibility recovery: "am I still broadcasting?"</td></tr>
+    <tr><td><code>Sync</code></td><td>server→client</td><td>position update fanned out to all listeners</td></tr>
+    <tr><td><code>BroadcasterOnline/Offline</code></td><td>server→all</td><td>analytics and listener cleanup notifications</td></tr>
+    <tr><td><code>Analytics</code></td><td>server→all</td><td>connection/broadcaster/listener counts + broadcaster list; throttled to 500ms</td></tr>
+    <tr><td><code>ServerShutdown</code></td><td>server→all</td><td>graceful restart warning; client keeps reconnecting</td></tr>
+    <tr><td><code>Error</code></td><td>server→client</td><td>validation failures, rate limit hits, BroadcasterNotFound</td></tr>
+  </table>
+</section>
+
+<section id="lifecycle">
+  <h3>Broadcast lifecycle — step by step</h3>
+
+  <div class="flow">
+<span class="flow-gold">BROADCASTER</span>                                    <span class="flow-blue">SERVER</span>                        <span class="flow-green">LISTENER(S)</span>
+
+<span class="flow-dim">1. click "Start Broadcasting"</span>
+   StartBroadcasting ───────────────────────────▶
+                                                  insert BroadcastState
+                                                  create broadcast channel
+                                                  BroadcasterOnline ─────────────────▶ all clients
+                                                                                         analytics update
+
+<span class="flow-dim">2. play / pause / seek</span>
+   BroadcastUpdate ─────────────────────────────▶
+   (client_timestamp_ms = Date.now())             estimate latency
+                                                  adjust playback_time += latency
+                                                  update BroadcastState (raw time)
+                                                  Sync (adjusted time) ──────────────▶ all listeners
+                                                                                         seek to position
+
+<span class="flow-dim">3. heartbeat (every 2s)</span>
+   Heartbeat ───────────────────────────────────▶
+                                                  refresh playback_time
+                                                  update latency estimate
+
+<span class="flow-dim">4. listener tunes in</span>
+                                                                        TuneIn ◀────────
+                                                  add to listener set
+                                                  compute adjusted position:
+                                                    stored_time
+                                                    + time_since_last_update (if playing)
+                                                    + transmission_latency_ms
+                                                  Sync (adjusted) ─────────────────────▶ new listener
+                                                  subscribe to broadcast channel  ──────▶ (future Syncs)
+
+<span class="flow-dim">5. track ends naturally</span>
+   ended event fires                              AutoNext ──────────────────────────────▶ set pendingAutoNextIndex
+   sendAutoNext(nextIndex) ──────────────────────▶
+                                                  advance BroadcastState.media_index
+                                                                                           local "ended" fires
+                                                                                           load next track
+                                                                                           seek to pendingAutoNextTime
+                                                                                           play
+
+<span class="flow-dim">6. broadcaster disconnects (tab close, no TuneOut)</span>
+   WebSocket close ─────────────────────────────▶
+                                                  detect disconnect
+                                                  remove BroadcastState
+                                                  BroadcasterOffline ────────────────────▶ all clients
+                                                                                           tuneOut("broadcaster_offline")</div>
+</section>
+
+<section id="latency">
+  <h3>Latency compensation in detail</h3>
+  <p>keeping listeners in sync with the broadcaster requires compensating for two distinct network legs.</p>
+
+  <div class="callout callout-why">
+    <div class="callout-label">the two latency legs</div>
+    <strong>leg 1 — broadcaster to server:</strong> the broadcaster stamps <code>Date.now()</code> on every outgoing message. the server subtracts it from its own wall clock on receipt. this is an approximation — it includes both direction latencies — but since the jitter is symmetrical it works well as a rough estimate.<br><br>
+    <strong>leg 2 — server to listener:</strong> the browser records <code>Date.now()</code> as <code>_tuneInSentAt</code> when sending TuneIn. when the first Sync arrives, the elapsed time since <code>_tuneInSentAt</code> is added to the received <code>playback_time</code>. this covers how long the Sync spent travelling from server to listener.
+  </div>
+
+  <p>on ongoing <code>BroadcastUpdate</code>s, leg 1 is applied server-side before the <code>Sync</code> is sent. leg 2 was already applied during <code>TuneIn</code> and the listener's audio element has been playing since, so no additional adjustment is needed — drift is small over short periods and the heartbeat keeps positions fresh.</p>
+
+  <p>on <code>TuneIn</code>, leg 1 is baked into the adjusted position the server sends. leg 2 is applied by the browser on the first <code>Sync</code>. together they aim the listener at approximately where the broadcaster <em>is right now</em>, not where they were when the server last received an update.</p>
+</section>
+
+<hr>
+
+<!-- ══════════════════════════════════════════════════════════
+     DESIGN DECISIONS
+═════════════════════════════════════════════════════════════ -->
+<section id="decisions">
+  <div class="section-label">04 — retrospective</div>
+  <h2>Design Decisions</h2>
+
+  <table>
+    <tr><th>decision</th><th>rationale</th></tr>
+    <tr>
+      <td>no database</td>
+      <td>sessions and broadcast state are ephemeral. the only persistent state is the playlist (a folder of files) and user preferences (localStorage). adding SQLite would introduce migrations, a dependency, and write-ahead-log maintenance for no gain.</td>
+    </tr>
+    <tr>
+      <td>no frontend framework</td>
+      <td>the UI has two interactive classes and six auxiliary files. a framework's abstraction overhead would exceed the complexity it manages. vanilla JS with clear ownership is easier to reason about and debug.</td>
+    </tr>
+    <tr>
+      <td>DashMap everywhere</td>
+      <td>all high-frequency paths (heartbeat, TuneIn, BroadcastUpdate) hit different session keys. sharded concurrency eliminates the global write bottleneck of a single <code>RwLock&lt;HashMap&gt;</code>.</td>
+    </tr>
+    <tr>
+      <td>PreparedMessage + Arc</td>
+      <td>serialising once and cloning a pointer is O(1) per additional listener. serialising per-listener would be O(n). at scale the difference is significant.</td>
+    </tr>
+    <tr>
+      <td>always 206, never 200</td>
+      <td>browsers treat a 200 response as a non-seekable stream on some codecs and delay playback by downloading the moov atom first. 206 signals "range-aware" universally.</td>
+    </tr>
+    <tr>
+      <td>video conversion at upload time</td>
+      <td>converting on every stream request would block CPUs and add first-byte latency. converting once at upload gives instant subsequent streaming. ffmpeg's faststart flag ensures the moov atom is at the front for fast playback start.</td>
+    </tr>
+    <tr>
+      <td>DeleteOnDrop for temp files</td>
+      <td>error handling in async code is subtle — a return early from a handler due to a client disconnect would skip any cleanup at the end of the function. RAII binds cleanup to object lifetime, which Rust guarantees regardless of how the function exits.</td>
+    </tr>
+    <tr>
+      <td>biased select! in the send task</td>
+      <td>Tokio's default random branch selection prevents starvation but adds unnecessary indirection on the hottest path. the broadcaster's sync channel is always the highest-priority source; checking it first reduces end-to-end latency on the critical seek path.</td>
+    </tr>
+    <tr>
+      <td>admin panel is public</td>
+      <td>designed for a trusted home network. session IDs are non-guessable UUIDs. for a multi-tenant deployment this would need authentication.</td>
+    </tr>
+    <tr>
+      <td>TCP_NODELAY on every socket</td>
+      <td>Nagle's algorithm batches small writes for bulk efficiency. WebSocket sync frames are tiny and latency-sensitive. disabling batching costs negligible bandwidth and noticeably reduces seek-to-sync delay.</td>
+    </tr>
+  </table>
+
+</section>
+
+</main>
+</div><!-- end page-wrap -->
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-rust.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-javascript.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-markup.min.js"></script>
+
+<script>
+/* ── reading progress ──────────────────────────────── */
+const bar = document.getElementById("progress-bar");
+document.addEventListener("scroll", () => {
+  const h = document.documentElement;
+  const pct = h.scrollTop / (h.scrollHeight - h.clientHeight) * 100;
+  bar.style.width = pct + "%";
+});
+
+/* ── toc group collapse ────────────────────────────── */
+document.querySelectorAll(".toc-group-label").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const target = document.getElementById(btn.dataset.target);
+    const isOpen = !target.classList.contains("collapsed");
+    target.classList.toggle("collapsed", isOpen);
+    btn.classList.toggle("open", !isOpen);
+  });
+});
+
+/* ── toc active link ───────────────────────────────── */
+const tocLinks = document.querySelectorAll(".toc-link[href^='#']");
+const sections = [...document.querySelectorAll("section[id], div.hero[id]")];
+
+const obs = new IntersectionObserver((entries) => {
+  entries.forEach((e) => {
+    if (e.isIntersecting) {
+      tocLinks.forEach((l) => l.classList.remove("active"));
+      const link = document.querySelector(`.toc-link[href="#${e.target.id}"]`);
+      if (link) link.classList.add("active");
+    }
+  });
+}, { rootMargin: "-30% 0px -60% 0px" });
+
+sections.forEach((s) => obs.observe(s));
+
+/* ── deep dive toggles ─────────────────────────────── */
+document.querySelectorAll(".deep-dive-toggle").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const body = document.getElementById(btn.dataset.target);
+    const open = body.classList.toggle("open");
+    btn.classList.toggle("open", open);
+    if (open) {
+      // set max-height to scrollHeight for smooth animation
+      body.style.maxHeight = body.scrollHeight + "px";
+      // after transition, allow free growth (content might lazy-render)
+      body.addEventListener("transitionend", () => {
+        if (body.classList.contains("open")) body.style.maxHeight = "none";
+      }, { once: true });
+    } else {
+      body.style.maxHeight = body.scrollHeight + "px";
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => { body.style.maxHeight = "0"; });
+      });
+    }
+    Prism.highlightAllUnder(body);
+  });
+});
+</script>
+</body>
+</html>
