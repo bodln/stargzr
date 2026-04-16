@@ -4,6 +4,8 @@ A self-hosted music and video streaming server with live radio broadcasting buil
 
 Stream your local media library from any device on your network, or broadcast what you're listening to so others can tune in and sync in real time.
 
+Here is the GitHub Pages documentation: [https://bodln.github.io/stargzr/]
+
 ---
 
 ## Features
