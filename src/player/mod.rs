@@ -59,7 +59,9 @@ async fn init_player_state(media_folder: PathBuf) -> SharedState {
                 }
             }
         }
-    }
+    }else {
+        tracing::error!("Failed to read media folder: {}", media_folder.display());
+    }       
 
     // Sort the playlist alphabetically by filename for consistent ordering
     playlist.sort_by(|a, b| a.filename.cmp(&b.filename));
