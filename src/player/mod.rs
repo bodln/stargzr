@@ -180,6 +180,11 @@ impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, NoDe
         // IncomingStream wraps the (TcpStream, SocketAddr) pair that NoDelayListener::accept returns.
         // remote_addr() gives us the peer's address which is then stored in ConnectInfo<PeerAddr>
         // and made available to handlers via the ConnectInfo extractor - used by the WS rate limiter.
+        //
+        // Axum is designed to take the connection info, package it up, and hand it off to your route handlers as an independent, standalone piece of data. 
+        // It cannot do that if the data is tethered to a temporary reference from the initial TCP handshake, which would cause a lifetime issue and possible weird threading issues.
+        // That is why we dereference the remote_addr() here and store it directly in the PeerAddr struct, ensuring it lives independently of the IncomingStream's lifetime.
+        // And that is why SocketAddr implments Copy. (cause it is cheap to copy, only 16 bytes)
         PeerAddr(*target.remote_addr())
     }
 }
