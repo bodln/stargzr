@@ -10,6 +10,48 @@
   <body>
     <h1>stargzr</h1>
 
+    <!-- Accounts
+         Register or log in and the server ties your username to this browser
+         session. From then on the chat shows your name instead of a session id,
+         and so does the live broadcasts list. The login token rides in an
+         HttpOnly cookie the server sets, so a reload stays signed in on its own
+         and the page below is rendered already knowing who you are. -->
+    <div class="auth-container" data-username="{{ current_username }}">
+      <div
+        id="auth-logged-out"
+        class="auth-row{% if !current_username.is_empty() %} hidden{% endif %}"
+      >
+        <form id="auth-form" autocomplete="on">
+          <input
+            type="text"
+            id="auth-username"
+            name="username"
+            placeholder="username"
+            autocomplete="username"
+            maxlength="20"
+          />
+          <input
+            type="password"
+            id="auth-password"
+            name="password"
+            placeholder="password"
+            autocomplete="current-password"
+            maxlength="128"
+          />
+          <button type="submit" id="auth-login-btn">Log in</button>
+          <button type="button" id="auth-register-btn">Register</button>
+        </form>
+      </div>
+      <div
+        id="auth-logged-in"
+        class="auth-row{% if current_username.is_empty() %} hidden{% endif %}"
+      >
+        <span>Signed in as <strong id="auth-current-user">{{ current_username }}</strong></span>
+        <button id="auth-logout-btn">Log out</button>
+      </div>
+      <div id="auth-error" class="auth-error"></div>
+    </div>
+
     <div
       class="analytics-stats"
       style="
@@ -336,6 +378,11 @@
       utils.js        — debugLog() is called at parse time inside other scripts,
                         so this must be unconditionally first.
 
+      auth.js         — wires the login form and reads the server rendered auth
+                        state into window.auth before analytics.js and chat.js
+                        look at it. No token handling here, that's an HttpOnly
+                        cookie the server manages.
+
       playlist.js     — defines PlaylistManager before main.js instantiates it.
       radio-player.js — defines RadioPlayer before main.js instantiates it.
       analytics.js    — updateAnalyticsDisplay() must exist before the WebSocket
@@ -355,6 +402,7 @@
                         must be defined before any of that runs.
     -->
     <script src="/stargzr/static/js/utils.js?v={{ asset_version }}" defer></script>
+    <script src="/stargzr/static/js/auth.js?v={{ asset_version }}" defer></script>
     <script src="/stargzr/static/js/playlist.js?v={{ asset_version }}" defer></script>
     <script src="/stargzr/static/js/radio-player.js?v={{ asset_version }}" defer></script>
     <script src="/stargzr/static/js/analytics.js?v={{ asset_version }}" defer></script>

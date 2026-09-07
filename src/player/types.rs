@@ -68,6 +68,10 @@ pub struct BroadcastState {
     // Added to playback_time in outgoing Sync messages so late joiners land near the live position.
     // Zero until the first Pong arrives.
     pub transmission_latency_ms: u64,
+    // Account name of whoever is broadcasting, filled in fresh on every analytics
+    // push from the session to username map. None when they are not logged in.
+    #[serde(default)]
+    pub username: Option<String>,
 }
 
 /// A message that has been serialized once at the broadcast site.
@@ -127,12 +131,28 @@ pub struct AppState {
     /// Per-IP rate limiter for WebSocket upgrade requests.
     pub ws_rate_limiter: RateLimiter,
 
+    /// Per-IP rate limiter for login and register, so the endpoints can't be
+    /// used to grind through passwords.
+    pub auth_rate_limiter: RateLimiter,
+
     /// Tracks how many bytes each IP has uploaded this server session.
     /// Resets on server restart. No persistence needed, acts as a soft abuse limit.
     pub upload_quotas: DashMap<String, u64>,
 
     /// Makes sure only one video file can be converted with ffmpeg to prevent clogging the CPU
     pub conversion_semaphore: Arc<Semaphore>,
+
+    /// The accounts database (SQLite). Holds usernames and password hashes.
+    pub db: super::auth::Db,
+
+    /// Key the HS256 JWTs are signed with. From the JWT_SECRET env var, or a
+    /// built in default with a warning.
+    pub jwt_secret: Vec<u8>,
+
+    /// Maps a browser session id to the account name logged in on it. Written on
+    /// login and register, read when stamping chat lines and the broadcaster
+    /// list. A session with no entry here is just anonymous.
+    pub session_users: DashMap<String, String>,
 
     /// Short token derived from the contents of the static JS and CSS files.
     /// Goes on every asset URL in the page as ?v=... so the moment a file
@@ -268,6 +288,10 @@ pub enum RadioMessage {
         /// Session id of whoever sent it. Set by the server so it can't be faked.
         #[serde(default)]
         from: String,
+        /// Account name of the sender, empty when they are not logged in.
+        /// Set by the server from the session to username map.
+        #[serde(default)]
+        from_name: String,
         /// The message body.
         text: String,
         /// Server clock when the line landed, milliseconds since epoch.

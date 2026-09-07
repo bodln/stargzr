@@ -28,9 +28,15 @@ COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/stargzr /app/s
 COPY --from=builder /app/src/player/static /app/src/player/static
 # Create media directory
 RUN mkdir -p /app/media
+# Data directory for the accounts SQLite file. Mount this as a volume so
+# registrations survive a container restart.
+RUN mkdir -p /app/data
 # Expose the port
 EXPOSE 8083
-# Set environment variable
+# Set environment variables
 ENV MEDIA_PATH=/app/media
+ENV DB_PATH=/app/data/stargzr.db
+# JWT_SECRET is intentionally not baked in. Pass it at run time
+# (docker run -e JWT_SECRET=... or compose) so tokens can't be forged.
 # Run the binary
 CMD ["/app/stargzr"]

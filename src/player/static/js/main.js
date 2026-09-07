@@ -260,7 +260,10 @@ document.getElementById("tune-in-btn").addEventListener("click", () => {
 
   document.getElementById("mode-display").textContent = "Radio Mode";
   document.getElementById("mode-display").className = "mode-badge radio";
-  document.getElementById("broadcaster-name").textContent = broadcasterId;
+  // Show the account name if the broadcasts list already knows it, the raw id
+  // otherwise. Analytics keeps this line in step once frames start arriving.
+  document.getElementById("broadcaster-name").textContent =
+    window._broadcasterNames?.[broadcasterId] || broadcasterId;
   document.getElementById("broadcaster-info").classList.remove("hidden");
   document.getElementById("tune-in-btn").classList.add("hidden");
   document.getElementById("tune-out-btn").classList.remove("hidden");

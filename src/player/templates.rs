@@ -11,6 +11,9 @@ pub struct PlayerTemplate {
     pub total_medias: usize,
     pub session_id: String,
     pub is_video: bool,
+    /// Account name for whoever is signed in on this browser, empty if nobody is.
+    /// Lets the page render the right auth state with no flash of the login form.
+    pub current_username: String,
     /// Content hash of the JS and CSS, appended to every asset URL as ?v=...
     pub asset_version: String,
 }
@@ -36,10 +39,19 @@ impl IntoResponse for PlayerTemplate {
                 .header(
                     header::SET_COOKIE,
                     format!(
-                        "player_session={}; Path=/stargzr/player; HttpOnly; SameSite=Strict; Max-Age={}",
+                        // Path is /stargzr, not /stargzr/player, so the browser
+                        // also sends it to /stargzr/auth/* . That is what lets
+                        // register and login tie this session to an account.
+                        "player_session={}; Path=/stargzr; HttpOnly; SameSite=Strict; Max-Age={}",
                         self.session_id,
                         1 * 24 * 3600
                     )
+                )
+                // Clear the old narrower cookie some browsers still hold from
+                // before the path widened, so it isn't sent alongside the new one.
+                .header(
+                    header::SET_COOKIE,
+                    "player_session=; Path=/stargzr/player; HttpOnly; SameSite=Strict; Max-Age=0",
                 )
                 .body(axum::body::Body::from(html))
                 .unwrap(),

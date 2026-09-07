@@ -23,3 +23,12 @@ metrics = "0.24.3"
 metrics-exporter-prometheus = "0.18.1"
 tower-http = { version = "0.6.8", features = ["fs", "set-header"] }
 zip = "8.2.0"
+
+# Accounts: a small local SQLite file, PBKDF2 password hashing, hand-rolled
+# HS256 JWTs. hmac/sha2/base64/pbkdf2 are already in the tree as transitive
+# deps, pulling them up here just makes them ours to call directly.
+rusqlite = { version = "0.32", features = ["bundled"] }
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+pbkdf2 = { version = "0.12", default-features = false }

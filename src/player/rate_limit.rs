@@ -45,6 +45,13 @@ impl RateLimiter {
         Self::new(5.0, 1.0)
     }
 
+    // For login and register attempts, keyed by IP. A burst of 8 for a human
+    // fumbling their password, then one roughly every 6 seconds, which is a wall
+    // for anything trying to guess.
+    pub fn for_auth() -> Self {
+        Self::new(8.0, 1.0 / 6.0)
+    }
+
     pub fn check_and_consume(&self, session_id: &str) -> PlayerResult<()> {
         let mut bucket = self.buckets.entry(session_id.to_string())
             .or_insert_with(|| TokenBucket {

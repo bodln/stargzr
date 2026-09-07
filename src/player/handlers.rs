@@ -71,6 +71,10 @@ pub async fn player_page(State(state): State<SharedState>, headers: HeaderMap) -
 
         (media, playlist.len(), is_video)
     };
+    // If a valid token cookie came along, this also re links the session to the
+    // account so a signed in user stays signed in with nothing for the page to do.
+    let current_username = crate::player::auth::session_username(&state, &headers).unwrap_or_default();
+
     // Render the full player page
     PlayerTemplate {
         current_media,
@@ -78,6 +82,7 @@ pub async fn player_page(State(state): State<SharedState>, headers: HeaderMap) -
         total_medias,
         session_id,
         is_video,
+        current_username,
         asset_version: state.asset_version.clone(),
     }
 }

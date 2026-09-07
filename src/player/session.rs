@@ -104,6 +104,9 @@ pub async fn cleanup_stale_sessions(state: Arc<AppState>) {
 
                 if !should_keep {
                     removed += 1;
+                    // Drop the account link for this session too, otherwise the
+                    // map slowly fills with dead session ids.
+                    state.session_users.remove(session_id);
                     tracing::info!(
                         "Cleaning up stale player session: {} (age: {}s)",
                         session_id,

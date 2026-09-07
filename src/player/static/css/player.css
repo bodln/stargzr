@@ -341,6 +341,33 @@ video {
   white-space: nowrap;
 }
 
+/* Accounts */
+.auth-container {
+  background: #e9ecef; padding: 12px 15px; border-radius: 8px;
+  margin-bottom: 15px;
+}
+.auth-row, #auth-form {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+}
+.auth-row input {
+  padding: 8px; border: 1px solid #ced4da; border-radius: 4px; font-size: 14px;
+}
+#auth-username { width: 140px; }
+#auth-password { width: 160px; }
+.auth-row button { padding: 8px 14px; font-size: 14px; }
+.auth-row button:disabled { opacity: 0.6; }
+#auth-register-btn { background: #6c757d; }
+#auth-register-btn:hover { background: #5a6268; }
+#auth-logout-btn { background: #6c757d; }
+#auth-logout-btn:hover { background: #5a6268; }
+.auth-error { color: #dc3545; font-size: 13px; margin-top: 6px; min-height: 1em; }
+
+/* Account name under a broadcaster card, the raw session id */
+.broadcaster-uuid {
+  font-family: monospace; font-size: 11px; color: #adb5bd;
+  word-break: break-all; margin-top: 2px;
+}
+
 /* Chat */
 .chat-container {
   background: #f8f9fa; padding: 15px; border-radius: 8px;

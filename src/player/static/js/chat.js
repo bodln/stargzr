@@ -29,6 +29,18 @@
     return id ? id.slice(0, 8) : "someone";
   }
 
+  // What to call the sender of a line. The server fills from_name when they are
+  // logged in, otherwise we fall back to a slice of their session id.
+  function senderName(msg) {
+    return msg.from_name && msg.from_name.length ? msg.from_name : shortId(msg.from);
+  }
+
+  // Name of the broadcaster whose room we are in, preferring their account name
+  // from the last broadcasts list.
+  function broadcasterName(id) {
+    return window._broadcasterNames?.[id] || shortId(id);
+  }
+
   // What room the player is in right now, in the same terms the server uses.
   function currentRoomId() {
     const p = window.player;
@@ -40,7 +52,7 @@
 
   function roomLabel() {
     const p = window.player;
-    if (p?.tunedBroadcaster) return "Room of " + shortId(p.tunedBroadcaster);
+    if (p?.tunedBroadcaster) return "Room of " + broadcasterName(p.tunedBroadcaster);
     if (p?.isBroadcasting) return "Your broadcast room";
     return "Global chat";
   }
@@ -76,7 +88,7 @@
     meta.textContent =
       timeStr(msg.server_timestamp_ms) +
       " " +
-      shortId(msg.from) +
+      senderName(msg) +
       (mine ? " (you)" : "");
 
     // textContent, never innerHTML, so a message body can never inject markup.
@@ -140,6 +152,10 @@
     resetToPlaceholder();
     window.chatUI.refreshRoom();
   });
+
+  // The broadcasts list carries account names, so relabel when it refreshes in
+  // case the broadcaster of the room we are in just logged in.
+  document.addEventListener("broadcastersUpdated", () => window.chatUI.refreshRoom());
 
   window.chatUI.refreshRoom();
 })();

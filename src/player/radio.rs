@@ -517,6 +517,8 @@ async fn handle_client_message(
                 server_timestamp_ms: server_ts,
                 listener_count,
                 transmission_latency_ms: latency_ms,
+                // Filled in fresh on every analytics push, not stored here.
+                username: None,
             };
 
             state
@@ -679,6 +681,8 @@ async fn handle_client_message(
                 server_timestamp_ms: server_ts,
                 listener_count: 0,
                 transmission_latency_ms: 0,
+                // Filled in fresh on every analytics push, not stored here.
+                username: None,
             };
 
             state
@@ -844,10 +848,19 @@ async fn handle_client_message(
                 None => "global".to_string(),
             };
 
+            // Account name for this session, empty if they never logged in. The
+            // client shows this instead of the raw session id when it's set.
+            let from_name = state
+                .session_users
+                .get(validated_session_id)
+                .map(|u| u.clone())
+                .unwrap_or_default();
+
             // Stamp the message once here so every listener shares the same bytes.
             let outgoing = Arc::new(PreparedMessage::new(&RadioMessage::Chat {
                 room: room.clone(),
                 from: validated_session_id.to_string(),
+                from_name,
                 text: body.to_string(),
                 server_timestamp_ms: now_ms(),
             }));
@@ -1001,6 +1014,12 @@ pub fn broadcast_analytics(state: &SharedState) {
                 .get(&b.broadcaster_id)
                 .map(|s| s.len())
                 .unwrap_or(0);
+            // Look the account name up now rather than trusting whatever was
+            // stored, so it turns up as soon as the broadcaster logs in.
+            b.username = state
+                .session_users
+                .get(&b.broadcaster_id)
+                .map(|u| u.clone());
             b
         })
         .collect();

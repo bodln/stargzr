@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod error;
 mod handlers;
 mod logging;
@@ -72,6 +73,26 @@ async fn init_player_state(media_folder: PathBuf) -> SharedState {
     // Capacity 100 means it can buffer up to 100 messages before dropping
     let (global_broadcast_tx, _) = broadcast::channel(100);
 
+    // Open the accounts database. A missing file is fine, it gets created. A
+    // real failure here (bad path, permissions) is worth stopping for since
+    // register and login would be dead anyway.
+    let db_path = std::env::var("DB_PATH").unwrap_or_else(|_| "stargzr.db".to_string());
+    let db = auth::Db::open(&db_path)
+        .unwrap_or_else(|e| panic!("Failed to open accounts database at {db_path}: {e}"));
+    tracing::info!("Accounts database ready at {}", db_path);
+
+    // Secret the login tokens are signed with. Set JWT_SECRET in production so a
+    // restart doesn't change it and tokens can't be forged from the source.
+    let jwt_secret = std::env::var("JWT_SECRET")
+        .map(String::into_bytes)
+        .unwrap_or_else(|_| {
+            tracing::warn!(
+                "JWT_SECRET not set, falling back to a built in default. Logins work, but set \
+                 JWT_SECRET for anything real."
+            );
+            DEFAULT_JWT_SECRET.to_vec()
+        });
+
     // Return the shared application state wrapped in Arc for multi-threaded use
     Arc::new(AppState {
         playlist: Arc::new(RwLock::new(playlist)),
@@ -85,11 +106,19 @@ async fn init_player_state(media_folder: PathBuf) -> SharedState {
         active_connections: AtomicUsize::new(0),
         last_analytics_ms: AtomicU64::new(0),
         ws_rate_limiter: RateLimiter::for_websocket(),
+        auth_rate_limiter: RateLimiter::for_auth(),
         upload_quotas: DashMap::new(),
         conversion_semaphore: Arc::new(Semaphore::new(1)),
+        db,
+        jwt_secret,
+        session_users: DashMap::new(),
         asset_version: compute_asset_version(),
     })
 }
+
+/// Only used when JWT_SECRET is unset. Fine for a local run, not for anything
+/// exposed, since it's right here in the source.
+const DEFAULT_JWT_SECRET: &[u8] = b"stargzr-local-dev-secret-set-JWT_SECRET-in-prod";
 
 /// Hashes the bytes of every static JS and CSS file into a short token.
 ///
@@ -188,6 +217,12 @@ pub fn create_player_router(state: Arc<AppState>) -> impl std::future::Future<Ou
             .route("/player/download-folder/{foldername}", get(download_folder))
             .route("/player/session/check", get(check_session))
             .route("/player/subtitles/{media_id}", get(get_subtitles))
+            // Accounts. Sits under /stargzr so Caddy routes it to this service,
+            // the top level /api goes somewhere else.
+            .route("/auth/register", post(auth::register))
+            .route("/auth/login", post(auth::login))
+            .route("/auth/me", get(auth::me))
+            .route("/auth/logout", post(auth::logout))
             // Override the default 2 MB body limit for the upload route only.
             // The outer DefaultBodyLimit still applies to every other route.
             .route(
@@ -266,6 +301,10 @@ pub async fn initialize(path_buf: PathBuf) {
 
     // Set up Prometheus metrics recorder (global, must be called once before any metrics)
     metrics::init_metrics();
+
+    // Compute the dummy password hash now so the first login for an unknown user
+    // isn't the one that pays for it.
+    auth::warm_up();
 
     tracing::info!("Starting stargzr server");
 

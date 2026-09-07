@@ -10,6 +10,11 @@ services:
     volumes:
       # CHANGE THIS PATH to your media folder location
       - ./media:/app/media:ro
+      # Keeps the accounts database across restarts
+      - ./data:/app/data
     environment:
       - MEDIA_PATH=/app/media
+      - DB_PATH=/app/data/stargzr.db
+      # CHANGE THIS to a long random string. Without it logins reset on redeploy.
+      - JWT_SECRET=change-me-to-something-long-and-random
     restart: unless-stopped
