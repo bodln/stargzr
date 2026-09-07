@@ -78,6 +78,7 @@ pub async fn player_page(State(state): State<SharedState>, headers: HeaderMap) -
         total_medias,
         session_id,
         is_video,
+        asset_version: state.asset_version.clone(),
     }
 }
 

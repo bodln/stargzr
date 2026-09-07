@@ -2,7 +2,10 @@
 <html>
   <head>
     <title>stargzr</title>
-    <link rel="stylesheet" href="/stargzr/static/css/player.css" />
+    <link
+      rel="stylesheet"
+      href="/stargzr/static/css/player.css?v={{ asset_version }}"
+    />
   </head>
   <body>
     <h1>stargzr</h1>
@@ -124,6 +127,28 @@
             ⏹️ Stop Broadcasting
           </button>
         </div>
+      </div>
+    </div>
+
+    <!-- Chat
+         Rides the same WebSocket as the radio sync. The server picks the room
+         from your tune in state, so the room label just mirrors that: global
+         when you are not tuned to anyone, the broadcaster's room when you are,
+         and your own room while you are broadcasting. -->
+    <div class="chat-container">
+      <h3>💬 <span id="chat-room-label">Global chat</span></h3>
+      <div id="chat-messages">
+        <div class="chat-empty">No messages yet. Say something.</div>
+      </div>
+      <div class="chat-input-row">
+        <input
+          type="text"
+          id="chat-input"
+          maxlength="500"
+          placeholder="Type a message and hit enter..."
+          autocomplete="off"
+        />
+        <button id="chat-send-btn">Send</button>
       </div>
     </div>
 
@@ -316,6 +341,10 @@
       analytics.js    — updateAnalyticsDisplay() must exist before the WebSocket
                         connects and messages start arriving, which main.js triggers.
 
+      chat.js         — defines window.chatUI before radio-player.js starts
+                        handing it Chat frames. Reads window.player lazily so it
+                        is fine that main.js creates it further down.
+
       upload.js       — registers the #upload-btn listener before the page is live.
       admin.js        — starts polling immediately on parse, harmless before boot.
       search.js       — registers the search listener before the page is live.
@@ -325,13 +354,14 @@
                         opens the WebSocket, and loads the playlist. Everything above
                         must be defined before any of that runs.
     -->
-    <script src="/stargzr/static/js/utils.js" defer></script>
-    <script src="/stargzr/static/js/playlist.js" defer></script>
-    <script src="/stargzr/static/js/radio-player.js" defer></script>
-    <script src="/stargzr/static/js/analytics.js" defer></script>
-    <script src="/stargzr/static/js/upload.js" defer></script>
-    <script src="/stargzr/static/js/admin.js" defer></script>
-    <script src="/stargzr/static/js/search.js" defer></script>
-    <script src="/stargzr/static/js/main.js" defer></script>
+    <script src="/stargzr/static/js/utils.js?v={{ asset_version }}" defer></script>
+    <script src="/stargzr/static/js/playlist.js?v={{ asset_version }}" defer></script>
+    <script src="/stargzr/static/js/radio-player.js?v={{ asset_version }}" defer></script>
+    <script src="/stargzr/static/js/analytics.js?v={{ asset_version }}" defer></script>
+    <script src="/stargzr/static/js/chat.js?v={{ asset_version }}" defer></script>
+    <script src="/stargzr/static/js/upload.js?v={{ asset_version }}" defer></script>
+    <script src="/stargzr/static/js/admin.js?v={{ asset_version }}" defer></script>
+    <script src="/stargzr/static/js/search.js?v={{ asset_version }}" defer></script>
+    <script src="/stargzr/static/js/main.js?v={{ asset_version }}" defer></script>
   </body>
 </html>

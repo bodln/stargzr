@@ -22,6 +22,9 @@ class RadioPlayer {
     this._loadingMediaIndex = null;
     this._pendingSeekTime = 0;
     this._pendingIsPlaying = false;
+    // Date.now() when _pendingSeekTime was last set, so the canplay handler can
+    // add the media load/buffer time back onto the seek target.
+    this._pendingSeekSetAt = 0;
 
     // Set to Date.now() when TuneIn is sent; cleared after the first Sync.
     // Used to compensate for server-to-listener transit on initial sync.
@@ -334,10 +337,27 @@ class RadioPlayer {
 
   handleRadioMessage(msg) {
     if (msg.type === "Sync" && msg.broadcaster_id === this.sessionId) return;
+
+    // Bounce server_ts straight back so the server can time the round trip.
+    // We do no math here, the server owns the measurement.
+    if (msg.type === "Ping") {
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ type: "Pong", server_ts: msg.server_ts }));
+      }
+      return;
+    }
+
     debugLog(`Handling message type: ${msg.type}, mode: ${this.mode}`);
 
     if (msg.type === "Analytics") {
       updateAnalyticsDisplay(msg);
+      return;
+    }
+
+    // Chat works in every mode, the server already routed it to the right room
+    // so we just hand it to the chat panel to paint.
+    if (msg.type === "Chat") {
+      window.chatUI?.onMessage(msg);
       return;
     }
 
@@ -350,6 +370,7 @@ class RadioPlayer {
         if (msg.is_broadcasting && !this.isBroadcasting) {
           this.isBroadcasting = true;
           this.updateBroadcastingUI(true);
+          this._notifyRoomChange();
           if (this.isMobile())
             document
               .getElementById("mobile-warning")
@@ -479,9 +500,11 @@ class RadioPlayer {
   syncToBroadcaster(msg) {
     let { media_index, playback_time, is_playing } = msg;
 
-    // First Sync after TuneIn: compensate for server-to-listener transit time
+    // First Sync after TuneIn: compensate for server to listener transit time.
+    // Date.now() - _tuneInSentAt is a whole round trip, TuneIn out and Sync back,
+    // and we only want the return leg, so take half of it.
     if (this._tuneInSentAt !== null) {
-      const elapsed = (Date.now() - this._tuneInSentAt) / 1000;
+      const elapsed = (Date.now() - this._tuneInSentAt) / 1000 / 2;
       this._tuneInSentAt = null;
       const duration = isFinite(this.audio.duration)
         ? this.audio.duration
@@ -522,6 +545,7 @@ class RadioPlayer {
     ) {
       this._pendingSeekTime = playback_time;
       this._pendingIsPlaying = is_playing;
+      this._pendingSeekSetAt = Date.now();
 
       if (this._loadingMediaIndex !== media_index) {
         debugLog(
@@ -548,8 +572,21 @@ class RadioPlayer {
           "canplay",
           () => {
             this._loadingMediaIndex = null;
-            const seekTo =
+            let seekTo =
               this._pendingSeekTime < 1.0 ? 0 : this._pendingSeekTime;
+
+            // Loading a long file can take a few seconds. If the broadcaster is
+            // playing, that time passed for them too, so add it to the seek target
+            // or the listener starts out that far behind.
+            if (this._pendingIsPlaying && this._pendingSeekSetAt && seekTo > 0) {
+              const loadElapsed = (Date.now() - this._pendingSeekSetAt) / 1000;
+              const dur = isFinite(this.audio.duration)
+                ? this.audio.duration
+                : Infinity;
+              if (seekTo + loadElapsed < dur) seekTo += loadElapsed;
+            }
+            this._pendingSeekSetAt = 0;
+
             debugLog(
               `canplay, seeking to ${seekTo.toFixed(2)}s (broadcaster at ${this._pendingSeekTime.toFixed(2)}s)`,
             );
@@ -637,6 +674,7 @@ class RadioPlayer {
     this.audio.controls = false;
     document.getElementById("broadcast-progress").classList.remove("hidden");
     window.playlistManager?.render();
+    this._notifyRoomChange();
   }
 
   tuneOut(reason = "manual") {
@@ -707,6 +745,7 @@ class RadioPlayer {
     // Set controls after switchMediaElement so the correct element gets them
     this.audio.controls = true;
     window.playlistManager?.render();
+    this._notifyRoomChange();
   }
 
   // Removes broadcast event listeners from both media elements
@@ -732,7 +771,6 @@ class RadioPlayer {
       type: "Heartbeat",
       broadcaster_id: this.sessionId,
       playback_time: this.audio.currentTime,
-      client_timestamp_ms: Date.now(),
     };
     debugLog(
       `Heartbeat: media ${this.getCurrentMediaIndex()}, time ${msg.playback_time.toFixed(2)}s`,
@@ -802,7 +840,6 @@ class RadioPlayer {
           media_index: this.getCurrentMediaIndex(),
           playback_time: this.audio.currentTime,
           is_playing: !this.audio.paused,
-          client_timestamp_ms: Date.now(),
         };
         debugLog(
           `Broadcasting: media ${msg.media_index}, time ${msg.playback_time.toFixed(2)}s`,
@@ -848,6 +885,7 @@ class RadioPlayer {
 
     this.updateBroadcastingUI(true);
     this.isStartingBroadcast = false;
+    this._notifyRoomChange();
   }
 
   stopBroadcasting() {
@@ -876,6 +914,7 @@ class RadioPlayer {
       );
     }
     this.updateBroadcastingUI(false);
+    this._notifyRoomChange();
     debugLog("Broadcasting stopped");
   }
 
@@ -962,5 +1001,12 @@ class RadioPlayer {
 
   isInRadioMode() {
     return this.mode === "radio";
+  }
+
+  // Tells the chat panel the room it should be showing has moved. Fired whenever
+  // tune in state or broadcasting state changes, since those are exactly what
+  // the server uses to pick a chat room.
+  _notifyRoomChange() {
+    document.dispatchEvent(new CustomEvent("radioRoomChange"));
   }
 }

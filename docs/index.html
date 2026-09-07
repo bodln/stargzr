@@ -402,10 +402,10 @@ hr { border: none; border-top: 1px solid var(--border); margin: 56px 0; }
 
 <span class="flow-gold">Browser A</span>                            <span class="flow-gold">Browser B (broadcaster)</span>
   │ GET /stream/id/{id}                  │ BroadcastUpdate (WebSocket)
-  │ Range: bytes=…                        │ client_timestamp_ms = Date.now()
+  │ Range: bytes=…                        │ playback_time, is_playing
   ▼                                       ▼
 <span class="flow-blue">Rust Server</span>                          <span class="flow-blue">Rust Server</span>
-  │ 206 Partial Content                    │ estimate latency
+  │ 206 Partial Content                    │ add Ping/Pong latency
   │ 1 MB chunks                           │ adjust playback_time
   ▼                                       │ serialize once → Arc&lt;PreparedMessage&gt;
 <span class="flow-gold">Browser A plays</span>                       │ send through broadcaster's channel
@@ -1347,12 +1347,12 @@ const sendUpdate = () =&gt; {
             media_index: this.getCurrentMediaIndex(),
             playback_time: this.audio.currentTime,
             is_playing: !this.audio.paused,
-            client_timestamp_ms: Date.now(),  // ← for server-side latency estimation
         };
         this.ws.send(JSON.stringify(msg));
     }, 150);
 };</code></pre>
         <p>the 150ms debounce collapses rapid event bursts. seeking fires <code>seeking</code>, then <code>seeked</code> — two events in quick succession. without debouncing, two <code>BroadcastUpdate</code> messages would go out. the debounce means only the final state after 150ms of quiet is sent.</p>
+        <p>the message carries no timestamp. broadcaster-to-server latency is measured separately by a <code>Ping</code>/<code>Pong</code> exchange (see <em>Latency compensation</em> below) so the server never has to compare two machines' clocks.</p>
 
         <h4>both elements get listeners</h4>
 <pre><code class="language-javascript">const allMediaEls = [
@@ -1442,26 +1442,25 @@ allMediaEls.forEach((el) =&gt; {
 <section id="bc-update">
   <div class="file-block">
     <div class="file-header"><span class="file-name">radio.rs — BroadcastUpdate handler</span><span class="file-lang">rust</span></div>
-    <p class="file-summary">receives a play/pause/seek event from the broadcaster. estimates one-way latency, adjusts <code>playback_time</code>, serializes a <code>Sync</code> once, and fans it out through the broadcaster's channel to all listeners.</p>
+    <p class="file-summary">receives a play/pause/seek event from the broadcaster. reads the Ping/Pong latency, adjusts <code>playback_time</code>, serializes a <code>Sync</code> once, and fans it out through the broadcaster's channel to all listeners.</p>
 
     <div class="deep-dive">
       <button class="deep-dive-toggle" data-target="dd-bcupdate">
-        ↓ latency estimation, same-media vs media-switch adjustment, PreparedMessage fanout, seekPending on client
+        ↓ latency source, same-media vs media-switch adjustment, PreparedMessage fanout, seekPending on client
         <span class="dd-icon">+</span>
       </button>
       <div class="deep-dive-body" id="dd-bcupdate">
         <div class="deep-dive-inner">
-          <h4>latency estimation</h4>
-<pre><code class="language-rust">let latency_ms = (now_ms() as u64).saturating_sub(client_timestamp_ms);
-// client stamped Date.now() before sending; server subtracts on receipt
-// this is broadcaster→server one-way transit time (approximate)</code></pre>
+          <h4>latency comes from Ping/Pong</h4>
+<pre><code class="language-rust">let (latency_ms, is_same_media) = state.broadcast_states.get(&amp;broadcaster_id)
+    .map(|b| (b.transmission_latency_ms, b.media_index == media_index))
+    .unwrap_or((0, false));
+// transmission_latency_ms is the broadcaster→server one-way time,
+// set by the Pong handler as rtt/2. 0 until the first Pong lands.</code></pre>
+          <p>the handler no longer computes latency from a client timestamp. an earlier version subtracted <code>client_timestamp_ms</code> (the broadcaster's <code>Date.now()</code>) from the server's wall clock, which only works if the two machines' clocks agree. when a broadcaster's clock lagged the server's, that difference — tens of seconds — was added straight onto <code>playback_time</code> and every listener jumped way ahead. the value now comes from a round trip timed entirely on the server clock (see <em>Latency compensation</em>, leg 1).</p>
 
           <h4>only adjust on same-media updates</h4>
-<pre><code class="language-rust">let is_same_media = state.broadcast_states.get(&amp;broadcaster_id)
-    .map(|b| b.media_index == media_index)
-    .unwrap_or(false);
-
-let adjusted_playback_time = if is_same_media {
+<pre><code class="language-rust">let adjusted_playback_time = if is_same_media {
     playback_time + (latency_ms as f64 / 1000.0)
 } else {
     playback_time  // media switch: listeners start from beginning
@@ -1538,7 +1537,7 @@ this.audio.addEventListener("ended", () =&gt; {
 
 <section id="bc-heartbeat">
   <h3>Heartbeat — keeping position fresh between updates</h3>
-  <p>every 2 seconds while broadcasting, <code>sendHeartbeat()</code> fires. it sends a lightweight message with just the current <code>playback_time</code> and a <code>client_timestamp_ms</code> timestamp. the server updates <code>BroadcastState.playback_time</code>, <code>server_timestamp_ms</code>, and recalibrates <code>transmission_latency_ms</code>.</p>
+  <p>every 2 seconds while broadcasting, <code>sendHeartbeat()</code> fires. it sends a lightweight message with just the current <code>playback_time</code>. the server updates <code>BroadcastState.playback_time</code> and <code>server_timestamp_ms</code>. latency is not touched here — that's the Ping/Pong job.</p>
 
   <div class="deep-dive">
     <button class="deep-dive-toggle" data-target="dd-heartbeat">
@@ -1700,7 +1699,7 @@ function tuneInToBroadcaster(broadcasterId) {
 
   <div class="deep-dive">
     <button class="deep-dive-toggle" data-target="dd-latency">
-      ↓ leg 1 (broadcaster→server), leg 2 (_tuneInSentAt), how they combine, what can't be compensated
+      ↓ leg 1 (Ping/Pong), leg 2 (_tuneInSentAt), media load time, how they combine, what can't be compensated
       <span class="dd-icon">+</span>
     </button>
     <div class="deep-dive-body" id="dd-latency">
@@ -1708,31 +1707,51 @@ function tuneInToBroadcaster(broadcasterId) {
         <div class="flow">
 <span class="flow-dim">BROADCASTER                    SERVER                     LISTENER</span>
 
-<span class="flow-gold">Date.now() = T1</span>
-BroadcastUpdate ──────────────▶
-                          server receives at T2
-                          <span class="flow-blue">latency_ms = T2 - T1</span>
-                          adjusted = playback_time + (latency_ms/1000)
+<span class="flow-dim">EVERY 4s (while broadcasting):</span>
+                    ◀────────── <span class="flow-blue">Ping(server_ts = S1)</span>
+<span class="flow-gold">Pong(server_ts)</span> ──────────▶ received at S2
+                          <span class="flow-blue">rtt = S2 - S1 ; latency = rtt / 2</span>
+                          stored as transmission_latency_ms
+<span class="flow-dim">                                                       </span>
+<span class="flow-gold">BroadcastUpdate</span> ──────────────▶
+                          adjusted = playback_time + latency
                           Sync(adjusted) ──────────────────────────▶ arrives at T3
 <span class="flow-dim">                                                       </span>
 <span class="flow-dim">ON TUNEIN (one-time):</span>
 TuneIn sent at <span class="flow-gold">_tuneInSentAt</span>
                           initial Sync(adjusted) ───────────────────▶
-                                                            elapsed = T3 - tuneInSentAt
-                                                            <span class="flow-green">final = adjusted + elapsed</span></div>
+                                                            rtt2 = T3 - _tuneInSentAt
+                                                            <span class="flow-green">final = adjusted + rtt2 / 2</span></div>
 
-        <h4>leg 1 — broadcaster to server</h4>
-        <p>the broadcaster stamps <code>client_timestamp_ms = Date.now()</code> on every outgoing message. the server subtracts it from its own wall clock on receipt. this is approximate — it includes both send and receive times conflated as one-way latency — but with similar jitter in both directions it's a reasonable estimate. the result is added to <code>playback_time</code> in the outgoing <code>Sync</code> so listeners aim slightly ahead of where the broadcaster was when the update was recorded.</p>
+        <h4>leg 1 — broadcaster to server (Ping/Pong)</h4>
+        <p>the server sends the broadcaster a <code>Ping</code> carrying its own <code>server_ts</code> every 4 seconds. the broadcaster echoes it straight back as <code>Pong</code> with the same value untouched. on receipt the server does <code>rtt = now - server_ts</code> and stores <code>rtt / 2</code> as <code>transmission_latency_ms</code>. every timestamp in that calculation is the server's own clock, so it measures pure network time and can't be thrown off by the broadcaster's device clock.</p>
+        <p>the previous approach had the broadcaster stamp <code>Date.now()</code> on each message and the server subtract it from its own wall clock. that silently folded any clock difference between the two machines into the "latency". a broadcaster whose clock was 30s slow produced a 30s latency estimate, which got added to <code>playback_time</code> and shot every listener half a minute ahead. a 2000ms cap now clamps any implausible sample from a stalled socket or a delayed Pong.</p>
 
         <h4>leg 2 — server to listener (TuneIn only)</h4>
 <pre><code class="language-javascript">if (this._tuneInSentAt !== null) {
-    const elapsed = (Date.now() - this._tuneInSentAt) / 1000;
+    // whole round trip (TuneIn out, Sync back) on one clock; take half
+    const elapsed = (Date.now() - this._tuneInSentAt) / 1000 / 2;
     this._tuneInSentAt = null;
     const adjusted = playback_time + elapsed;
     if (adjusted &lt; duration) playback_time = adjusted;
     debugLog(`TuneIn latency compensation: +${elapsed.toFixed(3)}s`);
 }</code></pre>
-        <p>this only runs on the first Sync after TuneIn. subsequent Syncs don't need this because the listener's element is already playing and advancing on its own — small drift is absorbed naturally and the heartbeat keeps positions fresh.</p>
+        <p>this only runs on the first Sync after TuneIn. <code>_tuneInSentAt</code> is set on the listener's own clock right before the <code>TuneIn</code> goes out, and the difference when the <code>Sync</code> comes back is a full round trip, so it's halved to get the one server-to-listener leg. subsequent Syncs don't need this because the listener's element is already playing and advancing on its own — small drift is absorbed naturally and the heartbeat keeps positions fresh.</p>
+
+        <h4>media load time</h4>
+<pre><code class="language-javascript">this.audio.addEventListener("canplay", () =&gt; {
+    let seekTo = this._pendingSeekTime &lt; 1.0 ? 0 : this._pendingSeekTime;
+    if (this._pendingIsPlaying &amp;&amp; this._pendingSeekSetAt &amp;&amp; seekTo &gt; 0) {
+        const loadElapsed = (Date.now() - this._pendingSeekSetAt) / 1000;
+        if (seekTo + loadElapsed &lt; dur) seekTo += loadElapsed;
+    }
+    this.audio.currentTime = seekTo;
+    if (this._pendingIsPlaying) this._radioPlay();
+}, { once: true });</code></pre>
+        <p>switching to a new track means <code>audio.load()</code> then waiting for <code>canplay</code>, which on a long file can be several seconds. that time passed for the broadcaster too, so when the broadcaster is playing the listener adds the load duration onto its seek target instead of landing wherever the Sync said the broadcaster was before the load started.</p>
+
+        <h4>what still can't be compensated</h4>
+        <p>the listener's own decode and buffer time after the seek, and any variance between the two one-way legs the halving assumes are equal. these are sub-second in practice and get absorbed as the element plays on.</p>
       </div>
     </div>
   </div>
@@ -2472,8 +2491,10 @@ if (msg.is_broadcasting !== this.isBroadcasting) {
     <tr><td><code>TuneIn</code></td><td>client→server</td><td>subscribe to broadcaster; server replies with initial Sync</td></tr>
     <tr><td><code>TuneOut</code></td><td>client→server</td><td>unsubscribe; server removes from listener set</td></tr>
     <tr><td><code>StartBroadcasting</code></td><td>client→server</td><td>register; server sends BroadcasterOnline globally</td></tr>
-    <tr><td><code>BroadcastUpdate</code></td><td>client→server</td><td>play/pause/seek; server adjusts latency, fans out Sync</td></tr>
-    <tr><td><code>Heartbeat</code></td><td>client→server</td><td>every 2s; keeps state fresh; recalibrates latency</td></tr>
+    <tr><td><code>BroadcastUpdate</code></td><td>client→server</td><td>play/pause/seek; server adds Ping/Pong latency, fans out Sync</td></tr>
+    <tr><td><code>Heartbeat</code></td><td>client→server</td><td>every 2s; keeps playback_time fresh for late joiners</td></tr>
+    <tr><td><code>Ping</code></td><td>server→broadcaster</td><td>every 4s; carries server_ts for round-trip timing</td></tr>
+    <tr><td><code>Pong</code></td><td>broadcaster→server</td><td>echoes server_ts back; server stores rtt/2 as latency</td></tr>
     <tr><td><code>StopBroadcasting</code></td><td>client→server</td><td>clean stop; server sends BroadcasterOffline globally</td></tr>
     <tr><td><code>AutoNext</code></td><td>client↔server↔clients</td><td>track ended naturally; listeners finish current then switch</td></tr>
     <tr><td><code>QueryBroadcastState</code></td><td>client→server</td><td>mobile recovery: "am I still broadcasting?"</td></tr>

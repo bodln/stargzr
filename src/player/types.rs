@@ -64,8 +64,9 @@ pub struct BroadcastState {
     pub is_playing: bool,
     pub server_timestamp_ms: u128, // When this state was recorded
     pub listener_count: usize,
-    // Estimated one way broadcaster to server latency from client_timestamp_ms on incoming messages.
-    // Used to adjust playback_time in outgoing Sync messages so listeners stay in sync.
+    // One way broadcaster to server latency in ms, measured by the Ping/Pong round trip.
+    // Added to playback_time in outgoing Sync messages so late joiners land near the live position.
+    // Zero until the first Pong arrives.
     pub transmission_latency_ms: u64,
 }
 
@@ -132,6 +133,12 @@ pub struct AppState {
 
     /// Makes sure only one video file can be converted with ffmpeg to prevent clogging the CPU
     pub conversion_semaphore: Arc<Semaphore>,
+
+    /// Short token derived from the contents of the static JS and CSS files.
+    /// Goes on every asset URL in the page as ?v=... so the moment a file
+    /// changes its URL changes with it, and no browser or proxy can serve back
+    /// a stale copy. Computed once at startup.
+    pub asset_version: String,
 }
 
 /// Helper type for cleaner function signatures
@@ -150,13 +157,22 @@ pub enum RadioMessage {
         server_timestamp_ms: u128,
     },
 
-    /// Broadcaster sends this every 2-3 seconds.
-    /// client_timestamp_ms is the frontend's Date.now() at send time used by the server
-    /// to estimate broadcaster to server latency for playback-time compensation
+    /// Broadcaster sends this every 2-3 seconds to report its current playback_time.
     Heartbeat {
         broadcaster_id: String,
         playback_time: f64,
-        client_timestamp_ms: u64,
+    },
+
+    /// Server sends this to a broadcaster every few seconds. server_ts is the server
+    /// clock at send time. The broadcaster echoes it back unchanged in Pong so the
+    /// server can time the round trip without trusting the broadcaster's clock.
+    Ping {
+        server_ts: u64,
+    },
+
+    /// Broadcaster's reply to Ping, server_ts copied straight back.
+    Pong {
+        server_ts: u64,
     },
 
     /// Listener sends this for initial tune in to broadcaster, gets Sync back
@@ -168,14 +184,11 @@ pub enum RadioMessage {
     TuneOut,
 
     /// Broadcaster sends this on play/pause/seek/next/prev, and server sends Sync to all tuned in.
-    /// client_timestamp_ms is the frontend's Date.now() at send time; used by the server
-    /// to estimate broadcaster to server latency for playback-time compensation.
     BroadcastUpdate {
         broadcaster_id: String,
         media_index: usize,
         playback_time: f64,
         is_playing: bool,
-        client_timestamp_ms: u64,
     },
 
     Error {
@@ -238,6 +251,28 @@ pub enum RadioMessage {
     /// since this may just be a restart.
     ServerShutdown {
         message: String,
+    },
+
+    /// A line of chat. The client sends this with only `text` filled in, the
+    /// server stamps the rest and fans it out to everyone in the same room.
+    ///
+    /// The room comes straight from the sender's tune in state. Tuned into
+    /// someone means their room, broadcasting yourself with no tune means your
+    /// own room, anything else is the global room everyone shares. A broadcaster
+    /// counts as sitting in their own room so they can talk to their listeners.
+    Chat {
+        /// "global" or the broadcaster id whose room this belongs to.
+        /// Whatever the client puts here is ignored, the server sets it.
+        #[serde(default)]
+        room: String,
+        /// Session id of whoever sent it. Set by the server so it can't be faked.
+        #[serde(default)]
+        from: String,
+        /// The message body.
+        text: String,
+        /// Server clock when the line landed, milliseconds since epoch.
+        #[serde(default)]
+        server_timestamp_ms: u128,
     },
 }
 

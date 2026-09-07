@@ -40,6 +40,11 @@ impl RateLimiter {
         Self::new(5.0, 0.1)
     }
 
+    // For chat messages - a short burst then about one line per second sustained
+    pub fn for_chat() -> Self {
+        Self::new(5.0, 1.0)
+    }
+
     pub fn check_and_consume(&self, session_id: &str) -> PlayerResult<()> {
         let mut bucket = self.buckets.entry(session_id.to_string())
             .or_insert_with(|| TokenBucket {

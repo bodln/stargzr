@@ -11,6 +11,8 @@ pub struct PlayerTemplate {
     pub total_medias: usize,
     pub session_id: String,
     pub is_video: bool,
+    /// Content hash of the JS and CSS, appended to every asset URL as ?v=...
+    pub asset_version: String,
 }
 
 #[derive(Template)]
@@ -27,6 +29,10 @@ impl IntoResponse for PlayerTemplate {
         match self.render() {
             Ok(html) => Response::builder()
                 .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                // Never let a browser reuse the page without checking back. The
+                // page is what points at the versioned asset URLs, so a stale
+                // page is the one thing that could still pin someone to old JS.
+                .header(header::CACHE_CONTROL, "no-cache")
                 .header(
                     header::SET_COOKIE,
                     format!(

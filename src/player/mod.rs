@@ -11,6 +11,7 @@ mod types;
 pub mod validation;
 
 use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeaderLayer;
 pub use types::{AppState, BroadcastState, MediaType, RadioMessage, SharedState, MediaInfo};
 pub use types::media_type_for;
 
@@ -22,6 +23,7 @@ use crate::player::types::PreparedMessage;
 use self::logging::init_logging;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
+use axum::http::{HeaderValue, header};
 use axum::routing::{get, post};
 use dashmap::DashMap;
 use std::path::PathBuf;
@@ -85,7 +87,85 @@ async fn init_player_state(media_folder: PathBuf) -> SharedState {
         ws_rate_limiter: RateLimiter::for_websocket(),
         upload_quotas: DashMap::new(),
         conversion_semaphore: Arc::new(Semaphore::new(1)),
+        asset_version: compute_asset_version(),
     })
+}
+
+/// Hashes the bytes of every static JS and CSS file into a short token.
+///
+/// It goes on every asset URL in the page as ?v=... . The cache key a browser
+/// or proxy stores includes the query string, so the instant a file's contents
+/// change the token changes, the URL changes, and there is no way for anything
+/// in the middle to serve back the old bytes. Identical contents hash to the
+/// same token across restarts, so a plain redeploy that didn't touch the assets
+/// doesn't needlessly bust everyone's cache.
+///
+/// If the asset folder can't be read we fall back to a fresh token per boot,
+/// which is worse for caching but still can never serve something stale.
+fn compute_asset_version() -> String {
+    use std::hash::{Hash, Hasher};
+
+    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/player/static"));
+
+    let mut files = Vec::new();
+    for sub in ["js", "css"] {
+        if let Ok(entries) = std::fs::read_dir(root.join(sub)) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    files.push(path);
+                }
+            }
+        }
+    }
+
+    if files.is_empty() {
+        tracing::error!("Could not read static asset folder, using a per-boot asset version");
+        return Uuid::new_v4().simple().to_string();
+    }
+
+    // Sort so the order the OS hands us the entries in doesn't change the hash
+    files.sort();
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for path in &files {
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default()
+                    .hash(&mut hasher);
+                bytes.hash(&mut hasher);
+            }
+            Err(e) => tracing::warn!("Skipping {} while hashing assets: {}", path.display(), e),
+        }
+    }
+
+    format!("{:016x}", hasher.finish())
+}
+
+/// Serves the CSS and JS off disk with a no-cache header.
+///
+/// These files change on every deploy but keep the same URLs, so without a
+/// cache header a browser can sit on a stale copy for days off its own
+/// heuristics, which is exactly how one phone ends up running last week's
+/// script while another runs today's. no-cache still lets the browser keep the
+/// file, it just has to check with a conditional request before using it, so
+/// the normal case is a tiny 304 and a changed file lands immediately.
+fn static_files() -> Router {
+    Router::new()
+        .nest_service(
+            "/css",
+            ServeDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/player/static/css")),
+        )
+        .nest_service(
+            "/js",
+            ServeDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/player/static/js")),
+        )
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache"),
+        ))
 }
 
 /// Creates an Axum router with all the player routes, using the given media folder.
@@ -116,17 +196,7 @@ pub fn create_player_router(state: Arc<AppState>) -> impl std::future::Future<Ou
             )
             .route("/metrics", get(metrics_handler))
             .route("/player/admin/state", get(admin_state)) // Information from the DashMaps in state
-            .nest_service(
-                "/static/css",
-                ServeDir::new(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/src/player/static/css"
-                )),
-            )
-            .nest_service(
-                "/static/js",
-                ServeDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/player/static/js")),
-            )
+            .nest_service("/static", static_files())
             .with_state(state.clone()); // Attach shared state
 
         // Nest the inner router under "/stargzr" so all routes are prefixed

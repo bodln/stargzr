@@ -19,6 +19,19 @@ use super::types::{BroadcastState, PreparedMessage, RadioMessage, SharedState};
 // Analytics are expensive, don't send more often than this on high-frequency paths
 const ANALYTICS_THROTTLE_MS: u64 = 500;
 
+// Cap on the measured one way broadcaster to server latency.
+// A real network leg is never longer than this, so a bigger sample means
+// something went wrong (a stalled socket, a delayed Pong) and we clamp it
+// instead of adding a huge number onto everyone's playback position.
+const MAX_PLAUSIBLE_LATENCY_MS: u64 = 2000;
+
+// How often the server pings a broadcaster to measure round trip time.
+const BROADCASTER_PING_INTERVAL_SECS: u64 = 4;
+
+// Longest chat line we keep. Anything past this gets snipped at a char boundary
+// so nobody can shove a wall of text into everyone else's chat.
+const MAX_CHAT_LEN: usize = 500;
+
 /// Manages the full lifecycle of a radio WebSocket connection.
 pub async fn handle_radio_connection(
     socket: WebSocket,
@@ -35,10 +48,17 @@ pub async fn handle_radio_connection(
     // Channel used to communicate tuned broadcaster changes
     let (tuned_tx, mut tuned_rx) = tokio::sync::watch::channel::<Option<String>>(None);
 
+    // Flips to true while this session is broadcasting. It tells the send task
+    // to also listen on our own room channel, so chat from our listeners reaches
+    // us and not just each other. A broadcaster is never tuned into themselves,
+    // so without this they would never see their own room's chat.
+    let (own_room_tx, mut own_room_flag_rx) = tokio::sync::watch::channel::<bool>(false);
+
     let mut global_broadcast_rx = state.global_broadcast_tx.subscribe();
 
     let heartbeat_limiter = Arc::new(RateLimiter::for_heartbeat());
     let broadcast_limiter = Arc::new(RateLimiter::for_broadcast());
+    let chat_limiter = Arc::new(RateLimiter::for_chat());
 
     state.active_connections.fetch_add(1, Relaxed);
     broadcast_analytics(&state);
@@ -55,12 +75,25 @@ pub async fn handle_radio_connection(
 
     // Send task
     let state_clone = state.clone();
+    let send_session_id = validated_session_id.clone();
 
     let mut send_task = tokio::spawn(
         async move {
             let mut current_tuned_broadcaster_rx: Option<
                 broadcast::Receiver<Arc<PreparedMessage>>,
             > = None;
+
+            // Our own room channel, only wired up while we are broadcasting.
+            // It carries everything our listeners get, but the only thing we
+            // actually want off it is Chat. The client already drops the Sync
+            // and AutoNext copies that carry our own id.
+            let mut own_room_rx: Option<broadcast::Receiver<Arc<PreparedMessage>>> = None;
+
+            // Latency probe for this session. Only fires a Ping once the session is
+            // actually broadcasting. The first tick lands immediately and is skipped.
+            let mut ping_interval = tokio::time::interval(
+                std::time::Duration::from_secs(BROADCASTER_PING_INTERVAL_SECS),
+            );
 
             loop {
                 // biased: skips random branch selection, tuned broadcaster is the hottest path
@@ -83,6 +116,22 @@ pub async fn handle_radio_connection(
                         }
                     }
 
+                    // Our own room channel, live only while we are broadcasting.
+                    // This is how a broadcaster hears the chat from the people
+                    // tuned into them. Listeners get the same lines through the
+                    // tuned branch above.
+                    Ok(msg) = async {
+                        match &mut own_room_rx {
+                            Some(rx) => rx.recv().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if let Err(e) = send_prepared(&mut sender, &msg).await {
+                            tracing::error!("Failed to forward own room message: {}", e);
+                            break;
+                        }
+                    }
+
                     // Global channel
                     Ok(msg) = global_broadcast_rx.recv() => {
                         if let Err(e) = send_prepared(&mut sender, &msg).await {
@@ -96,6 +145,18 @@ pub async fn handle_radio_connection(
                         if let Err(e) = send_message(&mut sender, &msg).await {
                             tracing::error!("Failed to send message: {}", e);
                             break;
+                        }
+                    }
+
+                    // Ping the broadcaster so their Pong lets us time the round trip.
+                    // Skipped for listeners, they have no latency to track.
+                    _ = ping_interval.tick() => {
+                        if state_clone.broadcast_states.contains_key(&send_session_id) {
+                            let ping = RadioMessage::Ping { server_ts: now_ms() as u64 };
+                            if let Err(e) = send_message(&mut sender, &ping).await {
+                                tracing::error!("Failed to send ping: {}", e);
+                                break;
+                            }
                         }
                     }
 
@@ -114,6 +175,20 @@ pub async fn handle_radio_connection(
                                 current_tuned_broadcaster_rx = None;
                                 tracing::debug!("Tuned out");
                             }
+                        }
+                    }
+
+                    // Broadcasting started or stopped, wire our own room channel
+                    // in or drop it so we track our listeners' chat while live.
+                    Ok(()) = own_room_flag_rx.changed() => {
+                        if *own_room_flag_rx.borrow() {
+                            own_room_rx = state_clone.broadcast_channels
+                                .get(&send_session_id)
+                                .map(|tx| tx.subscribe());
+                            tracing::debug!("Listening on own room channel for chat");
+                        } else {
+                            own_room_rx = None;
+                            tracing::debug!("Dropped own room channel");
                         }
                     }
 
@@ -146,8 +221,10 @@ pub async fn handle_radio_connection(
                                     &validated_session_id_clone,
                                     &out_tx,
                                     &tuned_tx,
+                                    &own_room_tx,
                                     &heartbeat_limiter,
                                     &broadcast_limiter,
+                                    &chat_limiter,
                                 )
                                 .await
                                 {
@@ -238,8 +315,12 @@ async fn handle_client_message(
     out_tx: &mpsc::Sender<RadioMessage>,
     // communication on whether the client changed who they are listening to
     tuned_tx: &tokio::sync::watch::Sender<Option<String>>,
+    // flips true/false as this session starts and stops broadcasting, so the
+    // send task knows whether to also listen on our own room channel
+    own_room_tx: &tokio::sync::watch::Sender<bool>,
     heartbeat_limiter: &Arc<RateLimiter>,
     broadcast_limiter: &Arc<RateLimiter>,
+    chat_limiter: &Arc<RateLimiter>,
 ) -> PlayerResult<()> {
     match msg {
         RadioMessage::TuneIn { broadcaster_id } => {
@@ -290,11 +371,10 @@ async fn handle_client_message(
                 broadcast.listener_count = count;
             }
 
-            // Estimate the broadcaster's real position at this moment:
-            //   stored_playback_time - position when last heartbeat/update was sent
-            //   + time_since_last_update - playback has continued since then (only if playing)
-            //   + transmission_latency_ms - broadcaster to server lag in that measurement
-            // The frontend then adds the server to listener leg via _tuneInSentAt.
+            // Estimate the broadcaster's real position at this moment.
+            // Start from the last playback_time they reported, add the time that has
+            // passed since (only if playing), then add the broadcaster to server leg
+            // measured by Ping/Pong. The frontend adds the server to listener leg on top.
             let time_since_last_update_secs = if b_state.is_playing {
                 (now_ms().saturating_sub(b_state.server_timestamp_ms)) as f64 / 1000.0
             } else {
@@ -360,7 +440,6 @@ async fn handle_client_message(
             media_index,
             playback_time,
             is_playing,
-            client_timestamp_ms,
         } => {
             crate::player::metrics::inc_messages("BroadcastUpdate");
             ensure_same_session(&broadcaster_id, validated_session_id)?;
@@ -396,16 +475,14 @@ async fn handle_client_message(
                 return Err(PlayerError::BroadcasterNotFound(broadcaster_id));
             }
 
-            // Estimate broadcaster to server one way latency from the client's send timestamp
-            let latency_ms = (now_ms() as u64).saturating_sub(client_timestamp_ms);
-
-            // Only compensate on seek/play/pause (same media). Media switches start from 0
-            // on the listener side intentionally, so adding latency would skip the intro.
-            let is_same_media = state
+            // Latency is the broadcaster to server leg measured by Ping/Pong, 0 until the
+            // first Pong lands. is_same_media guards the intro: a media switch starts
+            // listeners at 0 on purpose, so we don't add latency across it.
+            let (latency_ms, is_same_media) = state
                 .broadcast_states
                 .get(&broadcaster_id)
-                .map(|b| b.media_index == media_index)
-                .unwrap_or(false);
+                .map(|b| (b.transmission_latency_ms, b.media_index == media_index))
+                .unwrap_or((0, false));
 
             let adjusted_playback_time = if is_same_media {
                 playback_time + (latency_ms as f64 / 1000.0)
@@ -475,7 +552,6 @@ async fn handle_client_message(
         RadioMessage::Heartbeat {
             broadcaster_id,
             playback_time,
-            client_timestamp_ms,
         } => {
             crate::player::metrics::inc_messages("Heartbeat");
 
@@ -490,22 +566,33 @@ async fn handle_client_message(
 
             let server_ts = now_ms();
 
-            // Keep latency estimate fresh between BroadcastUpdates
-            let latency_ms = (server_ts as u64).saturating_sub(client_timestamp_ms);
-
             // Touch the session so passive listeners don't get cleaned up mid-media.
             // Range requests fire on every seek so this naturally stays fresh during playback.
             if let Some(mut session) = state.sessions.get_mut(session_id.as_str()) {
                 session.last_activity = std::time::Instant::now();
             }
 
-            // Update playback time and latency estimate for the broadcaster
+            // Latency is tracked by Ping/Pong, the heartbeat only moves the playback clock forward
             if let Some(mut broadcast) = state.broadcast_states.get_mut(&broadcaster_id) {
                 broadcast.playback_time = playback_time;
                 broadcast.server_timestamp_ms = server_ts;
-                broadcast.transmission_latency_ms = latency_ms;
 
-                tracing::trace!(broadcaster_id = %session_id, playback_time, latency_ms, "Heartbeat");
+                tracing::trace!(broadcaster_id = %session_id, playback_time, "Heartbeat");
+            }
+        }
+
+        RadioMessage::Pong { server_ts } => {
+            crate::player::metrics::inc_messages("Pong");
+
+            // rtt is timed start to finish on the server clock, so half of it is the
+            // one way broadcaster to server latency. Nothing here reads the broadcaster's
+            // clock, which is what let the old estimate blow up when the clocks drifted.
+            let rtt_ms = (now_ms() as u64).saturating_sub(server_ts);
+            let one_way_ms = (rtt_ms / 2).min(MAX_PLAUSIBLE_LATENCY_MS);
+
+            if let Some(mut broadcast) = state.broadcast_states.get_mut(validated_session_id) {
+                broadcast.transmission_latency_ms = one_way_ms;
+                tracing::trace!(rtt_ms, one_way_ms, "Latency updated from Pong");
             }
         }
 
@@ -519,6 +606,9 @@ async fn handle_client_message(
 
             state.broadcast_states.remove(&broadcaster_id);
             state.broadcast_channels.remove(&broadcaster_id);
+
+            // No room of our own any more, stop the send task listening on it.
+            let _ = own_room_tx.send(false);
 
             let offline_msg = Arc::new(PreparedMessage::new(&RadioMessage::BroadcasterOffline {
                 broadcaster_id: broadcaster_id.clone(),
@@ -579,7 +669,7 @@ async fn handle_client_message(
                     .unwrap_or_else(|| format!("Unknown media #{}", media_index))
             };
 
-            // Latency unknown at start, first BroadcastUpdate/Heartbeat will calibrate it
+            // Latency stays 0 until the first Pong comes back
             let new_state = BroadcastState {
                 broadcaster_id: broadcaster_id.clone(),
                 media_index,
@@ -604,6 +694,11 @@ async fn handle_client_message(
                     tracing::debug!("Created broadcast channel");
                     tx
                 });
+
+            // Now that the channel exists, tell our own send task to listen on
+            // it too so we pick up chat from anyone tuned into us. Safe to fire
+            // on a resume as well, the send task just resubscribes.
+            let _ = own_room_tx.send(true);
 
             // Send announcement through global channel, not the broadcaster's channel
             if !was_already_broadcasting {
@@ -682,8 +777,8 @@ async fn handle_client_message(
                 broadcast.media_name = media_name;
                 broadcast.playback_time = 0.0;
                 broadcast.server_timestamp_ms = server_ts;
-                // Reset latency on media change, it will be recalibrated by the next Heartbeat/BroadcastUpdate
-                broadcast.transmission_latency_ms = 0;
+                // transmission_latency_ms is left as is, it's a property of the socket
+                // not the media, and Ping/Pong keeps it current on its own
             }
 
             // Fan out AutoNext as-is so listeners can handle it differently from Sync
@@ -701,6 +796,83 @@ async fn handle_client_message(
             }
 
             broadcast_analytics_throttled(state);
+        }
+
+        RadioMessage::Chat { text, .. } => {
+            crate::player::metrics::inc_messages("Chat");
+
+            // Same idea as the broadcast limiter, keyed per session so one person
+            // spamming the box only slows themselves down.
+            if let Err(e) = chat_limiter.check_and_consume(validated_session_id) {
+                crate::player::metrics::inc_rate_limit_hits("chat");
+                return Err(e);
+            }
+
+            // Trim first so a line of nothing but spaces counts as empty and
+            // gets dropped without a fuss.
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return Ok(());
+            }
+
+            // Clamp the length, walking back to a char boundary so we never cut
+            // a multibyte character in half.
+            let body = if trimmed.len() > MAX_CHAT_LEN {
+                let mut end = MAX_CHAT_LEN;
+                while !trimmed.is_char_boundary(end) {
+                    end -= 1;
+                }
+                &trimmed[..end]
+            } else {
+                trimmed
+            };
+
+            // The room is decided entirely by the sender's tune in state.
+            //   tuned into someone  -> that broadcaster's room
+            //   broadcasting, no tune -> our own room, so we reach our listeners
+            //   neither              -> the global room everyone shares
+            let tuned_to = state
+                .session_tuned_to
+                .get(validated_session_id)
+                .map(|r| r.clone());
+
+            let room = match tuned_to {
+                Some(broadcaster_id) => broadcaster_id,
+                None if state.broadcast_channels.contains_key(validated_session_id) => {
+                    validated_session_id.to_string()
+                }
+                None => "global".to_string(),
+            };
+
+            // Stamp the message once here so every listener shares the same bytes.
+            let outgoing = Arc::new(PreparedMessage::new(&RadioMessage::Chat {
+                room: room.clone(),
+                from: validated_session_id.to_string(),
+                text: body.to_string(),
+                server_timestamp_ms: now_ms(),
+            }));
+
+            if room == "global" {
+                match state.global_broadcast_tx.send(outgoing) {
+                    Ok(n) => tracing::debug!(recipients = n, "Global chat sent"),
+                    Err(_) => tracing::debug!("Global chat sent but nobody is connected"),
+                }
+            } else {
+                // One send covers the whole room. Listeners are already
+                // subscribed to this channel from tuning in, and the broadcaster
+                // picks it up through the own room branch in the send task.
+                match state.broadcast_channels.get(&room) {
+                    Some(tx) => match tx.send(outgoing) {
+                        Ok(n) => tracing::debug!(room = %room, recipients = n, "Room chat sent"),
+                        Err(_) => tracing::debug!(room = %room, "Room chat sent but the room is empty"),
+                    },
+                    None => {
+                        // Room went away between tuning in and now, for instance
+                        // the broadcaster just stopped. Drop it quietly.
+                        tracing::debug!(room = %room, "Room chat dropped, no channel");
+                    }
+                }
+            }
         }
 
         _ => {

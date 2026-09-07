@@ -1,12 +1,16 @@
 stargzr.jumpingcrab.com {
-    handle /api* {
-        reverse_proxy 0.0.0.0:8084
-    }
-    handle /stargzr* {
-        reverse_proxy 0.0.0.0:8083 {
-            # Pass the real client IP to the backend so rate limiting works correctly.
-            # Without this, all requests appear to come from 0.0.0.1 (the proxy itself).
-            header_up X-Real-IP {remote_host}
-        }
-    }
+	handle /api* {
+		reverse_proxy 0.0.0.0:8084
+	}
+	handle /stargzr* {
+		reverse_proxy 0.0.0.0:8083 {
+			# Pass the real client IP to the backend so rate limiting works correctly.
+			# Without this, all requests appear to come from 0.0.0.1 (the proxy itself).
+			header_up X-Real-IP {remote_host}
+		}
+	}
 }
+
+
+# PS C:\Users\omers\Projects\stargzr> Remove-Item -Recurse -Force "$env:AppData\Caddy\certificates\acme-v02.api.letsencrypt.org-directory\stargzr.jumpingcrab.com" -ErrorAction SilentlyContinue
+# PS C:\Users\omers\Projects\stargzr> caddy fmt --overwrite
