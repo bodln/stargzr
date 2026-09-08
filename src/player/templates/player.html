@@ -133,9 +133,10 @@
           />
           <span
             >🎯 Perfect Sync mode (locks your playback to the broadcaster's
-            clock so two rooms on different networks stay in phase; tuning in and
-            resyncs take a moment longer, and a few ms at the start of a track
-            may be clipped)</span
+            clock so two rooms on different networks stay in phase; output
+            latency is measured automatically, tuning in and resyncs take a
+            moment longer, and a few ms at the start of a track may be
+            clipped)</span
           >
         </label>
         <label
@@ -148,17 +149,17 @@
             color: #666;
           "
         >
-          Audio offset
+          Extra trim
           <input
             type="number"
             id="perfect-sync-offset"
-            step="10"
+            step="5"
             min="-2000"
             max="2000"
             value="0"
             style="width: 72px; padding: 2px 4px"
           />
-          ms (positive = your audio lags, e.g. Bluetooth headphones; tune by ear)
+          ms (normally 0 — leave alone unless the automatic lock still sounds off)
         </label>
       </div>
 
