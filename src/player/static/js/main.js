@@ -93,7 +93,8 @@ const btUnmuteOnPlaying = () => {
 const perfectToggle = document.getElementById("perfect-sync-toggle");
 const perfectOffsetInput = document.getElementById("perfect-sync-offset");
 if (perfectToggle) {
-  perfectToggle.checked = localStorage.getItem("perfect_sync") === "true";
+  // On by default; only an explicit opt-out sticks.
+  perfectToggle.checked = localStorage.getItem("perfect_sync") !== "false";
   perfectToggle.addEventListener("change", () => {
     localStorage.setItem("perfect_sync", perfectToggle.checked);
     if (window.player) window.player.perfectSync = perfectToggle.checked;

@@ -68,6 +68,12 @@ pub struct BroadcastState {
     // Added to playback_time in outgoing Sync messages so late joiners land near the live position.
     // Zero until the first Pong arrives.
     pub transmission_latency_ms: u64,
+    // The broadcaster's own audio output latency in ms (decoder clock to speaker),
+    // as it measures locally. Passed through in Sync so a Perfect Sync listener
+    // can line up on what the broadcaster *hears*, not just its decoder position.
+    // Zero until the broadcaster reports one.
+    #[serde(default)]
+    pub broadcaster_out_latency_ms: u64,
     // Account name of whoever is broadcasting, filled in fresh on every analytics
     // push from the session to username map. None when they are not logged in.
     #[serde(default)]
@@ -175,6 +181,10 @@ pub enum RadioMessage {
         playback_time: f64,
         is_playing: bool,
         server_timestamp_ms: u128,
+        /// The broadcaster's own audio output latency in ms, so a Perfect Sync
+        /// listener can line up on what the broadcaster hears. 0 if unknown.
+        #[serde(default)]
+        broadcaster_out_latency_ms: u64,
     },
 
     /// Broadcaster sends this every 2-3 seconds to report its current playback_time.
@@ -209,6 +219,9 @@ pub enum RadioMessage {
         media_index: usize,
         playback_time: f64,
         is_playing: bool,
+        /// The broadcaster's local audio output latency estimate in ms. 0 if unknown.
+        #[serde(default)]
+        out_latency_ms: u64,
     },
 
     Error {
@@ -222,6 +235,8 @@ pub enum RadioMessage {
         media_index: usize,
         playback_time: f64,
         is_playing: bool,
+        #[serde(default)]
+        out_latency_ms: u64,
     },
 
     /// Explicitly unregister a broadcaster and notify listeners

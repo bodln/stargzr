@@ -57,7 +57,8 @@ class RadioPlayer {
     // It re-anchors ONLY on a real broadcaster event (a Sync from play / pause /
     // seek / next, or a fresh media load) — between events the file just streams
     // straight at rate 1.0, no continuous DSP, so playback stays clean.
-    this.perfectSync = localStorage.getItem("perfect_sync") === "true";
+    // On by default; only an explicit "false" in storage turns it off.
+    this.perfectSync = localStorage.getItem("perfect_sync") !== "false";
     // serverClock ≈ Date.now() + clockOffset. 0 until the first probe lands.
     this.clockOffset = 0;
     this.clockReady = false;
@@ -66,8 +67,14 @@ class RadioPlayer {
     this._clockProbeTimer = null;
     this._clockRefreshTimer = null;
     // Last authoritative Sync for the broadcaster we are tuned to, kept so a
-    // media-load canplay can anchor to it.
+    // media-load canplay can anchor to it. _prevPosMsg is the one before that,
+    // used to tell a broadcaster stall from ordinary drift.
     this._lastPosMsg = null;
+    this._prevPosMsg = null;
+    // Pending precisely-timed resume (start / seek). Cleared on any newer event.
+    this._resumeTimer = null;
+    this._resumeFallback = null;
+    this._resumeRaf = 0;
     // Bare AudioContext, only for reading the output-latency estimate.
     this._audioCtx = null;
     this._outLatEwma = null; // smoothed output latency, seconds
@@ -280,24 +287,46 @@ class RadioPlayer {
     this._clockSamples = [];
     this.clockReady = false;
     this._lastPosMsg = null;
+    this._prevPosMsg = null;
+    this._cancelScheduledResume();
     if (this.audio) this.audio.playbackRate = 1.0;
   }
 
-  // Anchor the listener onto the broadcaster's live playhead. Called ONLY on a
-  // real broadcaster event (a Sync from play / pause / seek / next, or a fresh
-  // media load) — never on a timer. It does one thing: if we are meaningfully
-  // off, seek to the right spot; otherwise leave playback completely alone so
-  // the file streams straight at rate 1.0 until the next event.
+  // How far behind true phase we deliberately sit. Ideally the broadcaster's own
+  // output latency (so we match what THEY hear, not their decoder position);
+  // clamped so it's always a real, "never in front" margin even if unreported.
+  _perfectMargin(msg) {
+    const b = Number(msg && msg.broadcaster_out_latency_ms) / 1000;
+    return b > 0.005 ? Math.min(0.2, Math.max(0.04, b)) : 0.06;
+  }
+
+  // Where the listener's currentTime should sit right now: the broadcaster's
+  // live playhead + our output latency (so the *sound* lands in phase) − the
+  // margin above.
+  _perfectTarget(msg) {
+    return Math.max(
+      0,
+      this._livePos(msg) + this._perfectAheadSec() - this._perfectMargin(msg),
+    );
+  }
+
+  // Anchor the listener onto the broadcaster. Called ONLY on a real broadcaster
+  // event (a Sync from play / pause / seek / next, a media load, or the clock
+  // becoming ready) — never on a timer.
+  //   - broadcaster paused           -> pause + match position
+  //   - start-from-pause or big jump -> scheduled resume (precise, ~280 ms lag)
+  //   - small drift while playing    -> one in-place seek
+  //   - ahead because it stalled     -> leave alone, the listener plays on
   _perfectLockOn(msg) {
     if (!msg) return;
     if (this.mode !== "radio" || !this.perfectSync) return;
     if (this._loadingMediaIndex !== null) return;
     if (msg.media_index !== this.getCurrentMediaIndex()) return;
 
-    // Perfect Sync never varies playback speed.
     if (this.audio.playbackRate !== 1.0) this.audio.playbackRate = 1.0;
 
     if (!msg.is_playing) {
+      this._cancelScheduledResume();
       if (!this.audio.paused) this.audio.pause();
       const want = Math.max(0, msg.playback_time + this._perfectOffsetSec());
       if (Math.abs(this.audio.currentTime - want) > 0.15)
@@ -305,21 +334,123 @@ class RadioPlayer {
       return;
     }
 
-    const expected = Math.max(0, this._livePos(msg) + this._perfectAheadSec());
+    const target = this._perfectTarget(msg);
+    const err = this.audio.currentTime - target; // >0 => ahead of target
 
-    if (this.audio.paused) {
-      this.audio.currentTime = expected;
-      this._radioPlay();
+    // Broadcaster stalled since the last frame and we ran ahead — expected,
+    // leave playback alone.
+    if (err > 0.12 && err <= 5 && this._broadcasterWasStalling(msg)) {
+      this._cancelScheduledResume();
       return;
     }
 
-    const err = this.audio.currentTime - expected; // >0 => we are ahead
-    if (Math.abs(err) > 0.06) {
-      this.audio.currentTime = expected;
+    // A start-from-pause or a real reposition (seek / big desync): resume at a
+    // precisely timed instant so the seek + decode + play latency is out of the
+    // sync equation. Costs a short deliberate lag, fine for a start or seek.
+    if (this.audio.paused || Math.abs(err) > 0.5) {
+      this._scheduledResume(msg);
+      return;
+    }
+
+    // Small drift while playing: one in-place seek, lands a hair behind, never
+    // in front.
+    this._cancelScheduledResume();
+    if (err < -0.12 || err > 0.12) {
+      this.audio.currentTime = target;
       debugLog(
-        `Perfect Sync re-anchor: was ${err > 0 ? "+" : ""}${(err * 1000).toFixed(0)}ms off`,
+        `Perfect Sync ${err > 0 ? "pull-back" : "catch-up"}: ${(err * 1000).toFixed(0)}ms`,
       );
     }
+  }
+
+  // Park the decoder where the broadcaster WILL be a short lead from now, keep
+  // it paused (silent), then begin playback exactly at that wall-clock instant.
+  // The parked seek pre-buffers the region during the lead; at fire time we
+  // re-seek to the position for the real instant (covering any lateness) and
+  // play, which is near-instant off the warm buffer.
+  _scheduledResume(msg) {
+    this._cancelScheduledResume();
+    const LEAD_MS = 280;
+    const dur = isFinite(this.audio.duration) ? this.audio.duration : Infinity;
+    const outAhead = this._perfectAheadSec();
+    const margin = this._perfectMargin(msg);
+    const baseTs = Number(msg.server_timestamp_ms);
+    const basePos = Number(msg.playback_time);
+
+    const targetAt = (whenLocalMs) => {
+      const age = this.clockReady
+        ? Math.max(
+            0,
+            Math.min(30, (whenLocalMs + this.clockOffset - baseTs) / 1000),
+          )
+        : 0;
+      const t = basePos + age + outAhead - margin;
+      return Math.max(0, Math.min(t, dur - 0.05));
+    };
+
+    const tResume = Date.now() + LEAD_MS;
+    this.audio.pause();
+    this.audio.playbackRate = 1.0;
+    this.audio.currentTime = targetAt(tResume);
+    debugLog(
+      `Perfect Sync scheduled resume in ${LEAD_MS}ms -> ~${this.audio.currentTime.toFixed(3)}s`,
+    );
+
+    let fired = false;
+    const fire = () => {
+      if (fired) return;
+      fired = true;
+      this._cancelScheduledResume();
+      if (this.mode !== "radio" || !this.perfectSync) return;
+      if (msg.media_index !== this.getCurrentMediaIndex()) return;
+      // Re-seek for the actual instant (covers a late fire), then play off the
+      // now-warm buffer.
+      this.audio.currentTime = targetAt(Date.now());
+      this._radioPlay();
+    };
+
+    // Coarse wait, then a rAF spin over the last stretch to hit the instant.
+    // rAF stalls in a hidden tab, so a hard fallback timer runs alongside it.
+    this._resumeTimer = setTimeout(() => {
+      this._resumeFallback = setTimeout(fire, 150);
+      const spin = () => {
+        if (fired) return;
+        if (Date.now() >= tResume - 1) return fire();
+        this._resumeRaf = requestAnimationFrame(spin);
+      };
+      spin();
+    }, Math.max(0, LEAD_MS - 50));
+  }
+
+  _cancelScheduledResume() {
+    if (this._resumeTimer) {
+      clearTimeout(this._resumeTimer);
+      this._resumeTimer = null;
+    }
+    if (this._resumeFallback) {
+      clearTimeout(this._resumeFallback);
+      this._resumeFallback = null;
+    }
+    if (this._resumeRaf) {
+      cancelAnimationFrame(this._resumeRaf);
+      this._resumeRaf = 0;
+    }
+  }
+
+  // True when the broadcaster's playhead advanced clearly less than wall-clock
+  // time between the previous frame and this one (a buffering stall or a slow
+  // tab), as opposed to a backward scrub or normal playback. Cheap: two
+  // subtractions off the frames we already keep.
+  _broadcasterWasStalling(msg) {
+    const prev = this._prevPosMsg;
+    if (!prev || prev.media_index !== msg.media_index) return false;
+    if (!prev.is_playing || !msg.is_playing) return false;
+    const dtWall =
+      (Number(msg.server_timestamp_ms) - Number(prev.server_timestamp_ms)) / 1000;
+    const dtMedia = msg.playback_time - prev.playback_time;
+    // Needs a real gap between frames, the media not to have gone backward, and
+    // it to have fallen at least 0.3 s behind the wall clock.
+    return dtWall > 0.5 && dtMedia > -0.05 && dtMedia < dtWall - 0.3;
   }
 
   isMobile() {
@@ -661,6 +792,7 @@ class RadioPlayer {
             media_index: this.getCurrentMediaIndex(),
             playback_time: this.audio.currentTime,
             is_playing: !this.audio.paused,
+            out_latency_ms: Math.round(this._outputLatencySec() * 1000),
           };
           debugLog(
             `Resuming broadcast: media ${initMsg.media_index}, time ${initMsg.playback_time.toFixed(2)}s`,
@@ -769,8 +901,10 @@ class RadioPlayer {
     if (this.mode !== "radio") return;
 
     if (msg.type === "Sync") {
-      if (this.perfectSync && msg.broadcaster_id === this.tunedBroadcaster)
+      if (this.perfectSync && msg.broadcaster_id === this.tunedBroadcaster) {
+        this._prevPosMsg = this._lastPosMsg;
         this._lastPosMsg = msg;
+      }
       clearTimeout(this.syncTimer);
       this.syncTimer = setTimeout(() => this.syncToBroadcaster(msg), 80);
     }
@@ -863,29 +997,25 @@ class RadioPlayer {
           () => {
             this._loadingMediaIndex = null;
 
-            // Perfect Sync: re-derive the live playhead now, at canplay time,
-            // from the freshest Sync we hold, seek there, and start. No extra
-            // lead (that just leaves the listener "in front"). _livePos already
-            // folds in however long the load took. Once playing it streams
-            // straight until the next broadcaster event.
+            // Perfect Sync: on a new track, if the broadcaster is playing, do a
+            // scheduled resume off the freshest Sync — precise, at the cost of a
+            // short lag on top of the load. If paused, just match its position.
             if (perfect) {
               const ref =
                 this._lastPosMsg &&
                 this._lastPosMsg.media_index === media_index
                   ? this._lastPosMsg
                   : msg;
-              const dur = isFinite(this.audio.duration)
-                ? this.audio.duration
-                : Infinity;
-              let target = this._pendingIsPlaying
-                ? this._livePos(ref) + this._perfectAheadSec()
-                : ref.playback_time + this._perfectOffsetSec();
-              if (!(target < dur)) target = Math.max(0, dur - 0.1);
-              this.audio.currentTime = Math.max(0, target);
-              debugLog(
-                `Perfect Sync media switch, starting at ${this.audio.currentTime.toFixed(3)}s`,
-              );
-              if (this._pendingIsPlaying) this._radioPlay();
+              if (this._pendingIsPlaying) {
+                this._scheduledResume(ref);
+              } else {
+                const dur = isFinite(this.audio.duration)
+                  ? this.audio.duration
+                  : Infinity;
+                let t = ref.playback_time + this._perfectOffsetSec();
+                if (!(t < dur)) t = Math.max(0, dur - 0.1);
+                this.audio.currentTime = Math.max(0, t);
+              }
               return;
             }
 
@@ -960,22 +1090,20 @@ class RadioPlayer {
     this.audio.addEventListener(
       "canplay",
       () => {
-        // Perfect Sync: anchor to the freshest Sync for this track if we have
-        // one, else start at seekTo (near the top) and let the next Sync anchor
-        // us. Then it streams straight until the next broadcaster event.
+        // Perfect Sync: scheduled resume off the freshest Sync for this track if
+        // we have one; else start near the top and let the next Sync anchor us.
         if (perfect) {
           const ref =
             this._lastPosMsg && this._lastPosMsg.media_index === idx
               ? this._lastPosMsg
               : null;
-          const start = ref
-            ? Math.max(0, this._livePos(ref) + this._perfectAheadSec())
-            : Math.max(0, seekTo);
-          this.audio.currentTime = start;
-          this._radioPlay();
-          debugLog(
-            `AutoNext (Perfect Sync): media ${idx} starting at ${start.toFixed(3)}s`,
-          );
+          if (ref) {
+            this._scheduledResume(ref);
+          } else {
+            this.audio.currentTime = Math.max(0, seekTo);
+            this._radioPlay();
+          }
+          debugLog(`AutoNext (Perfect Sync): media ${idx}`);
           return;
         }
         this.audio.currentTime = seekTo;
@@ -1051,6 +1179,7 @@ class RadioPlayer {
     this.tunedBroadcaster = broadcasterId;
     this._tuneInSentAt = Date.now();
     this._lastPosMsg = null;
+    this._prevPosMsg = null;
 
     // Perfect Sync: prime the clock estimate before the first Sync lands and
     // keep it refreshed for the life of the tune in.
@@ -1207,6 +1336,11 @@ class RadioPlayer {
     this.isBroadcasting = true;
     debugLog(`Broadcasting as: ${this.sessionId}`);
 
+    // Measure our own output latency so listeners on Perfect Sync can line up on
+    // what we hear, not just our decoder position. Cheap: a bare AudioContext.
+    this._ensureAudioCtx();
+    this._primeLatency();
+
     if (this.isMobile())
       document.getElementById("mobile-warning").classList.remove("hidden");
     this.requestWakeLock();
@@ -1233,6 +1367,7 @@ class RadioPlayer {
           media_index: this.getCurrentMediaIndex(),
           playback_time: this.audio.currentTime,
           is_playing: !this.audio.paused,
+          out_latency_ms: Math.round(this._outputLatencySec() * 1000),
         };
         debugLog(
           `Broadcasting: media ${msg.media_index}, time ${msg.playback_time.toFixed(2)}s`,
@@ -1270,6 +1405,7 @@ class RadioPlayer {
       media_index: this.getCurrentMediaIndex(),
       playback_time: this.audio.currentTime,
       is_playing: !this.audio.paused,
+      out_latency_ms: Math.round(this._outputLatencySec() * 1000),
     };
     debugLog(
       `Starting broadcast: media ${initMsg.media_index}, time ${initMsg.playback_time.toFixed(2)}s`,

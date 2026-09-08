@@ -398,6 +398,7 @@ async fn handle_client_message(
                 playback_time: adjusted_playback_time,
                 is_playing: b_state.is_playing,
                 server_timestamp_ms: now_ms(),
+                broadcaster_out_latency_ms: b_state.broadcaster_out_latency_ms,
             };
 
             tuned_tx.send(Some(broadcaster_id.clone())).map_err(|_| {
@@ -440,6 +441,7 @@ async fn handle_client_message(
             media_index,
             playback_time,
             is_playing,
+            out_latency_ms,
         } => {
             crate::player::metrics::inc_messages("BroadcastUpdate");
             ensure_same_session(&broadcaster_id, validated_session_id)?;
@@ -507,6 +509,17 @@ async fn handle_client_message(
                     .unwrap_or_else(|| format!("Unknown media #{}", media_index))
             };
 
+            // Keep the last non-zero output-latency figure the broadcaster reported.
+            let broadcaster_out_latency_ms = if out_latency_ms > 0 {
+                out_latency_ms
+            } else {
+                state
+                    .broadcast_states
+                    .get(&broadcaster_id)
+                    .map(|b| b.broadcaster_out_latency_ms)
+                    .unwrap_or(0)
+            };
+
             // Update the server-side broadcast state (raw playback_time, not adjusted)
             let new_state = BroadcastState {
                 broadcaster_id: broadcaster_id.clone(),
@@ -517,6 +530,7 @@ async fn handle_client_message(
                 server_timestamp_ms: server_ts,
                 listener_count,
                 transmission_latency_ms: latency_ms,
+                broadcaster_out_latency_ms,
                 // Filled in fresh on every analytics push, not stored here.
                 username: None,
             };
@@ -533,6 +547,7 @@ async fn handle_client_message(
                 playback_time: adjusted_playback_time,
                 is_playing,
                 server_timestamp_ms: server_ts,
+                broadcaster_out_latency_ms,
             }));
 
             // A return value of Err does not mean that future calls to send will fail
@@ -653,6 +668,7 @@ async fn handle_client_message(
             media_index,
             playback_time,
             is_playing,
+            out_latency_ms,
         } => {
             crate::player::metrics::inc_messages("StartBroadcasting");
             ensure_same_session(&broadcaster_id, validated_session_id)?;
@@ -690,6 +706,17 @@ async fn handle_client_message(
                     .unwrap_or_else(|| format!("Unknown media #{}", media_index))
             };
 
+            // Preserve a previously reported output latency on a resume.
+            let broadcaster_out_latency_ms = if out_latency_ms > 0 {
+                out_latency_ms
+            } else {
+                state
+                    .broadcast_states
+                    .get(&broadcaster_id)
+                    .map(|b| b.broadcaster_out_latency_ms)
+                    .unwrap_or(0)
+            };
+
             // Latency stays 0 until the first Pong comes back
             let new_state = BroadcastState {
                 broadcaster_id: broadcaster_id.clone(),
@@ -700,6 +727,7 @@ async fn handle_client_message(
                 server_timestamp_ms: server_ts,
                 listener_count: 0,
                 transmission_latency_ms: 0,
+                broadcaster_out_latency_ms,
                 // Filled in fresh on every analytics push, not stored here.
                 username: None,
             };
