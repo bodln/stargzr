@@ -433,51 +433,52 @@ class RadioPlayer {
 
     if (msg.type === "AutoNext") {
       if (this.mode !== "radio") return;
-      debugLog(
-        `AutoNext received: queuing media index ${msg.next_media_index} for after current track ends`,
-      );
-      this.pendingAutoNextIndex = msg.next_media_index;
+
+      const idx = msg.next_media_index;
+
+      // Already on (or past) the track AutoNext points at, nothing to queue.
+      // A later Sync keeps us aligned from here.
+      if (this.getCurrentMediaIndex() === idx) {
+        this.pendingAutoNextIndex = null;
+        this.pendingAutoNextTime = 0;
+        return;
+      }
+
+      this.pendingAutoNextIndex = idx;
       this.pendingAutoNextTime = 0;
 
-      this.audio.addEventListener(
-        "ended",
-        () => {
-          if (this.pendingAutoNextIndex === null) return;
-          const idx = this.pendingAutoNextIndex;
-          const seekTo = this.pendingAutoNextTime;
-          this.pendingAutoNextIndex = null;
-          this.pendingAutoNextTime = 0;
+      // Listeners run slightly ahead of the broadcaster (tune in latency plus
+      // the server side latency added to every Sync), so our local track has
+      // usually already ended by the time AutoNext reaches us. When it has, the
+      // 'ended' event has fired and will not fire again, so waiting on it would
+      // strand us on the finished track. Switch right now instead.
+      const finished =
+        this.audio.ended ||
+        (isFinite(this.audio.duration) &&
+          this.audio.duration > 0 &&
+          this.audio.currentTime >= this.audio.duration - 0.25);
 
-          const mediaId =
-            window.playlistManager?.getMediaIdByServerIndex(idx) ?? null;
-
-          // Switch to the correct element before loading the next media
-          const nextMedia = mediaId
-            ? window.playlistManager?.getMediaById(mediaId)
-            : window.playlistManager?.originalMedias[idx];
-          window.switchMediaElement?.(nextMedia?.media_type === "video");
-
-          this.audio.src = mediaId
-            ? `/stargzr/player/stream/id/${mediaId}`
-            : `/stargzr/player/stream/${idx}`;
-          this._updateSubtitleTrack(mediaId, nextMedia?.media_type === "video");
-          this.audio.load();
-
-          this.audio.addEventListener(
-            "canplay",
-            () => {
-              this.audio.currentTime = seekTo;
-              this._radioPlay();
-            },
-            { once: true },
-          );
-
-          debugLog(
-            `AutoNext: switched to media index ${idx} at ${seekTo.toFixed(2)}s after local track ended`,
-          );
-        },
-        { once: true },
-      );
+      if (finished) {
+        debugLog(
+          `AutoNext received after local track already ended, switching to media ${idx} now`,
+        );
+        this._switchToAutoNext(idx, this.pendingAutoNextTime);
+      } else {
+        debugLog(
+          `AutoNext received: queuing media index ${idx} for when the current track ends`,
+        );
+        this.audio.addEventListener(
+          "ended",
+          () => {
+            if (this.pendingAutoNextIndex === null) return;
+            this._switchToAutoNext(
+              this.pendingAutoNextIndex,
+              this.pendingAutoNextTime,
+            );
+          },
+          { once: true },
+        );
+      }
       return;
     }
 
@@ -602,6 +603,43 @@ class RadioPlayer {
       if (is_playing) this._radioPlay();
       if (!is_playing && !this.audio.paused) this.audio.pause();
     }
+  }
+
+  // Loads the media an AutoNext pointed at and starts playback from seekTo.
+  // Shared by both AutoNext paths: the local track already ended before the
+  // message arrived, or it ended afterwards and this runs from the 'ended'
+  // handler. Clears the pending state so a stale 'ended' listener that fires
+  // later is a no-op.
+  _switchToAutoNext(idx, seekTo) {
+    this.pendingAutoNextIndex = null;
+    this.pendingAutoNextTime = 0;
+
+    const mediaId = window.playlistManager?.getMediaIdByServerIndex(idx) ?? null;
+    const nextMedia = mediaId
+      ? window.playlistManager?.getMediaById(mediaId)
+      : window.playlistManager?.originalMedias[idx];
+
+    // Switch to the correct element before loading the next media
+    window.switchMediaElement?.(nextMedia?.media_type === "video");
+
+    this.audio.src = mediaId
+      ? `/stargzr/player/stream/id/${mediaId}`
+      : `/stargzr/player/stream/${idx}`;
+    this._updateSubtitleTrack(mediaId, nextMedia?.media_type === "video");
+    this.audio.load();
+
+    this.audio.addEventListener(
+      "canplay",
+      () => {
+        this.audio.currentTime = seekTo;
+        this._radioPlay();
+      },
+      { once: true },
+    );
+
+    debugLog(
+      `AutoNext: switched to media index ${idx} at ${seekTo.toFixed(2)}s`,
+    );
   }
 
   tuneIn(broadcasterId) {
