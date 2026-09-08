@@ -50,8 +50,195 @@ class RadioPlayer {
     // Whether the listener has manually muted their own audio
     this.isMuted = false;
 
+    // ── Perfect Sync mode ──────────────────────────────────────────────
+    // Opt in, persisted like Bluetooth mode. When on, the listener locks its
+    // playback clock to the broadcaster's using an estimated client<->server
+    // clock offset plus the per frame transit age, and trims residual drift
+    // with tiny playbackRate nudges instead of audible seeks. Everything the
+    // normal path does still applies when this is off.
+    this.perfectSync = localStorage.getItem("perfect_sync") === "true";
+    // serverClock ≈ Date.now() + clockOffset. 0 until the first probe lands.
+    this.clockOffset = 0;
+    this.clockReady = false;
+    this.clockRtt = null;
+    this._clockSamples = [];
+    this._clockProbeTimer = null;
+    this._clockRefreshTimer = null;
+    // Timer that returns playbackRate to 1.0 after a nudge.
+    this._rateRestoreTimer = null;
+    // Last authoritative position frame (Sync or PerfectPositionSync) for the
+    // broadcaster we are tuned to. Used to lock on right after a media switch.
+    this._lastPosMsg = null;
+
     debugLog(`Initialized with session ID: ${sessionId}`);
     this.setupPageVisibilityHandling();
+  }
+
+  // ── Perfect Sync helpers ─────────────────────────────────────────────
+
+  // Manual fine tune (milliseconds) the user can dial in by ear, mainly for
+  // Bluetooth output latency which cannot be measured from JS. Positive means
+  // "my audio comes out late", so we aim further ahead in the track.
+  _perfectOffsetSec() {
+    const v = parseInt(localStorage.getItem("perfect_sync_offset_ms"), 10);
+    return Number.isFinite(v) ? v / 1000 : 0;
+  }
+
+  // Best estimate of the server clock right now.
+  serverNow() {
+    return Date.now() + this.clockOffset;
+  }
+
+  // Where the broadcaster's playhead is at this instant, from a position frame.
+  // playback_time already carries the broadcaster->server leg (server side),
+  // and serverNow() - server_timestamp_ms is the server->listener leg plus
+  // whatever time has passed since the frame was stamped.
+  _livePos(msg) {
+    const base = msg.playback_time;
+    if (!msg.is_playing) return base;
+    // Without a clock estimate, serverNow() is on the local clock while
+    // server_timestamp_ms is on the server's, so the difference is meaningless.
+    // Fall back to the stamped position and let the next frame, once the clock
+    // is ready, pull us the rest of the way.
+    if (!this.clockReady) return base;
+    const ageSec = Math.max(0, (this.serverNow() - Number(msg.server_timestamp_ms)) / 1000);
+    // A wildly large age means a bad sample slipped through; clamp so we never
+    // launch playback minutes deep into a track.
+    return base + Math.min(ageSec, 30);
+  }
+
+  // NTP style clock probe burst. Sends `count` ClockProbe frames spaced `gapMs`
+  // apart; handleRadioMessage feeds the echoes back into _recordClockSample.
+  // Safe to call repeatedly, it just refreshes the estimate.
+  syncClock(count = 6, gapMs = 150) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    clearInterval(this._clockProbeTimer);
+    let sent = 0;
+    const fire = () => {
+      if (
+        sent >= count ||
+        !this.ws ||
+        this.ws.readyState !== WebSocket.OPEN
+      ) {
+        clearInterval(this._clockProbeTimer);
+        this._clockProbeTimer = null;
+        return;
+      }
+      sent++;
+      this.ws.send(
+        JSON.stringify({ type: "ClockProbe", client_ts: Date.now() }),
+      );
+    };
+    fire();
+    this._clockProbeTimer = setInterval(fire, gapMs);
+  }
+
+  // One ClockEcho worth of data. Keeps a small window of samples and adopts the
+  // offset from the lowest RTT one, which is the least jitter-contaminated.
+  _recordClockSample(clientTs, serverTs) {
+    const now = Date.now();
+    const rtt = now - clientTs;
+    if (rtt < 0 || rtt > 5000) return; // nonsense sample, drop it
+    // Server time at the midpoint of the round trip maps to now.
+    const offset = serverTs + rtt / 2 - now;
+    this._clockSamples.push({ rtt, offset });
+    if (this._clockSamples.length > 12) this._clockSamples.shift();
+
+    const best = this._clockSamples.reduce((a, b) => (b.rtt < a.rtt ? b : a));
+    this.clockOffset = best.offset;
+    this.clockRtt = best.rtt;
+    this.clockReady = true;
+    debugLog(
+      `Clock sample rtt=${rtt}ms offset=${offset.toFixed(1)}ms (using rtt=${best.rtt}ms offset=${best.offset.toFixed(1)}ms)`,
+    );
+  }
+
+  // Start Perfect Sync bookkeeping for a tune in: prime the clock estimate and
+  // keep refreshing it so it tracks slow drift between the two machines.
+  _startPerfectSync() {
+    this.syncClock();
+    clearInterval(this._clockRefreshTimer);
+    this._clockRefreshTimer = setInterval(() => this.syncClock(3, 200), 20000);
+  }
+
+  // Tear down Perfect Sync timers and undo any rate nudge. Called on tune out
+  // and disconnect so a normal-mode session never inherits a stretched clock.
+  _stopPerfectSync() {
+    clearInterval(this._clockProbeTimer);
+    clearInterval(this._clockRefreshTimer);
+    clearTimeout(this._rateRestoreTimer);
+    this._clockProbeTimer = null;
+    this._clockRefreshTimer = null;
+    this._rateRestoreTimer = null;
+    this._clockSamples = [];
+    this.clockReady = false;
+    this._lastPosMsg = null;
+    if (this.audio) this.audio.playbackRate = 1.0;
+  }
+
+  // Pull the listener onto the broadcaster's playhead from a position frame.
+  // Large gap: one quick seek (muted under Bluetooth mode). Small gap: a brief
+  // sub-6% playbackRate change that eases back into phase inaudibly. Tiny gap:
+  // leave it alone. Only runs while both sides are playing the same media.
+  _perfectLockOn(msg) {
+    if (this.mode !== "radio" || !this.perfectSync) return;
+    if (this._loadingMediaIndex !== null) return;
+    if (msg.media_index !== this.getCurrentMediaIndex()) return;
+
+    const off = this._perfectOffsetSec();
+
+    if (!msg.is_playing) {
+      if (!this.audio.paused) this.audio.pause();
+      this.audio.playbackRate = 1.0;
+      const want = msg.playback_time + off;
+      if (Math.abs(this.audio.currentTime - want) > 0.25) this.audio.currentTime = want;
+      return;
+    }
+
+    const expected = this._livePos(msg) + off;
+
+    if (this.audio.paused) {
+      this.audio.currentTime = expected;
+      this.audio.playbackRate = 1.0;
+      this._radioPlay();
+      return;
+    }
+
+    // No clock estimate yet: don't chase drift off a position we can't trust,
+    // just keep playing. The next frame after the clock settles corrects us.
+    if (!this.clockReady) {
+      this.audio.playbackRate = 1.0;
+      return;
+    }
+
+    const err = this.audio.currentTime - expected; // >0 => listener is ahead
+    const drift = Math.abs(err);
+
+    if (drift > 0.6) {
+      // Too far off to fix smoothly. Snap, muting the blip under Bluetooth mode.
+      const btOn = document.getElementById("bt-mode-toggle")?.checked;
+      if (btOn && !this.isMuted) this.audio.muted = true;
+      this.audio.currentTime = expected + 0.05;
+      this.audio.playbackRate = 1.0;
+      if (btOn && !this.isMuted)
+        setTimeout(() => {
+          if (!this.isMuted) this.audio.muted = false;
+        }, 250);
+      debugLog(`Perfect Sync hard snap, drift was ${err.toFixed(3)}s`);
+    } else if (drift > 0.012) {
+      // Ease back over roughly a second. Negative err (we are behind) speeds up.
+      const rate = Math.min(1.06, Math.max(0.94, 1 - err / 1.1));
+      this.audio.playbackRate = rate;
+      clearTimeout(this._rateRestoreTimer);
+      this._rateRestoreTimer = setTimeout(() => {
+        this.audio.playbackRate = 1.0;
+      }, 1200);
+      debugLog(`Perfect Sync nudge rate=${rate.toFixed(3)} drift=${err.toFixed(3)}s`);
+    } else {
+      this.audio.playbackRate = 1.0;
+      clearTimeout(this._rateRestoreTimer);
+      this._rateRestoreTimer = null;
+    }
   }
 
   isMobile() {
@@ -317,6 +504,7 @@ class RadioPlayer {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    this._stopPerfectSync();
     if (this.isBroadcasting) this.stopBroadcasting();
 
     if (this.mode === "radio" && this.ws?.readyState === WebSocket.OPEN) {
@@ -337,12 +525,38 @@ class RadioPlayer {
 
   handleRadioMessage(msg) {
     if (msg.type === "Sync" && msg.broadcaster_id === this.sessionId) return;
+    if (
+      msg.type === "PerfectPositionSync" &&
+      msg.broadcaster_id === this.sessionId
+    )
+      return;
 
     // Bounce server_ts straight back so the server can time the round trip.
     // We do no math here, the server owns the measurement.
     if (msg.type === "Ping") {
       if (this.ws?.readyState === WebSocket.OPEN) {
         this.ws.send(JSON.stringify({ type: "Pong", server_ts: msg.server_ts }));
+      }
+      return;
+    }
+
+    // Clock probe echo. Only meaningful in Perfect Sync mode; feed it to the
+    // offset estimator and stop.
+    if (msg.type === "ClockEcho") {
+      this._recordClockSample(msg.client_ts, msg.server_ts);
+      return;
+    }
+
+    // Fresh authoritative position, sent every heartbeat while in Perfect Sync.
+    // Normal-mode listeners ignore it and keep riding the sparse Syncs.
+    if (msg.type === "PerfectPositionSync") {
+      if (
+        this.perfectSync &&
+        this.mode === "radio" &&
+        msg.broadcaster_id === this.tunedBroadcaster
+      ) {
+        this._lastPosMsg = msg;
+        this._perfectLockOn(msg);
       }
       return;
     }
@@ -493,6 +707,8 @@ class RadioPlayer {
     if (this.mode !== "radio") return;
 
     if (msg.type === "Sync") {
+      if (this.perfectSync && msg.broadcaster_id === this.tunedBroadcaster)
+        this._lastPosMsg = msg;
       clearTimeout(this.syncTimer);
       this.syncTimer = setTimeout(() => this.syncToBroadcaster(msg), 80);
     }
@@ -501,20 +717,31 @@ class RadioPlayer {
   syncToBroadcaster(msg) {
     let { media_index, playback_time, is_playing } = msg;
 
+    // Perfect Sync owns position via the clock offset and the per frame age, so
+    // it uses none of the coarse compensations below.
+    const perfect =
+      this.perfectSync &&
+      this.mode === "radio" &&
+      msg.broadcaster_id === this.tunedBroadcaster;
+
     // First Sync after TuneIn: compensate for server to listener transit time.
     // Date.now() - _tuneInSentAt is a whole round trip, TuneIn out and Sync back,
     // and we only want the return leg, so take half of it.
     if (this._tuneInSentAt !== null) {
-      const elapsed = (Date.now() - this._tuneInSentAt) / 1000 / 2;
-      this._tuneInSentAt = null;
-      const duration = isFinite(this.audio.duration)
-        ? this.audio.duration
-        : Infinity;
-      const adjusted = playback_time + elapsed;
-      if (adjusted < duration) playback_time = adjusted;
-      debugLog(
-        `TuneIn latency compensation: +${elapsed.toFixed(3)}s to ${playback_time.toFixed(2)}s`,
-      );
+      if (perfect) {
+        this._tuneInSentAt = null;
+      } else {
+        const elapsed = (Date.now() - this._tuneInSentAt) / 1000 / 2;
+        this._tuneInSentAt = null;
+        const duration = isFinite(this.audio.duration)
+          ? this.audio.duration
+          : Infinity;
+        const adjusted = playback_time + elapsed;
+        if (adjusted < duration) playback_time = adjusted;
+        debugLog(
+          `TuneIn latency compensation: +${elapsed.toFixed(3)}s to ${playback_time.toFixed(2)}s`,
+        );
+      }
     }
 
     // Broadcaster is still on the pending AutoNext media: update position only
@@ -573,6 +800,35 @@ class RadioPlayer {
           "canplay",
           () => {
             this._loadingMediaIndex = null;
+
+            // Perfect Sync: re-derive the live playhead now, at canplay time,
+            // from the freshest position frame we hold, then aim a hair ahead
+            // so playback that starts a few ms late still lands in phase. The
+            // opening moments may be clipped, which Perfect Sync accepts.
+            if (perfect) {
+              const ref =
+                this._lastPosMsg &&
+                this._lastPosMsg.media_index === media_index
+                  ? this._lastPosMsg
+                  : msg;
+              const dur = isFinite(this.audio.duration)
+                ? this.audio.duration
+                : Infinity;
+              let target = this._pendingIsPlaying
+                ? this._livePos(ref) + 0.15 + this._perfectOffsetSec()
+                : ref.playback_time + this._perfectOffsetSec();
+              if (!(target < dur)) target = Math.max(0, dur - 0.1);
+              this.audio.currentTime = Math.max(0, target);
+              debugLog(
+                `Perfect Sync media switch, starting at ${this.audio.currentTime.toFixed(3)}s`,
+              );
+              if (this._pendingIsPlaying) this._radioPlay();
+              // Tighten up once the pipeline has settled and again on the next
+              // heartbeat frame.
+              setTimeout(() => this._perfectLockOn(this._lastPosMsg || ref), 350);
+              return;
+            }
+
             let seekTo =
               this._pendingSeekTime < 1.0 ? 0 : this._pendingSeekTime;
 
@@ -599,6 +855,14 @@ class RadioPlayer {
       }
     } else {
       this._loadingMediaIndex = null;
+
+      // Perfect Sync: no blunt currentTime assignment. Let the lock-on routine
+      // decide between a nudge and a snap so a routine Sync never jolts audio.
+      if (perfect) {
+        this._perfectLockOn(msg);
+        return;
+      }
+
       this.audio.currentTime = playback_time;
       if (is_playing) this._radioPlay();
       if (!is_playing && !this.audio.paused) this.audio.pause();
@@ -628,9 +892,33 @@ class RadioPlayer {
     this._updateSubtitleTrack(mediaId, nextMedia?.media_type === "video");
     this.audio.load();
 
+    const perfect =
+      this.perfectSync &&
+      this.mode === "radio" &&
+      this.tunedBroadcaster != null;
+
     this.audio.addEventListener(
       "canplay",
       () => {
+        // Perfect Sync: if we already have a position frame for the new track,
+        // lock straight onto it; otherwise start near the top and let the next
+        // heartbeat frame lock us in. Same "may clip the intro" trade as a seek.
+        if (perfect) {
+          const ref =
+            this._lastPosMsg && this._lastPosMsg.media_index === idx
+              ? this._lastPosMsg
+              : null;
+          const start = ref
+            ? Math.max(0, this._livePos(ref) + 0.15 + this._perfectOffsetSec())
+            : Math.max(0, seekTo);
+          this.audio.currentTime = start;
+          this._radioPlay();
+          if (ref) setTimeout(() => this._perfectLockOn(this._lastPosMsg || ref), 350);
+          debugLog(
+            `AutoNext (Perfect Sync): media ${idx} starting at ${start.toFixed(3)}s`,
+          );
+          return;
+        }
         this.audio.currentTime = seekTo;
         this._radioPlay();
       },
@@ -703,6 +991,11 @@ class RadioPlayer {
     this.mode = "radio";
     this.tunedBroadcaster = broadcasterId;
     this._tuneInSentAt = Date.now();
+    this._lastPosMsg = null;
+
+    // Perfect Sync: prime the clock estimate before the first Sync lands and
+    // keep it refreshed for the life of the tune in.
+    if (this.perfectSync) this._startPerfectSync();
 
     debugLog(`Sending TuneIn: ${broadcasterId}`);
     this.ws.send(
@@ -724,6 +1017,9 @@ class RadioPlayer {
     this.tunedBroadcaster = null;
     this.pendingAutoNextIndex = null;
     this.pendingAutoNextTime = 0;
+
+    // Stop Perfect Sync timers and restore normal playback rate.
+    this._stopPerfectSync();
 
     document.getElementById("mode-display").textContent = "Private Mode";
     document.getElementById("mode-display").className = "mode-badge private";
@@ -1010,6 +1306,9 @@ class RadioPlayer {
     this.pendingAutoNextTime = 0;
     // Set tuneInSentAt so latency compensation runs on the fresh Sync
     this._tuneInSentAt = Date.now();
+    // Perfect Sync: refresh the clock estimate alongside the position resync so
+    // a longer, more deliberate correction is fine here.
+    if (this.perfectSync) this.syncClock();
     this.ws.send(
       JSON.stringify({ type: "TuneIn", broadcaster_id: this.tunedBroadcaster }),
     );

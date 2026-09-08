@@ -85,6 +85,42 @@ const btUnmuteOnPlaying = () => {
   }, 1000);
 };
 
+// Perfect Sync mode: lock the listener's playhead to the broadcaster's with an
+// estimated clock offset plus per-frame transit age, trimming residual drift
+// with tiny playbackRate nudges. Opt in, persisted like Bluetooth mode. The
+// heavy lifting lives in RadioPlayer; this just flips the flag and, when turned
+// on mid-listen, kicks off a fresh clock sync + resync.
+const perfectToggle = document.getElementById("perfect-sync-toggle");
+const perfectOffsetInput = document.getElementById("perfect-sync-offset");
+if (perfectToggle) {
+  perfectToggle.checked = localStorage.getItem("perfect_sync") === "true";
+  perfectToggle.addEventListener("change", () => {
+    localStorage.setItem("perfect_sync", perfectToggle.checked);
+    if (window.player) window.player.perfectSync = perfectToggle.checked;
+    debugLog(`Perfect Sync mode ${perfectToggle.checked ? "enabled" : "disabled"}`);
+    if (!window.player) return;
+    if (perfectToggle.checked) {
+      if (window.player.isInRadioMode()) {
+        window.player._startPerfectSync();
+        setTimeout(() => window.player.resync(), 400);
+      }
+    } else {
+      window.player._stopPerfectSync();
+    }
+  });
+}
+if (perfectOffsetInput) {
+  perfectOffsetInput.value =
+    parseInt(localStorage.getItem("perfect_sync_offset_ms"), 10) || 0;
+  perfectOffsetInput.addEventListener("change", () => {
+    const v = parseInt(perfectOffsetInput.value, 10) || 0;
+    const clamped = Math.max(-2000, Math.min(2000, v));
+    perfectOffsetInput.value = clamped;
+    localStorage.setItem("perfect_sync_offset_ms", clamped);
+    debugLog(`Perfect Sync manual offset set to ${clamped}ms`);
+  });
+}
+
 // Patch both elements so the seek-aware deferred play works regardless of which is active
 function patchPlay(el, originalPlay) {
   el.play = () => {

@@ -258,6 +258,37 @@ pub enum RadioMessage {
         current_state: Option<BroadcastState>,
     },
 
+    /// Perfect Sync mode only. A listener sends this with its local clock
+    /// reading so the server can echo back and let the client estimate the
+    /// client<->server clock offset and round trip time, NTP style. Cheap
+    /// enough to run a short burst on tune in and a single probe every few
+    /// seconds after that. Ignored by clients not in Perfect Sync mode.
+    ClockProbe {
+        /// The client's `Date.now()` at send time, milliseconds since epoch.
+        client_ts: u64,
+    },
+
+    /// Server's reply to ClockProbe. `client_ts` is copied straight back so the
+    /// client can pair it with the send it came from, `server_ts` is the server
+    /// clock when the echo was produced.
+    ClockEcho {
+        client_ts: u64,
+        server_ts: u64,
+    },
+
+    /// Perfect Sync mode only. Fanned out to a broadcaster's listeners on every
+    /// Heartbeat so they always have a fresh authoritative position to lock
+    /// onto, not just the Sync frames that fire on play/pause/seek. `playback_time`
+    /// already has the broadcaster->server latency folded in, same as Sync.
+    /// Listeners not in Perfect Sync mode ignore this.
+    PerfectPositionSync {
+        broadcaster_id: String,
+        media_index: usize,
+        playback_time: f64,
+        is_playing: bool,
+        server_timestamp_ms: u128,
+    },
+
     /// Broadcaster's media ended naturally; listeners should finish their
     /// current playback then start the next media from the beginning.
     /// Suppresses the normal Sync jump so listeners don't lose their last few seconds.
