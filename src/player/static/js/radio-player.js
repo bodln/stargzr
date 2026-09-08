@@ -51,13 +51,12 @@ class RadioPlayer {
     this.isMuted = false;
 
     // ── Perfect Sync mode ──────────────────────────────────────────────
-    // Opt in, persisted like Bluetooth mode. When on, the listener locks its
-    // playback clock to the broadcaster's using an estimated client<->server
-    // clock offset, the per frame transit age, and the local audio output
-    // latency, then holds phase with a PI controller on playbackRate so any
-    // residual error (imperfect latency estimate, clock rate mismatch) is
-    // driven out automatically. Everything the normal path does still applies
-    // when this is off.
+    // Opt in, persisted like Bluetooth mode. When on, the listener anchors its
+    // playhead to the broadcaster's using an estimated client<->server clock
+    // offset, the per-frame transit age, and the local audio output latency.
+    // It re-anchors ONLY on a real broadcaster event (a Sync from play / pause /
+    // seek / next, or a fresh media load) — between events the file just streams
+    // straight at rate 1.0, no continuous DSP, so playback stays clean.
     this.perfectSync = localStorage.getItem("perfect_sync") === "true";
     // serverClock ≈ Date.now() + clockOffset. 0 until the first probe lands.
     this.clockOffset = 0;
@@ -66,36 +65,12 @@ class RadioPlayer {
     this._clockSamples = [];
     this._clockProbeTimer = null;
     this._clockRefreshTimer = null;
-    // Last authoritative position frame (Sync or PerfectPositionSync) for the
-    // broadcaster we are tuned to. Used to lock on right after a media switch.
+    // Last authoritative Sync for the broadcaster we are tuned to, kept so a
+    // media-load canplay can anchor to it.
     this._lastPosMsg = null;
-
-    // PI controller state for the phase lock. _rateBias is the integral term:
-    // the standing playbackRate offset that cancels a constant drift (e.g. the
-    // two sound cards not running at exactly the same speed). Rebuilt from zero
-    // on every hard resync.
-    this._rateBias = 0;
-    this._lastFrameAt = 0;
-    this._perfectWatchdog = null;
-    // AudioContext, created only when Perfect Sync is first used.
+    // Bare AudioContext, only for reading the output-latency estimate.
     this._audioCtx = null;
     this._outLatEwma = null; // smoothed output latency, seconds
-
-    // Method 1 measurement graph. When the browser supports getOutputTimestamp()
-    // we route both media elements source -> gain(1.0) -> destination so we can
-    // read the true media position leaving the speaker and lock to *that*,
-    // instead of feed-forwarding a latency estimate. The routing is transparent
-    // (unity gain, native volume/mute still apply on modern browsers) and, since
-    // createMediaElementSource is one-shot per element, it simply stays in place
-    // if Perfect Sync is later switched off.
-    this._mediaSourceNodes = new Map(); // element -> MediaElementAudioSourceNode
-    this._perfectGain = null;
-    this._perfectGraphReady = false;
-    this._perfectGraphPending = false;
-    // Flips to true once a live speaker-position reading has succeeded, so the
-    // UI/logs can tell measured lock from estimated lock.
-    this.perfectMeasuring = false;
-    this._measuredMisses = 0;
 
     debugLog(`Initialized with session ID: ${sessionId}`);
     this.setupPageVisibilityHandling();
@@ -131,112 +106,6 @@ class RadioPlayer {
     return this._audioCtx;
   }
 
-  // Route both media elements through the context so getOutputTimestamp() can
-  // report the real speaker position. Only attempted where getOutputTimestamp
-  // exists (modern Chrome/Firefox, recent Safari) — those are also the browsers
-  // that keep the element's native volume/mute working through the graph, so
-  // the unity-gain passthrough changes nothing audible. One-shot and safe to
-  // call again; createMediaElementSource can only run once per element.
-  _ensurePerfectGraph() {
-    if (this._perfectGraphReady || this._perfectGraphPending) return this._perfectGraphReady;
-    const ctx = this._ensureAudioCtx();
-    if (!ctx || typeof ctx.getOutputTimestamp !== "function") {
-      debugLog("Perfect Sync: no getOutputTimestamp, staying on latency estimate");
-      return false;
-    }
-
-    const wire = () => {
-      try {
-        if (!this._perfectGain) {
-          this._perfectGain = ctx.createGain();
-          this._perfectGain.gain.value = 1.0;
-          this._perfectGain.connect(ctx.destination);
-        }
-        const els = [
-          document.getElementById("audio-player"),
-          document.getElementById("video-player"),
-        ].filter(Boolean);
-        for (const el of els) {
-          if (this._mediaSourceNodes.has(el)) continue;
-          try {
-            const node = ctx.createMediaElementSource(el);
-            node.connect(this._perfectGain);
-            this._mediaSourceNodes.set(el, node);
-            debugLog(`Perfect Sync: routed #${el.id} for speaker-position measurement`);
-          } catch (e) {
-            debugLog(`Perfect Sync: could not route #${el.id} (${e.message})`);
-          }
-        }
-        this._perfectGraphReady = this._mediaSourceNodes.size > 0;
-      } catch (e) {
-        debugLog(`Perfect Sync: measurement graph setup failed (${e.message})`);
-        this._perfectGraphReady = false;
-      }
-      this._perfectGraphPending = false;
-    };
-
-    // Route only once the context is actually running. Creating a
-    // MediaElementAudioSourceNode on a still-suspended context is the classic
-    // cause of the "routed element goes silent" bug on iOS. resume() was kicked
-    // off inside the user gesture by _ensureAudioCtx, so this resolves shortly.
-    if (ctx.state === "running") {
-      wire();
-    } else {
-      this._perfectGraphPending = true;
-      ctx.resume().then(wire, wire);
-    }
-    return this._perfectGraphReady;
-  }
-
-  // Live phase error at the speaker, in seconds (>0 => we are ahead), measured
-  // through the routed graph. getOutputTimestamp() pairs the media sample the
-  // DAC is emitting right now with a performance.now() stamp; from that plus the
-  // clock offset we know exactly what media position is being heard and when,
-  // and compare it to where the broadcaster is at that same instant. No latency
-  // term is added — the reading is already post-output-latency, which is the
-  // whole point. Returns null when a trustworthy reading isn't available.
-  _measuredHeardError(msg) {
-    if (!this._perfectGraphReady || !this.clockReady || !msg || !msg.is_playing)
-      return null;
-    const ctx = this._audioCtx;
-    if (!ctx || typeof ctx.getOutputTimestamp !== "function") return null;
-    if (!this._mediaSourceNodes.has(this.audio)) return null;
-
-    let ts;
-    try {
-      ts = ctx.getOutputTimestamp();
-    } catch (_) {
-      return null;
-    }
-    if (!ts || !(ts.contextTime > 0) || !(ts.performanceTime > 0)) return null;
-
-    const nowPerf = performance.now();
-    const nowDate = Date.now();
-    const ctxNow = ctx.currentTime;
-    const mediaNow = this.audio.currentTime;
-
-    // How far the generated stream is ahead of the emitted stream = the whole
-    // output pipeline (mixer, device, Bluetooth buffer).
-    const pipeline = ctxNow - ts.contextTime;
-    if (!(pipeline > 0.002) || pipeline > 0.8) return null;
-
-    // Media position currently leaving the speaker, and the wall clock (server
-    // domain) of that moment.
-    const heardMediaPos = mediaNow - pipeline;
-    const heardAgoMs = nowPerf - ts.performanceTime;
-    const heardServerMs = nowDate - heardAgoMs + this.clockOffset;
-
-    const expectedAtHeard =
-      Number(msg.playback_time) +
-      Math.min(30, Math.max(0, (heardServerMs - Number(msg.server_timestamp_ms)) / 1000)) +
-      this._perfectOffsetSec();
-
-    const err = heardMediaPos - expectedAtHeard;
-    if (!Number.isFinite(err) || Math.abs(err) > 5) return null;
-
-    this.perfectMeasuring = true;
-    return err;
-  }
 
   // Seconds between the media element's clock and sound actually leaving the
   // speakers: decode/render buffering plus the output device (USB, HDMI,
@@ -371,179 +240,86 @@ class RadioPlayer {
       ? this.clockOffset * 0.6 + avg * 0.4
       : avg;
     this.clockRtt = minRtt;
+    const wasReady = this.clockReady;
     this.clockReady = true;
-    debugLog(
-      `Clock sample rtt=${rtt}ms -> offset est ${this.clockOffset.toFixed(1)}ms (minRtt=${minRtt.toFixed(0)}ms, ${good.length}/${this._clockSamples.length} used)`,
-    );
+    if (!wasReady) {
+      debugLog(
+        `Perfect Sync: clock ready, offset ${this.clockOffset.toFixed(0)}ms (rtt ${minRtt.toFixed(0)}ms)`,
+      );
+      // The tune-in anchor may have run before the clock was ready (it fell back
+      // to the raw position). Now that it's ready, re-anchor once off the last
+      // Sync so we pick up the transit-age term we were missing.
+      if (
+        this.perfectSync &&
+        this.mode === "radio" &&
+        this._lastPosMsg &&
+        !this._loadingMediaIndex
+      )
+        this._perfectLockOn(this._lastPosMsg);
+    }
   }
 
-  // Start Perfect Sync bookkeeping for a tune in: bring up the latency probe,
-  // prime the clock estimate and keep it refreshed, and run a watchdog that
-  // returns playbackRate to 1.0 if position frames stop arriving.
+  // Bring up the latency probe and prime + keep the clock estimate fresh, so the
+  // next event-driven anchor is accurate. Nothing here touches audio.
   _startPerfectSync() {
     this._ensureAudioCtx();
-    this._ensurePerfectGraph();
-    this._rateBias = 0;
-    this._lastFrameAt = 0;
     this._outLatEwma = null;
-    this.perfectMeasuring = false;
     this._primeLatency();
     this.syncClock();
     clearInterval(this._clockRefreshTimer);
     this._clockRefreshTimer = setInterval(() => this.syncClock(3, 200), 20000);
-    // Fine-grained tick: re-run the lock four times a second off the last
-    // position frame, whose live playhead we re-extrapolate through the clock
-    // each time. This tightens the lock well past the ~2 s frame cadence. If
-    // frames have actually stopped for 6 s, release the rate so a silent
-    // stream doesn't sit permanently stretched.
-    clearInterval(this._perfectWatchdog);
-    this._perfectWatchdog = setInterval(() => {
-      if (!this.perfectSync || this.mode !== "radio") return;
-      const stale = this._lastFrameAt && Date.now() - this._lastFrameAt > 6000;
-      if (stale) {
-        if (this.audio && this.audio.playbackRate !== 1.0) {
-          debugLog("Perfect Sync: no frames for 6s, releasing rate lock");
-          this.audio.playbackRate = 1.0;
-          this._rateBias = 0;
-        }
-        return;
-      }
-      if (this._lastPosMsg && this._lastPosMsg.is_playing && !this.audio?.paused)
-        this._perfectLockOn(this._lastPosMsg);
-    }, 250);
+    if (this.audio) this.audio.playbackRate = 1.0;
   }
 
-  // Tear down Perfect Sync timers and undo any rate lock. Called on tune out
-  // and disconnect so a normal-mode session never inherits a stretched clock.
+  // Tear down the clock timers. Called on tune out / disconnect.
   _stopPerfectSync() {
     clearInterval(this._clockProbeTimer);
     clearInterval(this._clockRefreshTimer);
-    clearInterval(this._perfectWatchdog);
     this._clockProbeTimer = null;
     this._clockRefreshTimer = null;
-    this._perfectWatchdog = null;
     this._clockSamples = [];
     this.clockReady = false;
     this._lastPosMsg = null;
-    this._rateBias = 0;
-    this._lastFrameAt = 0;
-    this.perfectMeasuring = false;
     if (this.audio) this.audio.playbackRate = 1.0;
-    // The measurement graph stays wired (createMediaElementSource is one-shot
-    // and a unity passthrough is inaudible); only the control loop stops.
   }
 
-  // Pull the listener onto the broadcaster's playhead from a position frame.
-  //
-  // While both sides play the same media this runs a PI controller on
-  // playbackRate: the proportional term chases the current phase error, the
-  // integral term (_rateBias) accumulates the standing rate offset that cancels
-  // a constant drift, e.g. two sound cards not clocked at exactly the same
-  // speed or a slightly wrong output-latency figure. Because the integral term
-  // zeroes steady-state error on its own, the lock ends up as tight as the
-  // clock estimate allows, with no by-ear tuning. Only a gross error (a seek,
-  // a stall) falls back to a single hard snap.
+  // Anchor the listener onto the broadcaster's live playhead. Called ONLY on a
+  // real broadcaster event (a Sync from play / pause / seek / next, or a fresh
+  // media load) — never on a timer. It does one thing: if we are meaningfully
+  // off, seek to the right spot; otherwise leave playback completely alone so
+  // the file streams straight at rate 1.0 until the next event.
   _perfectLockOn(msg) {
     if (!msg) return;
     if (this.mode !== "radio" || !this.perfectSync) return;
     if (this._loadingMediaIndex !== null) return;
     if (msg.media_index !== this.getCurrentMediaIndex()) return;
 
-    const ahead = this._perfectAheadSec();
+    // Perfect Sync never varies playback speed.
+    if (this.audio.playbackRate !== 1.0) this.audio.playbackRate = 1.0;
 
     if (!msg.is_playing) {
       if (!this.audio.paused) this.audio.pause();
-      this.audio.playbackRate = 1.0;
-      this._rateBias = 0;
-      const want = msg.playback_time + this._perfectOffsetSec();
-      if (Math.abs(this.audio.currentTime - want) > 0.25) this.audio.currentTime = want;
+      const want = Math.max(0, msg.playback_time + this._perfectOffsetSec());
+      if (Math.abs(this.audio.currentTime - want) > 0.15)
+        this.audio.currentTime = want;
       return;
     }
 
-    const expected = this._livePos(msg) + ahead;
+    const expected = Math.max(0, this._livePos(msg) + this._perfectAheadSec());
 
     if (this.audio.paused) {
       this.audio.currentTime = expected;
-      this.audio.playbackRate = 1.0;
-      this._rateBias = 0;
       this._radioPlay();
       return;
     }
 
-    // No clock estimate yet: don't chase a phase we can't trust, keep playing.
-    // The first frame after the clock settles corrects us.
-    if (!this.clockReady) {
-      this.audio.playbackRate = 1.0;
-      return;
-    }
-
-    // Method 1: the phase error measured at the speaker, which already includes
-    // output latency and Bluetooth. When that reading isn't available (no
-    // getOutputTimestamp, routing failed, audio not flowing yet) fall back to
-    // the element clock minus the latency estimate. A brief gap in readings
-    // (getOutputTimestamp jitter) is ridden out rather than snapping to the
-    // estimate, since the two have slightly different bias.
-    const measuredErr = this._measuredHeardError(msg);
-    let err;
-    if (measuredErr != null) {
-      this.perfectMeasuring = true;
-      this._measuredMisses = 0;
-      err = measuredErr;
-    } else {
-      this._measuredMisses = (this._measuredMisses || 0) + 1;
-      if (this.perfectMeasuring && this._measuredMisses <= 8) return; // hold
-      this.perfectMeasuring = false;
-      err = this.audio.currentTime - expected;
-    }
-    // err > 0 => we are ahead
-
-    if (Math.abs(err) > 0.5) {
-      // Too far gone for the controller to reel in smoothly (a seek, a long
-      // stall). One snap, mute the blip under Bluetooth mode, reset the integral.
-      const btOn = document.getElementById("bt-mode-toggle")?.checked;
-      if (btOn && !this.isMuted) this.audio.muted = true;
-      // Shift the playhead back by the error: lands on `expected` in estimate
-      // mode and on the right speaker position in measured mode.
-      this.audio.currentTime = Math.max(0, this.audio.currentTime - err);
-      this.audio.playbackRate = 1.0;
-      this._rateBias = 0;
-      if (btOn && !this.isMuted)
-        setTimeout(() => {
-          if (!this.isMuted) this.audio.muted = false;
-        }, 250);
+    const err = this.audio.currentTime - expected; // >0 => we are ahead
+    if (Math.abs(err) > 0.06) {
+      this.audio.currentTime = expected;
       debugLog(
-        `Perfect Sync hard snap (${this.perfectMeasuring ? "measured" : "estimate"}), err was ${err.toFixed(3)}s`,
+        `Perfect Sync re-anchor: was ${err > 0 ? "+" : ""}${(err * 1000).toFixed(0)}ms off`,
       );
-      return;
     }
-
-    // PI controller, run at the 4 Hz tick rate. KP eases toward zero phase
-    // error (deliberately under-corrective per step, so no ringing); KI slowly
-    // learns the standing rate bias that cancels a constant drift such as two
-    // sound cards not clocked identically. Integration is gated to small errors
-    // so a big transient (handled by KP and the hard snap) can't wind it up.
-    const KP = 0.35;
-    const KI = 0.02;
-    const deadband = 0.004; // 4 ms: below the audible threshold for this material
-
-    if (Math.abs(err) < 0.1) {
-      this._rateBias += -err * KI;
-      this._rateBias = Math.min(0.03, Math.max(-0.03, this._rateBias));
-    }
-
-    let rate = 1 + this._rateBias;
-    if (Math.abs(err) > deadband) rate += -err * KP;
-    rate = Math.min(1.06, Math.max(0.94, rate));
-
-    // Keep pitch constant through the rate change (default true, but be explicit
-    // since the media element can be swapped underneath us).
-    this.audio.preservesPitch = true;
-    this.audio.mozPreservesPitch = true;
-    this.audio.webkitPreservesPitch = true;
-    this.audio.playbackRate = rate;
-    debugLog(
-      `Perfect Sync ${this.perfectMeasuring ? "measured" : "estimate"} lock err=${(err * 1000).toFixed(1)}ms rate=${rate.toFixed(4)} bias=${(this._rateBias * 1000).toFixed(2)}‰`,
-    );
   }
 
   isMobile() {
@@ -830,11 +606,6 @@ class RadioPlayer {
 
   handleRadioMessage(msg) {
     if (msg.type === "Sync" && msg.broadcaster_id === this.sessionId) return;
-    if (
-      msg.type === "PerfectPositionSync" &&
-      msg.broadcaster_id === this.sessionId
-    )
-      return;
 
     // Bounce server_ts straight back so the server can time the round trip.
     // We do no math here, the server owns the measurement.
@@ -849,21 +620,6 @@ class RadioPlayer {
     // offset estimator and stop.
     if (msg.type === "ClockEcho") {
       this._recordClockSample(msg.client_ts, msg.server_ts);
-      return;
-    }
-
-    // Fresh authoritative position, sent every heartbeat while in Perfect Sync.
-    // Normal-mode listeners ignore it and keep riding the sparse Syncs.
-    if (msg.type === "PerfectPositionSync") {
-      if (
-        this.perfectSync &&
-        this.mode === "radio" &&
-        msg.broadcaster_id === this.tunedBroadcaster
-      ) {
-        this._lastPosMsg = msg;
-        this._lastFrameAt = Date.now();
-        this._perfectLockOn(msg);
-      }
       return;
     }
 
@@ -1013,10 +769,8 @@ class RadioPlayer {
     if (this.mode !== "radio") return;
 
     if (msg.type === "Sync") {
-      if (this.perfectSync && msg.broadcaster_id === this.tunedBroadcaster) {
+      if (this.perfectSync && msg.broadcaster_id === this.tunedBroadcaster)
         this._lastPosMsg = msg;
-        this._lastFrameAt = Date.now();
-      }
       clearTimeout(this.syncTimer);
       this.syncTimer = setTimeout(() => this.syncToBroadcaster(msg), 80);
     }
@@ -1110,9 +864,10 @@ class RadioPlayer {
             this._loadingMediaIndex = null;
 
             // Perfect Sync: re-derive the live playhead now, at canplay time,
-            // from the freshest position frame we hold, then aim a hair ahead
-            // so playback that starts a few ms late still lands in phase. The
-            // opening moments may be clipped, which Perfect Sync accepts.
+            // from the freshest Sync we hold, seek there, and start. No extra
+            // lead (that just leaves the listener "in front"). _livePos already
+            // folds in however long the load took. Once playing it streams
+            // straight until the next broadcaster event.
             if (perfect) {
               const ref =
                 this._lastPosMsg &&
@@ -1122,11 +877,8 @@ class RadioPlayer {
               const dur = isFinite(this.audio.duration)
                 ? this.audio.duration
                 : Infinity;
-              // Aim at output-latency + a small start lead ahead of live, so
-              // playback that takes a few ms to come up still lands in phase;
-              // the PI lock trims whatever is left on the next frames.
               let target = this._pendingIsPlaying
-                ? this._livePos(ref) + this._perfectAheadSec() + 0.12
+                ? this._livePos(ref) + this._perfectAheadSec()
                 : ref.playback_time + this._perfectOffsetSec();
               if (!(target < dur)) target = Math.max(0, dur - 0.1);
               this.audio.currentTime = Math.max(0, target);
@@ -1134,9 +886,6 @@ class RadioPlayer {
                 `Perfect Sync media switch, starting at ${this.audio.currentTime.toFixed(3)}s`,
               );
               if (this._pendingIsPlaying) this._radioPlay();
-              // Tighten up once the pipeline has settled, then ride the frames.
-              setTimeout(() => this._perfectLockOn(this._lastPosMsg || ref), 300);
-              setTimeout(() => this._perfectLockOn(this._lastPosMsg || ref), 900);
               return;
             }
 
@@ -1167,8 +916,8 @@ class RadioPlayer {
     } else {
       this._loadingMediaIndex = null;
 
-      // Perfect Sync: no blunt currentTime assignment. Let the lock-on routine
-      // decide between a nudge and a snap so a routine Sync never jolts audio.
+      // Perfect Sync: hand this real event to the anchor routine, which only
+      // seeks if we're actually off and otherwise leaves playback untouched.
       if (perfect) {
         this._perfectLockOn(msg);
         return;
@@ -1211,23 +960,19 @@ class RadioPlayer {
     this.audio.addEventListener(
       "canplay",
       () => {
-        // Perfect Sync: if we already have a position frame for the new track,
-        // lock straight onto it; otherwise start near the top and let the next
-        // heartbeat frame lock us in. Same "may clip the intro" trade as a seek.
+        // Perfect Sync: anchor to the freshest Sync for this track if we have
+        // one, else start at seekTo (near the top) and let the next Sync anchor
+        // us. Then it streams straight until the next broadcaster event.
         if (perfect) {
           const ref =
             this._lastPosMsg && this._lastPosMsg.media_index === idx
               ? this._lastPosMsg
               : null;
           const start = ref
-            ? Math.max(0, this._livePos(ref) + this._perfectAheadSec() + 0.12)
+            ? Math.max(0, this._livePos(ref) + this._perfectAheadSec())
             : Math.max(0, seekTo);
           this.audio.currentTime = start;
           this._radioPlay();
-          if (ref) {
-            setTimeout(() => this._perfectLockOn(this._lastPosMsg || ref), 300);
-            setTimeout(() => this._perfectLockOn(this._lastPosMsg || ref), 900);
-          }
           debugLog(
             `AutoNext (Perfect Sync): media ${idx} starting at ${start.toFixed(3)}s`,
           );

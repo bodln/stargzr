@@ -574,42 +574,15 @@ async fn handle_client_message(
                 session.last_activity = std::time::Instant::now();
             }
 
-            // Latency is tracked by Ping/Pong, the heartbeat only moves the playback clock forward.
-            // Grab the fields Perfect Sync listeners need while we hold the guard.
-            let fanout = if let Some(mut broadcast) = state.broadcast_states.get_mut(&broadcaster_id)
-            {
+            // Latency is tracked by Ping/Pong, the heartbeat only moves the
+            // authoritative playback clock forward so a late-joining TuneIn gets
+            // a fresh position. It is NOT fanned out to listeners: Perfect Sync
+            // listeners re-anchor only on real Sync events (play/pause/seek/next)
+            // and otherwise play the file straight.
+            if let Some(mut broadcast) = state.broadcast_states.get_mut(&broadcaster_id) {
                 broadcast.playback_time = playback_time;
                 broadcast.server_timestamp_ms = server_ts;
-
                 tracing::trace!(broadcaster_id = %session_id, playback_time, "Heartbeat");
-
-                Some((
-                    broadcast.media_index,
-                    broadcast.is_playing,
-                    broadcast.transmission_latency_ms,
-                ))
-            } else {
-                None
-            };
-
-            // Feed Perfect Sync listeners a fresh position every heartbeat so they
-            // have something to lock onto between the sparse play/pause/seek Syncs.
-            // Same broadcaster->server latency adjustment Sync uses. Regular
-            // listeners never look at this frame.
-            if let Some((media_index, is_playing, latency_ms)) = fanout {
-                let adjusted_playback_time = playback_time + (latency_ms as f64 / 1000.0);
-
-                let pos_msg = Arc::new(PreparedMessage::new(&RadioMessage::PerfectPositionSync {
-                    broadcaster_id: broadcaster_id.clone(),
-                    media_index,
-                    playback_time: adjusted_playback_time,
-                    is_playing,
-                    server_timestamp_ms: server_ts,
-                }));
-
-                if let Some(tx) = state.broadcast_channels.get(&broadcaster_id) {
-                    let _ = tx.send(pos_msg);
-                }
             }
         }
 
