@@ -86,10 +86,12 @@ const btUnmuteOnPlaying = () => {
 };
 
 // Perfect Sync mode: lock the listener's playhead to the broadcaster's with an
-// estimated clock offset plus per-frame transit age, trimming residual drift
-// with tiny playbackRate nudges. Opt in, persisted like Bluetooth mode. The
-// heavy lifting lives in RadioPlayer; this just flips the flag and, when turned
-// on mid-listen, kicks off a fresh clock sync + resync.
+// NTP-style clock offset, the per-frame transit age, and the audio output
+// latency measured live through a Web Audio graph, then hold phase with a PI
+// controller on playbackRate. Opt in, persisted like Bluetooth mode. The heavy
+// lifting lives in RadioPlayer; this flips the flag and, since the change event
+// is a user gesture, builds the measurement graph now so the first tune in
+// already has it.
 const perfectToggle = document.getElementById("perfect-sync-toggle");
 const perfectOffsetInput = document.getElementById("perfect-sync-offset");
 if (perfectToggle) {
@@ -100,6 +102,8 @@ if (perfectToggle) {
     debugLog(`Perfect Sync mode ${perfectToggle.checked ? "enabled" : "disabled"}`);
     if (!window.player) return;
     if (perfectToggle.checked) {
+      // Build the AudioContext + routing under this gesture even if not tuned in.
+      window.player._ensurePerfectGraph();
       if (window.player.isInRadioMode()) {
         window.player._startPerfectSync();
         setTimeout(() => window.player.resync(), 400);
