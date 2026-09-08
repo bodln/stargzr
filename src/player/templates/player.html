@@ -173,12 +173,18 @@
     </div>
 
     <!-- Chat
-         Rides the same WebSocket as the radio sync. The server picks the room
-         from your tune in state, so the room label just mirrors that: global
-         when you are not tuned to anyone, the broadcaster's room when you are,
-         and your own room while you are broadcasting. -->
+         Rides the same WebSocket as the radio sync. The room picker lists every
+         room you can reach right now: global is always there, the broadcaster's
+         room shows up while you are tuned in, and your own room while you are
+         broadcasting. Tuning in just unlocks a room, it does not lock you to it,
+         so you can sit in global chat without tuning out. -->
     <div class="chat-container">
-      <h3>💬 <span id="chat-room-label">Global chat</span></h3>
+      <h3>
+        💬
+        <select id="chat-room-select" class="chat-room-select" aria-label="Chat room">
+          <option value="global">Global chat</option>
+        </select>
+      </h3>
       <div id="chat-messages">
         <div class="chat-empty">No messages yet. Say something.</div>
       </div>

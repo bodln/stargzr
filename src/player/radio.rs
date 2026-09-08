@@ -802,7 +802,7 @@ async fn handle_client_message(
             broadcast_analytics_throttled(state);
         }
 
-        RadioMessage::Chat { text, .. } => {
+        RadioMessage::Chat { text, room: requested_room, .. } => {
             crate::player::metrics::inc_messages("Chat");
 
             // Same idea as the broadcast limiter, keyed per session so one person
@@ -831,7 +831,7 @@ async fn handle_client_message(
                 trimmed
             };
 
-            // The room is decided entirely by the sender's tune in state.
+            // Where a line goes normally, straight from the sender's tune in state:
             //   tuned into someone  -> that broadcaster's room
             //   broadcasting, no tune -> our own room, so we reach our listeners
             //   neither              -> the global room everyone shares
@@ -840,12 +840,36 @@ async fn handle_client_message(
                 .get(validated_session_id)
                 .map(|r| r.clone());
 
-            let room = match tuned_to {
-                Some(broadcaster_id) => broadcaster_id,
+            let default_room = || match &tuned_to {
+                Some(broadcaster_id) => broadcaster_id.clone(),
                 None if state.broadcast_channels.contains_key(validated_session_id) => {
                     validated_session_id.to_string()
                 }
                 None => "global".to_string(),
+            };
+
+            // The client can ask for a specific room so a tuned in listener can
+            // still drop into global chat without tuning out. Being tuned in only
+            // grants *access* to that broadcaster's room, it doesn't pin you to
+            // it. A request is honored only when the sender may actually post
+            // there: global is open to everyone, a broadcaster room only to its
+            // listeners and the broadcaster themselves. Anything else falls back
+            // to the default room above.
+            let requested = requested_room.trim();
+            let room = if requested.is_empty() {
+                default_room()
+            } else if requested == "global"
+                || tuned_to.as_deref() == Some(requested)
+                || (requested == validated_session_id
+                    && state.broadcast_channels.contains_key(validated_session_id))
+            {
+                requested.to_string()
+            } else {
+                tracing::warn!(
+                    requested_room = %requested,
+                    "Chat room not accessible to sender, using their default room"
+                );
+                default_room()
             };
 
             // Account name for this session, empty if they never logged in. The

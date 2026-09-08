@@ -273,16 +273,21 @@ pub enum RadioMessage {
         message: String,
     },
 
-    /// A line of chat. The client sends this with only `text` filled in, the
-    /// server stamps the rest and fans it out to everyone in the same room.
+    /// A line of chat. The client sends this with `text`, and optionally `room`
+    /// to pick where it lands. The server validates that choice, stamps the
+    /// rest, and fans it out to everyone in the resolved room.
     ///
-    /// The room comes straight from the sender's tune in state. Tuned into
-    /// someone means their room, broadcasting yourself with no tune means your
-    /// own room, anything else is the global room everyone shares. A broadcaster
-    /// counts as sitting in their own room so they can talk to their listeners.
+    /// When the client leaves `room` empty the server picks one from the
+    /// sender's tune in state: tuned into someone means their room,
+    /// broadcasting yourself with no tune means your own room, anything else is
+    /// the global room everyone shares. When the client does name a room, it is
+    /// honored only if the sender may post there (global is open to all, a
+    /// broadcaster room only to its listeners and the broadcaster); otherwise
+    /// the server falls back to that same default.
     Chat {
-        /// "global" or the broadcaster id whose room this belongs to.
-        /// Whatever the client puts here is ignored, the server sets it.
+        /// "global" or a broadcaster id. On the way in, the room the client
+        /// wants (validated, may be overridden). On the way out, the room the
+        /// server actually delivered to.
         #[serde(default)]
         room: String,
         /// Session id of whoever sent it. Set by the server so it can't be faked.

@@ -373,7 +373,16 @@ video {
   background: #f8f9fa; padding: 15px; border-radius: 8px;
   margin-bottom: 20px; border: 1px solid #dee2e6;
 }
-.chat-container h3 { margin: 0 0 10px 0; font-size: 16px; color: #495057; }
+.chat-container h3 {
+  margin: 0 0 10px 0; font-size: 16px; color: #495057;
+  display: flex; align-items: center; gap: 8px;
+}
+.chat-room-select {
+  font: inherit; font-size: 14px; color: #495057;
+  padding: 3px 6px; border: 1px solid #ced4da; border-radius: 4px;
+  background: #fff; max-width: 100%;
+}
+.chat-room-select:disabled { opacity: 1; border-color: transparent; background: transparent; padding-left: 0; }
 
 #chat-messages {
   display: flex; flex-direction: column; gap: 6px;
