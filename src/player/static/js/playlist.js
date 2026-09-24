@@ -313,6 +313,9 @@ class PlaylistManager {
                href="/stargzr/player/stream/id/${media.id}"
                download="${media.filename}"
                title="Download ${media.filename}">&#11015;</a>
+            <button class="action-btn add-to-playlist-btn"
+                    onclick="window.customPlaylists.openAddMenu('${media.id}', this)"
+                    title="Add to a playlist">&#11088;</button>
             <button class="action-btn play-next-btn"
                     onclick="window.playlistManager.playNext_queue('${media.id}')"
                     title="Play after current media"
@@ -577,6 +580,9 @@ class PlaylistManager {
                href="/stargzr/player/stream/id/${media.id}"
                download="${media.filename}"
                title="Download ${media.filename}">&#11015;</a>
+            <button class="action-btn add-to-playlist-btn"
+                    onclick="window.customPlaylists.openAddMenu('${media.id}', this)"
+                    title="Add to a playlist">&#11088;</button>
             <button class="action-btn play-next-btn"
                     onclick="window.playlistManager.playNext_queue('${media.id}')"
                     title="Play after current media"

@@ -82,7 +82,9 @@ pub fn now_ms() -> u128 {
         .as_millis()
 }
 
-/// Periodically cleans up stale player sessions and broadcaster channels.
+/// Periodically cleans up stale player sessions (and idle rate-limit buckets).
+/// Stale *broadcaster* detection used to live in here too — see
+/// [cleanup_stale_broadcasters] for why it needed its own much shorter timer.
 pub async fn cleanup_stale_sessions(state: Arc<AppState>) {
     let mut interval = tokio::time::interval(Duration::from_secs(3600));
 
@@ -91,7 +93,6 @@ pub async fn cleanup_stale_sessions(state: Arc<AppState>) {
         interval.tick().await;
 
         let now = std::time::Instant::now();
-        let now_ms = now_ms();
 
         // Cleanup Player Sessions
         // These are private playback sessions for users not in radio mode
@@ -126,14 +127,34 @@ pub async fn cleanup_stale_sessions(state: Arc<AppState>) {
         // Purge token buckets that have been idle for over an hour so the map
         // does not grow unboundedly for IPs that connected once and never returned
         state.ws_rate_limiter.cleanup_old_buckets();
+    }
+}
 
-        // Cleanup Broadcaster Sessions
-        // These are active radio broadcasts that should be recent
-        let mut stale_broadcasters = Vec::new();
+/// Catches broadcasters whose connection went silent without a clean close —
+/// lost signal, a phone locked and throttled by the OS, a crash, anything
+/// short of the socket itself actually closing. A graceful "Stop
+/// Broadcasting" or a cleanly closed socket is already handled immediately,
+/// at disconnect time, by `delete_broadcasting_session`; this exists only for
+/// the "socket never actually closes" case.
+///
+/// This used to be folded into `cleanup_stale_sessions`, sharing its hourly
+/// timer — which made the "30 seconds" below fiction: a broadcaster who lost
+/// signal could leave every tuned-in listener stuck hearing dead air, still
+/// showing "connected", for up to an hour. It's on its own 10-second timer
+/// now, so the 30-second threshold actually means something.
+pub async fn cleanup_stale_broadcasters(state: Arc<AppState>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(10));
 
-        {
-            // Find broadcasters that haven't updated in 30+ seconds
-            for entry in state.broadcast_states.iter() {
+    loop {
+        interval.tick().await;
+
+        let now_ms = now_ms();
+
+        // Find broadcasters that haven't updated in 30+ seconds
+        let stale_broadcasters: Vec<String> = state
+            .broadcast_states
+            .iter()
+            .filter_map(|entry| {
                 let age_ms = now_ms.saturating_sub(entry.value().server_timestamp_ms);
                 let age_secs = age_ms / 1000;
 
@@ -147,15 +168,21 @@ pub async fn cleanup_stale_sessions(state: Arc<AppState>) {
                         entry.key(),
                         age_secs
                     );
-                    stale_broadcasters.push(entry.key().clone());
+                    Some(entry.key().clone())
+                } else {
+                    None
                 }
-            }
+            })
+            .collect();
+
+        if stale_broadcasters.is_empty() {
+            continue;
         }
 
         // Now remove the stale broadcasters and notify listeners
-        for broadcaster_id in stale_broadcasters {
-            if state.broadcast_states.remove(&broadcaster_id).is_some() {
-                state.broadcaster_listeners.remove(&broadcaster_id);
+        for broadcaster_id in &stale_broadcasters {
+            if state.broadcast_states.remove(broadcaster_id).is_some() {
+                state.broadcaster_listeners.remove(broadcaster_id);
                 tracing::info!("Removed stale broadcaster state: {}", broadcaster_id);
             }
 
@@ -182,7 +209,7 @@ pub async fn cleanup_stale_sessions(state: Arc<AppState>) {
             }
 
             // Remove the broadcast channel itself
-            if state.broadcast_channels.remove(&broadcaster_id).is_some() {
+            if state.broadcast_channels.remove(broadcaster_id).is_some() {
                 tracing::info!("Removed broadcast channel: {}", broadcaster_id);
             }
         }

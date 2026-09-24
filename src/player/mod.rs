@@ -1,11 +1,14 @@
 pub mod auth;
+mod avatars;
 pub mod error;
 mod handlers;
 mod logging;
 pub mod metrics;
+mod playlists;
 pub mod radio;
 pub mod rate_limit;
 pub mod reconnect;
+mod social;
 mod session;
 mod templates;
 mod types;
@@ -25,7 +28,7 @@ use self::logging::init_logging;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, header};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -38,11 +41,29 @@ use handlers::{
     player_page, prev_media, stream_audio_by_id, stream_audio_by_index,
 };
 use rate_limit::RateLimiter;
-use session::cleanup_stale_sessions;
+use session::{cleanup_stale_broadcasters, cleanup_stale_sessions};
 
 /// Initializes the shared player state by scanning the media folder,
 /// building a playlist, and setting up broadcast channels and session tracking.
 async fn init_player_state(media_folder: PathBuf) -> SharedState {
+    // Open the accounts database first — the media folder scan below needs it
+    // for every entry's id (see media_id_for), so it must exist before the
+    // scan runs. A missing file is fine, it gets created. A real failure here
+    // (bad path, permissions) is worth stopping for since register, login,
+    // and playlist ids would all be dead anyway.
+    let db_path = std::env::var("DB_PATH").unwrap_or_else(|_| "stargzr.db".to_string());
+    let db = auth::Db::open(&db_path)
+        .unwrap_or_else(|e| panic!("Failed to open accounts database at {db_path}: {e}"));
+    tracing::info!("Accounts database ready at {}", db_path);
+
+    let avatar_dir = std::env::var("AVATAR_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| avatars::default_dir(&db_path));
+    if let Err(e) = std::fs::create_dir_all(&avatar_dir) {
+        tracing::warn!("Could not create avatar folder {}: {}", avatar_dir.display(), e);
+    }
+    tracing::info!("Profile pictures stored in {}", avatar_dir.display());
+
     let mut playlist = Vec::new();
 
     // Read all files in the media folder asynchronously
@@ -53,7 +74,10 @@ async fn init_player_state(media_folder: PathBuf) -> SharedState {
                 if let Some(media_type) = media_type_for(filename) {
                     if let Ok(metadata) = entry.metadata().await {
                         playlist.push(MediaInfo {
-                            id: Uuid::new_v4().to_string(),
+                            // Same id every boot for the same filename, so a
+                            // custom playlist saved against this id still
+                            // resolves after a restart — see media_id_for.
+                            id: auth::media_id_for(&db, filename),
                             filename: filename.to_string(),
                             size: metadata.len(),
                             media_type,
@@ -64,7 +88,7 @@ async fn init_player_state(media_folder: PathBuf) -> SharedState {
         }
     }else {
         tracing::error!("Failed to read media folder: {}", media_folder.display());
-    }       
+    }
 
     // Sort the playlist alphabetically by filename for consistent ordering
     playlist.sort_by(|a, b| a.filename.cmp(&b.filename));
@@ -72,14 +96,6 @@ async fn init_player_state(media_folder: PathBuf) -> SharedState {
     // Create a broadcast channel for WebSocket messages (sync updates)
     // Capacity 100 means it can buffer up to 100 messages before dropping
     let (global_broadcast_tx, _) = broadcast::channel(100);
-
-    // Open the accounts database. A missing file is fine, it gets created. A
-    // real failure here (bad path, permissions) is worth stopping for since
-    // register and login would be dead anyway.
-    let db_path = std::env::var("DB_PATH").unwrap_or_else(|_| "stargzr.db".to_string());
-    let db = auth::Db::open(&db_path)
-        .unwrap_or_else(|e| panic!("Failed to open accounts database at {db_path}: {e}"));
-    tracing::info!("Accounts database ready at {}", db_path);
 
     // Secret the login tokens are signed with. Set JWT_SECRET in production so a
     // restart doesn't change it and tokens can't be forged from the source.
@@ -102,6 +118,9 @@ async fn init_player_state(media_folder: PathBuf) -> SharedState {
         broadcast_channels: DashMap::new(),
         broadcaster_listeners: DashMap::new(),
         session_tuned_to: DashMap::new(),
+        live_sessions: DashMap::new(),
+        session_outbox: DashMap::new(),
+        session_latency_ms: DashMap::new(),
         global_broadcast_tx,
         active_connections: AtomicUsize::new(0),
         last_analytics_ms: AtomicU64::new(0),
@@ -113,6 +132,7 @@ async fn init_player_state(media_folder: PathBuf) -> SharedState {
         jwt_secret,
         session_users: DashMap::new(),
         asset_version: compute_asset_version(),
+        avatar_dir,
     })
 }
 
@@ -197,6 +217,31 @@ fn static_files() -> Router {
         ))
 }
 
+/// Package name + SHA-256 signing certificate fingerprints (release and
+/// debug) that Android's Digital Asset Links verifier checks against
+/// /.well-known/assetlinks.json before it'll auto-open a "tune in" share
+/// link in the app instead of a browser. Both fingerprints are listed so a
+/// debug-signed dev build verifies exactly the same as a release one — the
+/// fingerprint is not secret, it's meant to be published here.
+const ASSETLINKS_JSON: &str = r#"[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "com.stargzr.player",
+    "sha256_cert_fingerprints": [
+      "AE:F5:9D:E8:92:63:9D:38:2B:0A:1D:65:A0:C1:ED:5F:7E:A7:DE:2E:CC:DB:FC:DB:28:D7:1E:99:43:A6:AF:C2",
+      "62:DF:D3:64:3A:7B:0E:ED:32:97:E5:AE:1A:ED:9F:BF:B3:C3:01:20:FD:6D:FD:7A:56:C3:4D:0F:23:70:2B:DD"
+    ]
+  }
+}]"#;
+
+/// Served at the fixed, un-prefixed path Android's App Links verifier
+/// requires — https://<domain>/.well-known/assetlinks.json — so it has to
+/// sit outside the /stargzr nest applied below, unlike every other route.
+async fn assetlinks_json() -> impl axum::response::IntoResponse {
+    ([(header::CONTENT_TYPE, "application/json")], ASSETLINKS_JSON)
+}
+
 /// Creates an Axum router with all the player routes, using the given media folder.
 /// Returns a future because state initialization is async.
 pub fn create_player_router(state: Arc<AppState>) -> impl std::future::Future<Output = Router> {
@@ -223,6 +268,47 @@ pub fn create_player_router(state: Arc<AppState>) -> impl std::future::Future<Ou
             .route("/auth/login", post(auth::login))
             .route("/auth/me", get(auth::me))
             .route("/auth/logout", post(auth::logout))
+            // Friends and one to one messages. Same signed in caller rule as
+            // the playlist routes below — see social.rs.
+            .route("/social/users", get(social::list_users))
+            .route(
+                "/social/friends/{username}",
+                post(social::add_friend).delete(social::remove_friend),
+            )
+            .route("/social/messages", get(social::list_conversations))
+            // Profile pictures, stored as files in the avatar folder — see
+            // avatars.rs. Setting one needs a bigger body than the default.
+            .route(
+                "/social/avatar",
+                put(avatars::upload_avatar)
+                    .delete(avatars::delete_avatar)
+                    .layer(DefaultBodyLimit::max(avatars::MAX_AVATAR_BYTES)),
+            )
+            .route("/avatars/{username}", get(avatars::get_avatar))
+            .route(
+                "/social/messages/{username}",
+                get(social::conversation).post(social::send_message),
+            )
+            // Custom, per-account playlists. Every handler here requires a
+            // signed in caller — see playlists.rs.
+            .route(
+                "/player/playlists",
+                get(playlists::list_playlists).post(playlists::create_playlist),
+            )
+            .route(
+                "/player/playlists/{id}",
+                get(playlists::get_playlist_detail)
+                    .patch(playlists::rename_playlist)
+                    .delete(playlists::delete_playlist),
+            )
+            .route(
+                "/player/playlists/{id}/items",
+                post(playlists::add_playlist_item).put(playlists::reorder_playlist_items),
+            )
+            .route(
+                "/player/playlists/{id}/items/{media_id}",
+                axum::routing::delete(playlists::remove_playlist_item),
+            )
             // Override the default 2 MB body limit for the upload route only.
             // The outer DefaultBodyLimit still applies to every other route.
             .route(
@@ -234,8 +320,11 @@ pub fn create_player_router(state: Arc<AppState>) -> impl std::future::Future<Ou
             .nest_service("/static", static_files())
             .with_state(state.clone()); // Attach shared state
 
-        // Nest the inner router under "/stargzr" so all routes are prefixed
-        Router::new().nest("/stargzr", inner)
+        // Nest the inner router under "/stargzr" so all routes are prefixed —
+        // except assetlinks.json, which Android requires at the domain root.
+        Router::new()
+            .route("/.well-known/assetlinks.json", get(assetlinks_json))
+            .nest("/stargzr", inner)
     }
 }
 
@@ -323,8 +412,11 @@ pub async fn initialize(path_buf: PathBuf) {
     // Create the router with async initialization
     let router = create_player_router(state.clone()).await;
 
-    // Task for cleaning up old sessions both player and broadcast
+    // Task for cleaning up old player sessions (hourly)
     tokio::spawn(cleanup_stale_sessions(state.clone()));
+    // Separate, much shorter-interval task for detecting broadcasters whose
+    // connection went silent without a clean close — see cleanup_stale_broadcasters.
+    tokio::spawn(cleanup_stale_broadcasters(state.clone()));
 
     // into_make_service_with_connect_info propagates the peer address into handlers.
     // PeerAddr instead of SocketAddr because of the orphan rule, see Connected impl above.

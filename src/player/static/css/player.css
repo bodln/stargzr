@@ -341,6 +341,43 @@ video {
   white-space: nowrap;
 }
 
+/* Custom Playlists */
+.custom-playlists-container {
+  background: #f8f9fa; padding: 15px; border-radius: 8px;
+  margin-top: 20px; border: 1px solid #dee2e6;
+}
+.custom-playlists-container h3 { margin: 0 0 10px 0; font-size: 16px; color: #495057; }
+.custom-playlists-hint { font-size: 13px; color: #6c757d; font-style: italic; }
+
+.custom-playlists-toolbar { display: flex; gap: 8px; align-items: center; }
+#custom-playlist-select {
+  flex: 1; padding: 8px; border: 1px solid #ced4da; border-radius: 4px; font-size: 14px;
+}
+#custom-playlist-new-btn { flex-shrink: 0; padding: 8px 14px; font-size: 14px; }
+
+#custom-playlist-detail { margin-top: 12px; }
+.custom-playlist-detail-header {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+}
+.custom-playlist-detail-header strong { flex: 1; font-size: 14px; color: #212529; }
+
+#custom-playlist-items { max-height: 300px; overflow-y: auto; }
+
+/* Small anchored popover opened by the ⭐ "add to playlist" button */
+.add-to-playlist-menu {
+  background: #fff; border: 1px solid #ced4da; border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15); padding: 4px; z-index: 300;
+  min-width: 180px; max-width: 260px; max-height: 260px; overflow-y: auto;
+  display: flex; flex-direction: column;
+}
+.add-to-playlist-option {
+  display: block; width: 100%; text-align: left; background: none; color: #212529;
+  border: none; padding: 8px 10px; font-size: 13px; border-radius: 4px; cursor: pointer;
+}
+.add-to-playlist-option:hover { background: #e7f3ff; color: #007bff; }
+.add-to-playlist-new { border-top: 1px solid #f0f0f0; margin-top: 2px; color: #007bff; }
+.add-to-playlist-empty { padding: 8px 10px; font-size: 12px; color: #6c757d; font-style: italic; }
+
 /* Accounts */
 .auth-container {
   background: #e9ecef; padding: 12px 15px; border-radius: 8px;

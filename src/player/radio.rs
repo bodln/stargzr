@@ -59,8 +59,21 @@ pub async fn handle_radio_connection(
     let heartbeat_limiter = Arc::new(RateLimiter::for_heartbeat());
     let broadcast_limiter = Arc::new(RateLimiter::for_broadcast());
     let chat_limiter = Arc::new(RateLimiter::for_chat());
+    let room_relay_limiter = Arc::new(RateLimiter::for_room_relay());
 
     state.active_connections.fetch_add(1, Relaxed);
+
+    // Presence, and a way to reach this socket by name later. `live_sessions`
+    // is what turns "this session logged in at some point" into "this account
+    // is online right now"; `session_outbox` lets a direct message arriving
+    // over HTTP find its recipient's sockets, which the room channels can't do
+    // since they're keyed by room rather than by who is in them. Both are
+    // dropped again at the bottom of this function.
+    state.live_sessions.insert(validated_session_id.clone(), ());
+    state
+        .session_outbox
+        .insert(validated_session_id.clone(), out_tx.clone());
+
     broadcast_analytics(&state);
 
     tracing::info!("Client connected: {}", &validated_session_id);
@@ -89,8 +102,11 @@ pub async fn handle_radio_connection(
             // and AutoNext copies that carry our own id.
             let mut own_room_rx: Option<broadcast::Receiver<Arc<PreparedMessage>>> = None;
 
-            // Latency probe for this session. Only fires a Ping once the session is
-            // actually broadcasting. The first tick lands immediately and is skipped.
+            // Latency probe for this session. Fires a Ping once the session is
+            // either broadcasting or tuned in as a listener — either way the
+            // result is a clock-safe one-way latency figure the recipient can
+            // anchor Perfect Sync's position math on. The first tick lands
+            // immediately and is skipped.
             let mut ping_interval = tokio::time::interval(
                 std::time::Duration::from_secs(BROADCASTER_PING_INTERVAL_SECS),
             );
@@ -148,10 +164,12 @@ pub async fn handle_radio_connection(
                         }
                     }
 
-                    // Ping the broadcaster so their Pong lets us time the round trip.
-                    // Skipped for listeners, they have no latency to track.
+                    // Ping the broadcaster or listener so their Pong lets us time
+                    // the round trip. Skipped for a session that's neither.
                     _ = ping_interval.tick() => {
-                        if state_clone.broadcast_states.contains_key(&send_session_id) {
+                        if state_clone.broadcast_states.contains_key(&send_session_id)
+                            || state_clone.session_tuned_to.contains_key(&send_session_id)
+                        {
                             let ping = RadioMessage::Ping { server_ts: now_ms() as u64 };
                             if let Err(e) = send_message(&mut sender, &ping).await {
                                 tracing::error!("Failed to send ping: {}", e);
@@ -225,6 +243,7 @@ pub async fn handle_radio_connection(
                                     &heartbeat_limiter,
                                     &broadcast_limiter,
                                     &chat_limiter,
+                                    &room_relay_limiter,
                                 )
                                 .await
                                 {
@@ -271,6 +290,10 @@ pub async fn handle_radio_connection(
     remove_session_from_all_listeners(&state, &validated_session_id);
 
     delete_broadcasting_session(&state, &validated_session_id);
+
+    state.session_latency_ms.remove(&validated_session_id);
+    state.live_sessions.remove(&validated_session_id);
+    state.session_outbox.remove(&validated_session_id);
 
     if state.active_connections.load(Relaxed) > 0 {
         state.active_connections.fetch_sub(1, Relaxed);
@@ -321,6 +344,7 @@ async fn handle_client_message(
     heartbeat_limiter: &Arc<RateLimiter>,
     broadcast_limiter: &Arc<RateLimiter>,
     chat_limiter: &Arc<RateLimiter>,
+    room_relay_limiter: &Arc<RateLimiter>,
 ) -> PlayerResult<()> {
     match msg {
         RadioMessage::TuneIn { broadcaster_id } => {
@@ -409,6 +433,16 @@ async fn handle_client_message(
                 .send(sync_msg)
                 .await
                 .map_err(|_| PlayerError::WebSocketError("Failed to send sync".into()))?;
+
+            // Kick off this listener's own one-way latency measurement right
+            // away instead of waiting for the regular ping_interval tick (up
+            // to BROADCASTER_PING_INTERVAL_SECS away) — Perfect Sync's first
+            // position calculation on this tune-in wants it as soon as
+            // possible, not several seconds from now.
+            out_tx
+                .send(RadioMessage::Ping { server_ts: now_ms() as u64 })
+                .await
+                .map_err(|_| PlayerError::WebSocketError("Failed to send ping".into()))?;
 
             broadcast_analytics_throttled(state);
         }
@@ -593,7 +627,10 @@ async fn handle_client_message(
             // authoritative playback clock forward so a late-joining TuneIn gets
             // a fresh position. It is NOT fanned out to listeners: Perfect Sync
             // listeners re-anchor only on real Sync events (play/pause/seek/next)
-            // and otherwise play the file straight.
+            // and otherwise play the file straight — a periodic fan-out was
+            // tried here and reverted, it caused visible/audible position jumps
+            // every couple seconds during otherwise-steady playback, which is
+            // worse than the (much smaller) clock drift it was meant to fix.
             if let Some(mut broadcast) = state.broadcast_states.get_mut(&broadcaster_id) {
                 broadcast.playback_time = playback_time;
                 broadcast.server_timestamp_ms = server_ts;
@@ -621,15 +658,30 @@ async fn handle_client_message(
             crate::player::metrics::inc_messages("Pong");
 
             // rtt is timed start to finish on the server clock, so half of it is the
-            // one way broadcaster to server latency. Nothing here reads the broadcaster's
-            // clock, which is what let the old estimate blow up when the clocks drifted.
+            // one way latency for whichever leg this session is on. Nothing here
+            // reads the client's clock, which is what let the old estimate blow up
+            // when the clocks drifted.
             let rtt_ms = (now_ms() as u64).saturating_sub(server_ts);
             let one_way_ms = (rtt_ms / 2).min(MAX_PLAUSIBLE_LATENCY_MS);
 
+            // Broadcasters keep their figure on BroadcastState too — that's what
+            // feeds the latency adjustment already baked into outgoing Sync
+            // messages. Every session (broadcaster or listener) also gets it here,
+            // generically, since a listener has no BroadcastState of their own.
             if let Some(mut broadcast) = state.broadcast_states.get_mut(validated_session_id) {
                 broadcast.transmission_latency_ms = one_way_ms;
-                tracing::trace!(rtt_ms, one_way_ms, "Latency updated from Pong");
             }
+            state
+                .session_latency_ms
+                .insert(validated_session_id.to_string(), one_way_ms);
+            tracing::trace!(rtt_ms, one_way_ms, "Latency updated from Pong");
+
+            out_tx
+                .send(RadioMessage::YourLatency { one_way_ms })
+                .await
+                .map_err(|_| {
+                    PlayerError::WebSocketError("Failed to send latency update".into())
+                })?;
         }
 
         RadioMessage::StopBroadcasting { broadcaster_id } => {
@@ -878,46 +930,7 @@ async fn handle_client_message(
                 trimmed
             };
 
-            // Where a line goes normally, straight from the sender's tune in state:
-            //   tuned into someone  -> that broadcaster's room
-            //   broadcasting, no tune -> our own room, so we reach our listeners
-            //   neither              -> the global room everyone shares
-            let tuned_to = state
-                .session_tuned_to
-                .get(validated_session_id)
-                .map(|r| r.clone());
-
-            let default_room = || match &tuned_to {
-                Some(broadcaster_id) => broadcaster_id.clone(),
-                None if state.broadcast_channels.contains_key(validated_session_id) => {
-                    validated_session_id.to_string()
-                }
-                None => "global".to_string(),
-            };
-
-            // The client can ask for a specific room so a tuned in listener can
-            // still drop into global chat without tuning out. Being tuned in only
-            // grants *access* to that broadcaster's room, it doesn't pin you to
-            // it. A request is honored only when the sender may actually post
-            // there: global is open to everyone, a broadcaster room only to its
-            // listeners and the broadcaster themselves. Anything else falls back
-            // to the default room above.
-            let requested = requested_room.trim();
-            let room = if requested.is_empty() {
-                default_room()
-            } else if requested == "global"
-                || tuned_to.as_deref() == Some(requested)
-                || (requested == validated_session_id
-                    && state.broadcast_channels.contains_key(validated_session_id))
-            {
-                requested.to_string()
-            } else {
-                tracing::warn!(
-                    requested_room = %requested,
-                    "Chat room not accessible to sender, using their default room"
-                );
-                default_room()
-            };
+            let room = resolve_room(state, validated_session_id, &requested_room);
 
             // Account name for this session, empty if they never logged in. The
             // client shows this instead of the raw session id when it's set.
@@ -959,6 +972,58 @@ async fn handle_client_message(
             }
         }
 
+        RadioMessage::RoomRelay {
+            room: requested_room,
+            room_code,
+            payload,
+            ..
+        } => {
+            crate::player::metrics::inc_messages("RoomRelay");
+
+            // Same shape as the chat limiter: keyed per session, so one
+            // misbehaving room-sync client can't flood everyone else's room.
+            if let Err(e) = room_relay_limiter.check_and_consume(validated_session_id) {
+                crate::player::metrics::inc_rate_limit_hits("room_relay");
+                return Err(e);
+            }
+
+            // Room Sync rides on the same access rules as Chat: a room is
+            // whatever the sender is tuned into, their own room if they are
+            // broadcasting, or global, and a requested room is only honored if
+            // they may actually post there.
+            let room = resolve_room(state, validated_session_id, &requested_room);
+
+            // Stamped once here so every recipient shares the same bytes.
+            // `payload` is passed through untouched, its "kind" (presence /
+            // calibrate_chirp / tick) is meaningless to the server.
+            let outgoing = Arc::new(PreparedMessage::new(&RadioMessage::RoomRelay {
+                room: room.clone(),
+                from: validated_session_id.to_string(),
+                room_code,
+                payload,
+                server_timestamp_ms: now_ms(),
+            }));
+
+            if room == "global" {
+                match state.global_broadcast_tx.send(outgoing) {
+                    Ok(n) => tracing::trace!(recipients = n, "Room relay sent (global)"),
+                    Err(_) => tracing::trace!("Room relay sent but nobody is connected"),
+                }
+            } else {
+                match state.broadcast_channels.get(&room) {
+                    Some(tx) => match tx.send(outgoing) {
+                        Ok(n) => tracing::trace!(room = %room, recipients = n, "Room relay sent"),
+                        Err(_) => {
+                            tracing::trace!(room = %room, "Room relay sent but the room is empty")
+                        }
+                    },
+                    None => {
+                        tracing::trace!(room = %room, "Room relay dropped, no channel");
+                    }
+                }
+            }
+        }
+
         _ => {
             // Any unexpected messages are logged but ignored
             tracing::warn!("Received unexpected message type");
@@ -966,6 +1031,41 @@ async fn handle_client_message(
     }
 
     Ok(())
+}
+
+/// Resolves which room a message from `sender_id` should land in, given the
+/// room it asked for (may be empty). Shared by `Chat` and `RoomRelay` so both
+/// obey identical access rules:
+///   - empty request -> sender's default: tuned into someone means their
+///     room, broadcasting with no tune means the sender's own room, otherwise
+///     the global room everyone shares.
+///   - non-empty request -> honored only if the sender may actually post
+///     there (global is open to all, a broadcaster room only to its listeners
+///     and the broadcaster themselves); otherwise falls back to the default.
+fn resolve_room(state: &SharedState, sender_id: &str, requested: &str) -> String {
+    let tuned_to = state.session_tuned_to.get(sender_id).map(|r| r.clone());
+
+    let default_room = || match &tuned_to {
+        Some(broadcaster_id) => broadcaster_id.clone(),
+        None if state.broadcast_channels.contains_key(sender_id) => sender_id.to_string(),
+        None => "global".to_string(),
+    };
+
+    let requested = requested.trim();
+    if requested.is_empty() {
+        default_room()
+    } else if requested == "global"
+        || tuned_to.as_deref() == Some(requested)
+        || (requested == sender_id && state.broadcast_channels.contains_key(sender_id))
+    {
+        requested.to_string()
+    } else {
+        tracing::warn!(
+            requested_room = %requested,
+            "Room not accessible to sender, using their default room"
+        );
+        default_room()
+    }
 }
 
 /// Verifies that the provided identifier matches the session identifier

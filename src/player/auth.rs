@@ -14,7 +14,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use hmac::{Hmac, Mac};
 use rand::RngCore;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
@@ -44,6 +44,7 @@ const MIN_USERNAME_LEN: usize = 3;
 const MAX_USERNAME_LEN: usize = 20;
 const MIN_PASSWORD_LEN: usize = 6;
 const MAX_PASSWORD_LEN: usize = 128;
+const MAX_EMAIL_LEN: usize = 254;
 
 // ─── Database ────────────────────────────────────────────────────────────────
 
@@ -54,27 +55,92 @@ const MAX_PASSWORD_LEN: usize = 128;
 pub struct Db(Arc<Mutex<Connection>>);
 
 impl Db {
-    /// Opens the database at `path`, creating the file and the users table if
-    /// they are not there yet.
+    /// Opens the database at `path`, creating the file and its tables if they
+    /// are not there yet. Holds accounts plus two things layered on top of
+    /// them: a registry giving every media file a stable id that survives a
+    /// restart, and custom playlists that reference those ids (see
+    /// [`media_id_for`] and [`super::playlists`]).
     pub fn open(path: &str) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
+             PRAGMA foreign_keys = ON;
              CREATE TABLE IF NOT EXISTS users (
                  id            INTEGER PRIMARY KEY AUTOINCREMENT,
                  username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
                  password_hash TEXT NOT NULL,
                  created_at    INTEGER NOT NULL
-             );",
+             );
+             CREATE TABLE IF NOT EXISTS media_files (
+                 id         TEXT PRIMARY KEY,
+                 filename   TEXT NOT NULL UNIQUE,
+                 added_at   INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS playlists (
+                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                 username   TEXT NOT NULL COLLATE NOCASE,
+                 name       TEXT NOT NULL,
+                 created_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_playlists_username ON playlists(username);
+             CREATE TABLE IF NOT EXISTS playlist_items (
+                 playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+                 media_id    TEXT NOT NULL,
+                 position    INTEGER NOT NULL,
+                 PRIMARY KEY (playlist_id, media_id)
+             );
+             CREATE INDEX IF NOT EXISTS idx_playlist_items_playlist ON playlist_items(playlist_id);
+             CREATE TABLE IF NOT EXISTS friendships (
+                 username   TEXT NOT NULL COLLATE NOCASE,
+                 friend     TEXT NOT NULL COLLATE NOCASE,
+                 created_at INTEGER NOT NULL,
+                 PRIMARY KEY (username, friend)
+             );
+             CREATE INDEX IF NOT EXISTS idx_friendships_friend ON friendships(friend);
+             CREATE TABLE IF NOT EXISTS direct_messages (
+                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                 sender        TEXT NOT NULL COLLATE NOCASE,
+                 recipient     TEXT NOT NULL COLLATE NOCASE,
+                 body          TEXT NOT NULL,
+                 created_at_ms INTEGER NOT NULL,
+                 read_at_ms    INTEGER
+             );
+             CREATE INDEX IF NOT EXISTS idx_dm_pair ON direct_messages(sender, recipient, id);
+             CREATE INDEX IF NOT EXISTS idx_dm_unread ON direct_messages(recipient, read_at_ms);",
         )?;
+
+        // `email` arrived after the users table had already shipped, and SQLite
+        // has no ADD COLUMN IF NOT EXISTS, so it goes on as a migration guarded
+        // by a look at the existing columns.
+        let has_email = conn
+            .prepare("PRAGMA table_info(users)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|name| name == "email");
+        if !has_email {
+            conn.execute("ALTER TABLE users ADD COLUMN email TEXT", [])?;
+        }
+
         Ok(Self(Arc::new(Mutex::new(conn))))
     }
 
-    fn insert_user(&self, username: &str, password_hash: &str) -> Result<(), AuthError> {
+    /// Locks and hands back the raw connection. Used by modules outside this
+    /// one (playlists) that need direct SQL access without duplicating the
+    /// Mutex<Connection> wiring declared here.
+    pub(crate) fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.0.lock().unwrap()
+    }
+
+    fn insert_user(
+        &self,
+        username: &str,
+        password_hash: &str,
+        email: Option<&str>,
+    ) -> Result<(), AuthError> {
         let conn = self.0.lock().unwrap();
         conn.execute(
-            "INSERT INTO users (username, password_hash, created_at) VALUES (?1, ?2, ?3)",
-            rusqlite::params![username, password_hash, now_secs() as i64],
+            "INSERT INTO users (username, password_hash, email, created_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![username, password_hash, email, now_secs() as i64],
         )
         .map_err(|e| match e {
             // The UNIQUE index is COLLATE NOCASE, so this also catches a name
@@ -87,6 +153,21 @@ impl Db {
             other => AuthError::Db(other.to_string()),
         })?;
         Ok(())
+    }
+
+    /// The address on file for `username`, if they gave one. Never used to
+    /// contact anybody, it is only echoed back to its owner on /auth/me.
+    fn email_for(&self, username: &str) -> Option<String> {
+        let conn = self.0.lock().unwrap();
+        conn.query_row(
+            "SELECT email FROM users WHERE username = ?1 COLLATE NOCASE",
+            [username],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .flatten()
     }
 
     /// Looks a user up case insensitively and returns their stored name (with
@@ -104,6 +185,44 @@ impl Db {
             other => Err(AuthError::Db(other.to_string())),
         })
     }
+}
+
+// ─── Media id registry ───────────────────────────────────────────────────────
+// Gives every file in the media folder a stable id that survives a restart.
+// Without this, MediaInfo.id was a fresh Uuid::new_v4() generated on every
+// server boot (and on every upload) — fine for a single running session, but
+// it meant a saved reference to a media id (a custom playlist's items) could
+// never outlive that session, since the id would be different by the next
+// boot even for the exact same file. Filenames are the natural key here: the
+// media folder already treats them as unique (uploads reject a name that
+// already exists on disk).
+
+/// Looks up the persistent id for `filename`, registering and returning a
+/// fresh one the first time this filename is seen. Called once per file while
+/// scanning the media folder at startup, and once per upload.
+pub fn media_id_for(db: &Db, filename: &str) -> String {
+    let conn = db.conn();
+
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT id FROM media_files WHERE filename = ?1",
+            [filename],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap_or(None);
+    if let Some(id) = existing {
+        return id;
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    if let Err(e) = conn.execute(
+        "INSERT INTO media_files (id, filename, added_at) VALUES (?1, ?2, ?3)",
+        rusqlite::params![id, filename, now_secs() as i64],
+    ) {
+        tracing::error!("Failed to register media id for '{}': {}", filename, e);
+    }
+    id
 }
 
 // ─── Password hashing ────────────────────────────────────────────────────────
@@ -232,6 +351,7 @@ pub enum AuthError {
     TooManyAttempts,
     Db(String),
     Token,
+    NotFound,
 }
 
 impl IntoResponse for AuthError {
@@ -247,6 +367,7 @@ impl IntoResponse for AuthError {
                 "Too many attempts, wait a moment and try again".to_string(),
             ),
             AuthError::Token => (StatusCode::UNAUTHORIZED, "Not signed in".to_string()),
+            AuthError::NotFound => (StatusCode::NOT_FOUND, "Not found".to_string()),
             AuthError::Db(e) => {
                 tracing::error!("Accounts DB error: {}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, "Something went wrong".to_string())
@@ -274,6 +395,26 @@ fn clean_username(raw: &str) -> Result<String, AuthError> {
     Ok(name.to_string())
 }
 
+/// Trims an optional address. Empty means "not given" and is allowed through
+/// as None; anything else gets a shape check only. There is no confirmation
+/// mail and nothing is ever sent here, so the bar is "plausibly an address the
+/// owner typed on purpose", not "provably deliverable".
+fn clean_email(raw: Option<&str>) -> Result<Option<String>, AuthError> {
+    let Some(email) = raw.map(str::trim).filter(|e| !e.is_empty()) else {
+        return Ok(None);
+    };
+    let local_and_domain: Vec<&str> = email.split('@').collect();
+    let looks_like_an_address = local_and_domain.len() == 2
+        && !local_and_domain[0].is_empty()
+        && local_and_domain[1].contains('.')
+        && !local_and_domain[1].starts_with('.')
+        && !local_and_domain[1].ends_with('.');
+    if !looks_like_an_address || email.len() > MAX_EMAIL_LEN || email.contains(char::is_whitespace) {
+        return Err(AuthError::BadInput("That doesn't look like an email address".to_string()));
+    }
+    Ok(Some(email.to_string()))
+}
+
 fn check_password(pw: &str) -> Result<(), AuthError> {
     if pw.len() < MIN_PASSWORD_LEN || pw.len() > MAX_PASSWORD_LEN {
         return Err(AuthError::BadInput(format!(
@@ -289,6 +430,18 @@ fn check_password(pw: &str) -> Result<(), AuthError> {
 pub struct Credentials {
     username: String,
     password: String,
+    /// Register only. The second password box, checked against `password`
+    /// here as well as in the client so a typo can't quietly become the
+    /// account's real password. Optional because the browser form predates it
+    /// and still posts two fields; when it is absent there is nothing to
+    /// disagree with and registration goes ahead.
+    #[serde(default)]
+    password_confirm: Option<String>,
+    /// Register only, optional. Stored as given, never verified, never used to
+    /// send anything — it's here so an account has a way back if one is ever
+    /// needed.
+    #[serde(default)]
+    email: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -298,6 +451,10 @@ pub struct AuthOk {
     /// pick it up and send it back as a bearer token.
     token: String,
     username: String,
+    /// The address on file, null when the account never gave one.
+    email: Option<String>,
+    /// Profile picture version, null when there is none. See avatars.rs.
+    avatar: Option<i64>,
 }
 
 /// POST /stargzr/auth/register
@@ -311,8 +468,14 @@ pub async fn register(
 
     let username = clean_username(&body.username)?;
     check_password(&body.password)?;
+    if body.password_confirm.as_deref().is_some_and(|c| c != body.password) {
+        return Err(AuthError::BadInput("The two passwords don't match".to_string()));
+    }
+    let email = clean_email(body.email.as_deref())?;
 
-    state.db.insert_user(&username, &hash_password(&body.password))?;
+    state
+        .db
+        .insert_user(&username, &hash_password(&body.password), email.as_deref())?;
     tracing::info!(username = %username, "New account registered");
 
     Ok(finish_login(&state, &headers, username))
@@ -362,9 +525,13 @@ pub async fn me(
     let username = caller_username(&state, &headers)?;
     link_session(&state, &headers, &username);
     super::radio::broadcast_analytics(&state);
+    let email = state.db.email_for(&username);
+    let avatar = super::avatars::version(&state, &username);
     Ok(Json(AuthOk {
         token: String::new(),
         username,
+        email,
+        avatar,
     }))
 }
 
@@ -411,10 +578,12 @@ fn finish_login(state: &SharedState, headers: &HeaderMap, username: String) -> R
     let token = make_token(&state.jwt_secret, &username);
     link_session(state, headers, &username);
     super::radio::broadcast_analytics(state);
+    let email = state.db.email_for(&username);
+    let avatar = super::avatars::version(state, &username);
 
     (
         [(header::SET_COOKIE, auth_cookie_header(&token, is_https(headers)))],
-        Json(AuthOk { token, username }),
+        Json(AuthOk { token, username, email, avatar }),
     )
         .into_response()
 }
@@ -437,8 +606,10 @@ fn link_session(state: &SharedState, headers: &HeaderMap, username: &str) {
     }
 }
 
-/// Signed in name from the token cookie first, then a bearer header.
-fn caller_username(state: &SharedState, headers: &HeaderMap) -> Result<String, AuthError> {
+/// Signed in name from the token cookie first, then a bearer header. `pub(crate)`
+/// so other player modules (playlists) can gate their own endpoints on it the
+/// same way the account handlers above do.
+pub(crate) fn caller_username(state: &SharedState, headers: &HeaderMap) -> Result<String, AuthError> {
     if let Some(token) = auth_cookie(headers) {
         if let Ok(name) = verify_token(&state.jwt_secret, &token) {
             return Ok(name);
@@ -514,7 +685,7 @@ fn auth_cookie(headers: &HeaderMap) -> Option<String> {
 static DUMMY_HASH: LazyLock<String> =
     LazyLock::new(|| hash_password("not a real password, only here for timing"));
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()

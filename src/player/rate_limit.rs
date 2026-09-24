@@ -45,6 +45,13 @@ impl RateLimiter {
         Self::new(5.0, 1.0)
     }
 
+    // For Room Sync relay messages (presence/calibration/tick) - a small burst
+    // for the handful of calibration messages, then a sustained rate a bit
+    // above the ~1 tick / 2s cadence the client uses so it never self-throttles.
+    pub fn for_room_relay() -> Self {
+        Self::new(8.0, 2.0)
+    }
+
     // For login and register attempts, keyed by IP. A burst of 8 for a human
     // fumbling their password, then one roughly every 6 seconds, which is a wall
     // for anything trying to guess.

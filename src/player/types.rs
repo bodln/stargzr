@@ -127,6 +127,28 @@ pub struct AppState {
     /// Makes TuneOut O(1) instead of scanning every broadcaster's listener set.
     pub session_tuned_to: DashMap<String, String>,
 
+    /// One-way latency (ms) from the server to a given session, for ANY
+    /// session (broadcaster or listener) — measured off a Ping/Pong round
+    /// trip timed entirely on the server's own clock (see radio.rs's Pong
+    /// handler). A broadcaster's figure also lives in their BroadcastState
+    /// as transmission_latency_ms; this map is what lets a plain listener
+    /// get the same clock-safe measurement for their own leg.
+    pub session_latency_ms: DashMap<String, u64>,
+
+    /// Session ids with a radio WebSocket open right now, inserted when the
+    /// socket opens and removed when it closes. `session_users` says which
+    /// account a session belongs to but outlives the socket, so the two
+    /// together are what "this account is online" actually means — see
+    /// `social::online_usernames`.
+    pub live_sessions: DashMap<String, ()>,
+
+    /// Per-session outbound queue, the same `out_tx` the receive task uses for
+    /// self-directed replies. Registered here so code holding nothing but a
+    /// username (a direct message arriving over HTTP) can still reach that
+    /// person's open sockets, which the broadcast channels can't do since they
+    /// are keyed by room rather than by who is in them.
+    pub session_outbox: DashMap<String, tokio::sync::mpsc::Sender<RadioMessage>>,
+
     /// Counts live WebSocket connections, incremented on connect, decremented on disconnect.
     pub active_connections: AtomicUsize,
 
@@ -165,6 +187,10 @@ pub struct AppState {
     /// changes its URL changes with it, and no browser or proxy can serve back
     /// a stale copy. Computed once at startup.
     pub asset_version: String,
+
+    /// Folder the profile pictures are kept in, one file per account. See
+    /// avatars.rs.
+    pub avatar_dir: PathBuf,
 }
 
 /// Helper type for cleaner function signatures
@@ -193,16 +219,27 @@ pub enum RadioMessage {
         playback_time: f64,
     },
 
-    /// Server sends this to a broadcaster every few seconds. server_ts is the server
-    /// clock at send time. The broadcaster echoes it back unchanged in Pong so the
-    /// server can time the round trip without trusting the broadcaster's clock.
+    /// Server sends this every few seconds to a broadcaster, and (while
+    /// tuned in) a listener too. server_ts is the server clock at send time.
+    /// The client echoes it back unchanged in Pong so the server can time the
+    /// round trip on its own clock only, without trusting the client's clock
+    /// at all.
     Ping {
         server_ts: u64,
     },
 
-    /// Broadcaster's reply to Ping, server_ts copied straight back.
+    /// Client's reply to Ping, server_ts copied straight back.
     Pong {
         server_ts: u64,
+    },
+
+    /// Server's reply to a Pong: this client's own one-way latency to the
+    /// server (half the Ping/Pong round trip, timed entirely on the server's
+    /// clock). A listener remembers the latest one as its own clock-safe
+    /// stand-in for "how stale is a Sync by the time it reaches me" — see
+    /// PerfectSync.kt's targetMsAt on the Android client.
+    YourLatency {
+        one_way_ms: u64,
     },
 
     /// Listener sends this for initial tune in to broadcaster, gets Sync back
@@ -333,6 +370,53 @@ pub enum RadioMessage {
         /// The message body.
         text: String,
         /// Server clock when the line landed, milliseconds since epoch.
+        #[serde(default)]
+        server_timestamp_ms: u128,
+    },
+
+    /// A one to one message between two accounts who have both added each
+    /// other. Unlike `Chat` this never rides a room: it is written to the
+    /// database by the HTTP handler in `social.rs` and pushed straight at the
+    /// recipient's open sockets, so it reaches them wherever they are in the
+    /// app rather than only while they happen to share a room with the sender.
+    DirectMessage {
+        id: i64,
+        from: String,
+        to: String,
+        text: String,
+        server_timestamp_ms: u128,
+    },
+
+    /// Someone's friend relationship with the recipient changed. Carries no
+    /// detail on purpose — the client refetches, which keeps one source of
+    /// truth for the lists instead of trying to patch them from an event.
+    SocialUpdate {
+        /// The account whose relationship to the recipient changed.
+        from: String,
+    },
+
+    /// Room Sync's generic transport. Carries presence beacons, calibration
+    /// handshakes, and continuous position ticks between phones physically in
+    /// the same room, all of them tuned to (or hosting) the same broadcaster.
+    /// The server treats `payload` as opaque JSON and never inspects it, it
+    /// only resolves the room and stamps `from`/`server_timestamp_ms`, exactly
+    /// like `Chat`. All interpretation of `payload` (its "kind" field, etc.)
+    /// happens client-side in RoomSyncEngine.
+    RoomRelay {
+        /// "global" or a broadcaster id, same resolution rules as `Chat::room`.
+        #[serde(default)]
+        room: String,
+        /// Session id of whoever sent it. Set by the server so it can't be faked.
+        #[serde(default)]
+        from: String,
+        /// Room Sync's own sub-group id within `room`, so multiple physical
+        /// rooms can share one broadcaster without cross-talk. Empty string is
+        /// the default shared room for everyone tuned to `room`.
+        #[serde(default)]
+        room_code: String,
+        /// Opaque payload, interpreted entirely by the client.
+        payload: serde_json::Value,
+        /// Server clock when the message landed, milliseconds since epoch.
         #[serde(default)]
         server_timestamp_ms: u128,
     },

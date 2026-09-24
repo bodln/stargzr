@@ -217,6 +217,13 @@
           <button id="stop-broadcast-btn" class="hidden">
             ⏹️ Stop Broadcasting
           </button>
+          <button
+            id="share-broadcast-btn"
+            class="hidden"
+            onclick="shareBroadcastLink()"
+          >
+            🔗 Share Link
+          </button>
         </div>
       </div>
     </div>
@@ -344,6 +351,55 @@
       </div>
     </div>
 
+    <!-- Custom Playlists
+         Account-gated: an account can create any number of named playlists,
+         add tracks to them from the main playlist below (the ⭐ button on
+         each row), and they're still there on the next login. Rides
+         /stargzr/player/playlists — see playlists.rs. The signed-in/signed-out
+         panels are both rendered server-side from current_username so there's
+         no flash of the wrong one, and custom-playlists.js flips between them
+         live on login/logout via the same "authChange" event auth.js fires. -->
+    <div class="custom-playlists-container">
+      <h3>⭐ My Playlists</h3>
+      <div
+        id="custom-playlists-signed-out"
+        class="custom-playlists-hint{% if !current_username.is_empty() %} hidden{% endif %}"
+      >
+        Log in to create and save your own playlists.
+      </div>
+      <div
+        id="custom-playlists-signed-in"
+        class="{% if current_username.is_empty() %}hidden{% endif %}"
+      >
+        <div class="custom-playlists-toolbar">
+          <select id="custom-playlist-select" aria-label="Your playlists">
+            <option value="">Select a playlist…</option>
+          </select>
+          <button id="custom-playlist-new-btn">＋ New</button>
+        </div>
+        <div id="custom-playlist-detail" class="hidden">
+          <div class="custom-playlist-detail-header">
+            <strong id="custom-playlist-detail-name"></strong>
+            <button
+              class="action-btn"
+              id="custom-playlist-rename-btn"
+              title="Rename playlist"
+            >
+              ✏️
+            </button>
+            <button
+              class="action-btn"
+              id="custom-playlist-delete-btn"
+              title="Delete playlist"
+            >
+              🗑️
+            </button>
+          </div>
+          <div id="custom-playlist-items"></div>
+        </div>
+      </div>
+    </div>
+
     <!-- Playlist -->
     <div class="playlist-container">
       <h3>📜 Your Playlist</h3>
@@ -434,9 +490,14 @@
                         so this must be unconditionally first.
 
       auth.js         — wires the login form and reads the server rendered auth
-                        state into window.auth before analytics.js and chat.js
-                        look at it. No token handling here, that's an HttpOnly
-                        cookie the server manages.
+                        state into window.auth before analytics.js, chat.js and
+                        custom-playlists.js look at it. No token handling here,
+                        that's an HttpOnly cookie the server manages.
+
+      custom-playlists.js — defines window.customPlaylists, account-gated on
+                        window.auth from auth.js above. playlist.js's ⭐ button
+                        calls into it lazily (at click time), so load order
+                        against playlist.js itself doesn't matter.
 
       playlist.js     — defines PlaylistManager before main.js instantiates it.
       radio-player.js — defines RadioPlayer before main.js instantiates it.
@@ -458,6 +519,7 @@
     -->
     <script src="/stargzr/static/js/utils.js?v={{ asset_version }}" defer></script>
     <script src="/stargzr/static/js/auth.js?v={{ asset_version }}" defer></script>
+    <script src="/stargzr/static/js/custom-playlists.js?v={{ asset_version }}" defer></script>
     <script src="/stargzr/static/js/playlist.js?v={{ asset_version }}" defer></script>
     <script src="/stargzr/static/js/radio-player.js?v={{ asset_version }}" defer></script>
     <script src="/stargzr/static/js/analytics.js?v={{ asset_version }}" defer></script>

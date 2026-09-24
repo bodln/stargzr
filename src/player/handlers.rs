@@ -7,7 +7,6 @@ use serde::Deserialize;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
-use uuid::Uuid;
 
 use crate::player::PeerAddr;
 use crate::player::error::PlayerError;
@@ -1088,7 +1087,10 @@ pub async fn upload_file(
         // Insert the new entry into the live playlist in alphabetical order.
         // Write lock is held only for the insert, then released immediately.
         let new_media = MediaInfo {
-            id: Uuid::new_v4().to_string(),
+            // Same id registry the startup scan uses, so this file keeps the
+            // same id across a later restart too (e.g. if it gets re-added to
+            // a custom playlist after the rescan finds it again).
+            id: crate::player::auth::media_id_for(&state.db, &final_name),
             filename: final_name.clone(),
             size: final_size,
             media_type: final_media_type,

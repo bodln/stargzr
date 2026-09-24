@@ -12,6 +12,13 @@ class RadioPlayer {
     this.wakeLock = null;
     this.pageHiddenAt = null;
 
+    // A "tune in" share link lands here as ?tune=<broadcaster_id>. Consumed
+    // once, on the first successful connection — see connectWebSocket()'s
+    // onOpen. Mirrors the Android app's deep-link handling for the same links.
+    this.pendingUrlTune = new URLSearchParams(window.location.search).get(
+      "tune",
+    );
+
     // Queued next media received from AutoNext while listener's current track
     // is still playing. Cleared once the local 'ended' event fires.
     this.pendingAutoNextIndex = null;
@@ -625,7 +632,17 @@ class RadioPlayer {
         debugLog("Client thinks it's broadcasting - verifying with server");
         this.verifyBroadcastState();
       }
-      if (this.tunedBroadcaster) {
+      if (this.pendingUrlTune) {
+        const id = this.pendingUrlTune;
+        this.pendingUrlTune = null;
+        debugLog(`Tuning in from share link: ${id}`);
+        this.tuneIn(id);
+        // Strip it from the URL so a later refresh (after the listener has
+        // tuned out on purpose) doesn't silently tune them back in.
+        const url = new URL(window.location.href);
+        url.searchParams.delete("tune");
+        window.history.replaceState({}, "", url);
+      } else if (this.tunedBroadcaster) {
         debugLog(`Re-tuning to ${this.tunedBroadcaster} after reconnection`);
         this.tuneIn(this.tunedBroadcaster);
       }
@@ -1456,6 +1473,9 @@ class RadioPlayer {
       .classList.toggle("hidden", isBroadcasting);
     document
       .getElementById("stop-broadcast-btn")
+      .classList.toggle("hidden", !isBroadcasting);
+    document
+      .getElementById("share-broadcast-btn")
       .classList.toggle("hidden", !isBroadcasting);
   }
 
