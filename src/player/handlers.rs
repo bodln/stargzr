@@ -966,14 +966,29 @@ pub async fn upload_file(
             continue;
         }
 
-        let dest = state.media_folder.join(&safe_name);
-        if dest.exists() {
+        // Videos always end up as <stem>.mp4, so that is the name that must be free
+        let stem = safe_name.rsplit_once('.').map(|(s, _)| s).unwrap_or(&safe_name).to_string();
+        let final_name = match upload_media_type {
+            MediaType::Video => format!("{}.mp4", stem),
+            MediaType::Audio => safe_name.clone(),
+        };
+        let final_dest = state.media_folder.join(&final_name);
+        if final_dest.exists() {
             file_errors.push(format!(
                 "'{}' already exists in the library",
-                safe_name
+                final_name
             ));
             continue;
         }
+
+        // Videos are staged under a .part name. Otherwise an .mp4 upload would be
+        // both ffmpeg's input and its output, which ffmpeg refuses, and the cleanup
+        // below would then delete the upload itself. The .part extension also keeps
+        // a half-converted upload out of the startup scan if the server dies mid-way.
+        let dest = match upload_media_type {
+            MediaType::Video => state.media_folder.join(format!("{}.part", safe_name)),
+            MediaType::Audio => final_dest.clone(),
+        };
 
         if let Err(e) = tokio::fs::write(&dest, &data).await {
             file_errors.push(format!("'{}': failed to write file: {}", safe_name, e));
@@ -994,11 +1009,10 @@ pub async fn upload_file(
 
         // Video files are converted to browser-compatible H.264/AAC MP4.
         // Audio files are stored as is, browsers handle mp3/ogg/flac/wav natively.
-        let (final_name, final_media_type, final_size) = match upload_media_type {
+        let (final_media_type, final_size) = match upload_media_type {
             MediaType::Video => {
-                let stem = safe_name.rsplit_once('.').map(|(s, _)| s).unwrap_or(&safe_name);
-                let mp4_name = format!("{}.mp4", stem);
-                let mp4_dest = state.media_folder.join(&mp4_name);
+                let mp4_name = &final_name;
+                let mp4_dest = &final_dest;
                 let vtt_dest = state.media_folder.join(format!("{}.vtt", stem));
 
                 tracing::info!(
@@ -1016,15 +1030,12 @@ pub async fn upload_file(
                 // that cause buffer underruns during streaming. -ac 2 avoids the AAC 5.1 PCE
                 // issue (silent playback in Chrome/Firefox). -movflags +faststart moves the moov
                 // atom to the front so playback starts before the full file is downloaded.
-                // Subtitles are extracted as a separate .vtt file in a second output, MP4 cannot
-                // embed WebVTT, so they must live alongside the video and are served via a
-                // dedicated /player/subtitles/{id} endpoint. The subtitle extraction uses .ok()
-                // so a missing subtitle stream does not fail the whole upload.
+                // The trailing ? on the audio map lets videos with no audio track through.
                 let output = match tokio::process::Command::new("ffmpeg")
                     .args([
                         "-i",  dest.to_str().unwrap(),
                         "-map", "0:v:0",
-                        "-map", "0:a:0",
+                        "-map", "0:a:0?",
                         "-c:v", "libx264",
                         "-crf", "23",
                         "-maxrate", "2M",
@@ -1034,9 +1045,6 @@ pub async fn upload_file(
                         "-ac",  "2",
                         "-movflags", "+faststart",
                         mp4_dest.to_str().unwrap(),
-                        "-map", "0:s:0",
-                        "-c:s", "webvtt",
-                        vtt_dest.to_str().unwrap(),
                     ])
                     .output()
                     .await
@@ -1050,10 +1058,33 @@ pub async fn upload_file(
                     }
                 };
 
+                // Subtitles are extracted to a separate .vtt file in their own ffmpeg run.
+                // MP4 cannot embed WebVTT, so they live alongside the video and are served
+                // via the dedicated /player/subtitles/{id} endpoint. Most videos have no
+                // subtitle stream, and mapping a missing stream fails the whole command,
+                // so this run is best effort and never fails the upload.
+                if output.status.success() {
+                    let subs = tokio::process::Command::new("ffmpeg")
+                        .args([
+                            "-y",
+                            "-i", dest.to_str().unwrap(),
+                            "-map", "0:s:0",
+                            "-c:s", "webvtt",
+                            vtt_dest.to_str().unwrap(),
+                        ])
+                        .output()
+                        .await;
+                    if !subs.map(|o| o.status.success()).unwrap_or(false) {
+                        tokio::fs::remove_file(&vtt_dest).await.ok();
+                    }
+                }
+
                 // Always remove the original regardless of outcome to avoid orphaned files
                 tokio::fs::remove_file(&dest).await.ok();
 
                 if !output.status.success() {
+                    // ffmpeg can leave an empty output file behind when it fails
+                    tokio::fs::remove_file(mp4_dest).await.ok();
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     tracing::error!(stderr = %stderr, "ffmpeg conversion failed");
                     file_errors.push(format!(
@@ -1076,9 +1107,9 @@ pub async fn upload_file(
                     "ffmpeg conversion complete"
                 );
 
-                (mp4_name, MediaType::Video, converted_size)
+                (MediaType::Video, converted_size)
             }
-            MediaType::Audio => (safe_name.clone(), MediaType::Audio, file_size),
+            MediaType::Audio => (MediaType::Audio, file_size),
         };
 
         // Reduce remaining folder space by the size that actually landed on disk

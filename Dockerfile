@@ -19,7 +19,9 @@ FROM alpine:latest
 # Install runtime dependencies
 RUN apk add --no-cache \
     # for secure HTTPS
-    ca-certificates
+    ca-certificates \
+    # video uploads are converted to H.264/AAC MP4 on ingest
+    ffmpeg
 WORKDIR /app
 # Copy the binary from builder, which leaves behind all the source code, all the Rust compiler tools, all the build artifacts
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/stargzr /app/stargzr
