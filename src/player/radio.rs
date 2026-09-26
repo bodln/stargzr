@@ -14,7 +14,7 @@ use super::rate_limit::RateLimiter;
 use super::validation::{SessionId, validate_media_index};
 
 use super::session::now_ms;
-use super::types::{BroadcastState, PreparedMessage, RadioMessage, SharedState};
+use super::types::{BroadcastQueueInfo, BroadcastState, PreparedMessage, RadioMessage, SharedState};
 
 // Analytics are expensive, don't send more often than this on high-frequency paths
 const ANALYTICS_THROTTLE_MS: u64 = 500;
@@ -31,6 +31,10 @@ const BROADCASTER_PING_INTERVAL_SECS: u64 = 4;
 // Longest chat line we keep. Anything past this gets snipped at a char boundary
 // so nobody can shove a wall of text into everyone else's chat.
 const MAX_CHAT_LEN: usize = 500;
+
+/// Longest broadcast queue kept, and the longest name it can carry.
+const MAX_QUEUE_LEN: usize = 5000;
+const MAX_QUEUE_NAME_LEN: usize = 80;
 
 /// Manages the full lifecycle of a radio WebSocket connection.
 pub async fn handle_radio_connection(
@@ -444,6 +448,18 @@ async fn handle_client_message(
                 .await
                 .map_err(|_| PlayerError::WebSocketError("Failed to send ping".into()))?;
 
+            if let Some(queue) = b_state.queue {
+                out_tx
+                    .send(RadioMessage::BroadcastQueue {
+                        owner: owner_name(state, &broadcaster_id),
+                        broadcaster_id: broadcaster_id.clone(),
+                        name: queue.name,
+                        media_ids: queue.media_ids,
+                    })
+                    .await
+                    .map_err(|_| PlayerError::WebSocketError("Failed to send queue".into()))?;
+            }
+
             broadcast_analytics_throttled(state);
         }
 
@@ -567,6 +583,10 @@ async fn handle_client_message(
                 broadcaster_out_latency_ms,
                 // Filled in fresh on every analytics push, not stored here.
                 username: None,
+                queue: state
+                    .broadcast_states
+                    .get(&broadcaster_id)
+                    .and_then(|b| b.queue.clone()),
             };
 
             state
@@ -684,6 +704,50 @@ async fn handle_client_message(
                 })?;
         }
 
+        RadioMessage::BroadcastQueue { broadcaster_id, name, media_ids, .. } => {
+            crate::player::metrics::inc_messages("BroadcastQueue");
+            ensure_same_session(&broadcaster_id, validated_session_id)?;
+
+            // Only ids the server actually has, so a listener never gets handed
+            // something it can't stream. Duplicates dropped too, since the
+            // client keys its list rows by id. Anything past the cap is cut
+            // off, the same way an overlong chat line is.
+            let media_ids: Vec<String> = {
+                let playlist = state.playlist.read().await;
+                let known: HashSet<&str> = playlist.iter().map(|m| m.id.as_str()).collect();
+                let mut seen = HashSet::new();
+                media_ids
+                    .into_iter()
+                    .filter(|id| known.contains(id.as_str()) && seen.insert(id.clone()))
+                    .take(MAX_QUEUE_LEN)
+                    .collect()
+            };
+            let name: String = name.trim().chars().take(MAX_QUEUE_NAME_LEN).collect();
+
+            // Only a live broadcaster has somewhere to keep this.
+            match state.broadcast_states.get_mut(&broadcaster_id) {
+                Some(mut b) => {
+                    b.queue = Some(BroadcastQueueInfo {
+                        name: name.clone(),
+                        media_ids: media_ids.clone(),
+                    });
+                }
+                None => return Err(PlayerError::BroadcasterNotFound(broadcaster_id)),
+            }
+
+            tracing::debug!(tracks = media_ids.len(), name = %name, "Broadcast queue updated");
+
+            let msg = Arc::new(PreparedMessage::new(&RadioMessage::BroadcastQueue {
+                owner: owner_name(state, &broadcaster_id),
+                broadcaster_id: broadcaster_id.clone(),
+                name,
+                media_ids,
+            }));
+            if let Some(tx) = state.broadcast_channels.get(&broadcaster_id) {
+                let _ = tx.send(msg);
+            }
+        }
+
         RadioMessage::StopBroadcasting { broadcaster_id } => {
             crate::player::metrics::inc_messages("StopBroadcasting");
 
@@ -782,6 +846,10 @@ async fn handle_client_message(
                 broadcaster_out_latency_ms,
                 // Filled in fresh on every analytics push, not stored here.
                 username: None,
+                queue: state
+                    .broadcast_states
+                    .get(&broadcaster_id)
+                    .and_then(|b| b.queue.clone()),
             };
 
             state
@@ -1082,6 +1150,15 @@ fn ensure_same_session(expected: &str, actual: &str) -> Result<(), PlayerError> 
         PlayerError::BroadcastUnauthorized(
             "Trying to use session id that differs from the one established upon websocket handshake.".into())
     })
+}
+
+/// Account name behind a session, empty when it isn't logged in.
+fn owner_name(state: &SharedState, session_id: &str) -> String {
+    state
+        .session_users
+        .get(session_id)
+        .map(|u| u.clone())
+        .unwrap_or_default()
 }
 
 pub fn delete_broadcasting_session(state: &SharedState, broadcaster_id: &str) {

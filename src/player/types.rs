@@ -78,6 +78,21 @@ pub struct BroadcastState {
     // push from the session to username map. None when they are not logged in.
     #[serde(default)]
     pub username: Option<String>,
+    // The playlist the broadcaster is playing through, in their order, so a
+    // listener can show it and carry on with it after the broadcast. Kept out
+    // of the JSON because this struct rides every Analytics push to everyone,
+    // and a long id list has no business there. Sent on its own as
+    // BroadcastQueue instead.
+    #[serde(skip)]
+    pub queue: Option<BroadcastQueueInfo>,
+}
+
+/// What BroadcastQueue carries, remembered so a listener who tunes in later
+/// gets it straight away instead of waiting for the next change.
+#[derive(Clone, Debug, Default)]
+pub struct BroadcastQueueInfo {
+    pub name: String,
+    pub media_ids: Vec<String>,
 }
 
 /// A message that has been serialized once at the broadcast site.
@@ -335,6 +350,23 @@ pub enum RadioMessage {
         broadcaster_id: String,
         next_media_index: usize,
         server_timestamp_ms: u64,
+    },
+
+    /// The broadcaster's current play order: their default playlist as they
+    /// have arranged it, or one of their custom playlists. The broadcaster
+    /// sends it on start and whenever the order or the playlist changes, the
+    /// server remembers it and fans it out to listeners, and a listener gets
+    /// the latest copy right after the Sync on TuneIn.
+    BroadcastQueue {
+        broadcaster_id: String,
+        /// What the broadcaster calls this list, e.g. a playlist name.
+        #[serde(default)]
+        name: String,
+        /// Account name of the broadcaster. Set by the server, empty when
+        /// they are not logged in.
+        #[serde(default)]
+        owner: String,
+        media_ids: Vec<String>,
     },
 
     /// Server is shutting down cleanly. Client should keep trying to reconnect

@@ -276,6 +276,9 @@ pub fn create_player_router(state: Arc<AppState>) -> impl std::future::Future<Ou
                 post(social::add_friend).delete(social::remove_friend),
             )
             .route("/social/messages", get(social::list_conversations))
+            // Mutual friends' playlists, read only — see playlists.rs.
+            .route("/social/playlists", get(playlists::list_friend_playlists))
+            .route("/social/playlists/{id}", get(playlists::get_friend_playlist))
             // Profile pictures, stored as files in the avatar folder — see
             // avatars.rs. Setting one needs a bigger body than the default.
             .route(

@@ -344,6 +344,94 @@ pub async fn reorder_playlist_items(
     Ok(Json(build_detail(&state, &username, id).await?))
 }
 
+// ─── Friends' playlists ──────────────────────────────────────────────────────
+//
+// Read only views of other people's playlists. Only mutual friends get in,
+// the same bar direct messages use, since friending is one directional and
+// needs no approval: letting "I added you" alone unlock someone's playlists
+// would open them to anyone who cared to press Add. Someone who isn't a mutual
+// friend gets the same 404 as a playlist that doesn't exist.
+
+/// Both `a` has added `b` and `b` has added `a`.
+const MUTUAL_SQL: &str = "EXISTS (SELECT 1 FROM friendships f WHERE f.username = ?1 AND f.friend = p.username)
+     AND EXISTS (SELECT 1 FROM friendships f WHERE f.username = p.username AND f.friend = ?1)";
+
+#[derive(Serialize)]
+pub struct FriendPlaylistSummary {
+    pub id: i64,
+    pub name: String,
+    pub owner: String,
+    pub item_count: usize,
+}
+
+#[derive(Serialize)]
+pub struct FriendPlaylistDetail {
+    pub id: i64,
+    pub name: String,
+    pub owner: String,
+    pub items: Vec<MediaInfo>,
+}
+
+/// GET /stargzr/social/playlists — every playlist owned by a mutual friend of
+/// the caller, grouped by owner.
+pub async fn list_friend_playlists(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<FriendPlaylistSummary>>, AuthError> {
+    let me = auth::caller_username(&state, &headers)?;
+
+    let conn = state.db.conn();
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT p.id, p.name, p.username, COUNT(pi.media_id)
+             FROM playlists p LEFT JOIN playlist_items pi ON pi.playlist_id = p.id
+             WHERE {MUTUAL_SQL}
+             GROUP BY p.id ORDER BY p.username COLLATE NOCASE, p.created_at ASC"
+        ))
+        .map_err(db_err)?;
+    let rows = stmt
+        .query_map([&me], |row| {
+            Ok(FriendPlaylistSummary {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                owner: row.get(2)?,
+                item_count: row.get::<_, i64>(3)? as usize,
+            })
+        })
+        .map_err(db_err)?;
+    let out: Vec<FriendPlaylistSummary> = rows.collect::<Result<_, _>>().map_err(db_err)?;
+    Ok(Json(out))
+}
+
+/// GET /stargzr/social/playlists/{id}
+pub async fn get_friend_playlist(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<FriendPlaylistDetail>, AuthError> {
+    let me = auth::caller_username(&state, &headers)?;
+
+    let owner: String = {
+        let conn = state.db.conn();
+        conn.query_row(
+            &format!("SELECT p.username FROM playlists p WHERE p.id = ?2 AND {MUTUAL_SQL}"),
+            params![me, id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db_err)?
+    }
+    .ok_or(AuthError::NotFound)?;
+
+    let detail = build_detail(&state, &owner, id).await?;
+    Ok(Json(FriendPlaylistDetail {
+        id: detail.id,
+        name: detail.name,
+        owner,
+        items: detail.items,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,6 +488,55 @@ mod tests {
 
     fn temp_db_path(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("stargzr_playlists_test_{label}_{}.db", uuid::Uuid::new_v4()))
+    }
+
+    /// Friends' playlists open up only once both people have added each other.
+    #[tokio::test]
+    async fn friend_playlists_need_mutual_friendship() {
+        let db_path = temp_db_path("friends");
+        let state = test_state(db_path.to_str().unwrap());
+        let alice = bearer_headers(&auth::make_token(&state.jwt_secret, "alice"));
+        let bob = bearer_headers(&auth::make_token(&state.jwt_secret, "bob"));
+
+        let created = create_playlist(
+            State(state.clone()), alice.clone(),
+            Json(PlaylistNameBody { name: "Alice Mix".into() }),
+        ).await.unwrap();
+        let pid = created.0.id;
+        let _ = add_playlist_item(
+            State(state.clone()), alice.clone(), Path(pid),
+            Json(AddItemBody { media_id: "media-b".into() }),
+        ).await.unwrap();
+
+        let befriend = |from: &str, to: &str| {
+            state.db.conn().execute(
+                "INSERT INTO friendships (username, friend, created_at) VALUES (?1, ?2, 0)",
+                params![from, to],
+            ).unwrap();
+        };
+
+        // Bob adding Alice on his own isn't enough.
+        befriend("bob", "alice");
+        let list = list_friend_playlists(State(state.clone()), bob.clone()).await.unwrap();
+        assert!(list.0.is_empty());
+        let hidden = get_friend_playlist(State(state.clone()), bob.clone(), Path(pid)).await;
+        assert!(matches!(hidden, Err(AuthError::NotFound)));
+
+        // Once Alice adds him back he can see it, casing aside.
+        befriend("ALICE", "Bob");
+        let list = list_friend_playlists(State(state.clone()), bob.clone()).await.unwrap();
+        assert_eq!(list.0.len(), 1);
+        assert_eq!(list.0[0].owner, "alice");
+        assert_eq!(list.0[0].item_count, 1);
+        let detail = get_friend_playlist(State(state.clone()), bob.clone(), Path(pid)).await.unwrap();
+        assert_eq!(detail.0.name, "Alice Mix");
+        assert_eq!(detail.0.items.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["media-b"]);
+
+        // Your own playlists never show up as a friend's.
+        let own = list_friend_playlists(State(state.clone()), alice.clone()).await.unwrap();
+        assert!(own.0.is_empty());
+
+        let _ = std::fs::remove_file(&db_path);
     }
 
     /// End to end sweep of every endpoint in this file, including the
