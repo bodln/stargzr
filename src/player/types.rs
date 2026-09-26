@@ -150,12 +150,14 @@ pub struct AppState {
     /// get the same clock-safe measurement for their own leg.
     pub session_latency_ms: DashMap<String, u64>,
 
-    /// Session ids with a radio WebSocket open right now, inserted when the
-    /// socket opens and removed when it closes. `session_users` says which
-    /// account a session belongs to but outlives the socket, so the two
-    /// together are what "this account is online" actually means — see
-    /// `social::online_usernames`.
-    pub live_sessions: DashMap<String, ()>,
+    /// How many radio WebSockets each session has open right now. A count
+    /// rather than a flag because clients replace their socket by opening the
+    /// new one before the old one's close reaches us, and with a flag that
+    /// late close would mark a connected session offline. `session_users`
+    /// says which account a session belongs to but outlives the socket, so
+    /// the two together are what "this account is online" actually means —
+    /// see `social::online_usernames`.
+    pub live_sessions: DashMap<String, usize>,
 
     /// Per-session outbound queue, the same `out_tx` the receive task uses for
     /// self-directed replies. Registered here so code holding nothing but a

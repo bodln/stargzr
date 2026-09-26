@@ -72,8 +72,13 @@ pub async fn handle_radio_connection(
     // is online right now"; `session_outbox` lets a direct message arriving
     // over HTTP find its recipient's sockets, which the room channels can't do
     // since they're keyed by room rather than by who is in them. Both are
-    // dropped again at the bottom of this function.
-    state.live_sessions.insert(validated_session_id.clone(), ());
+    // undone at the bottom of this function, and only as far as they are
+    // still ours: a newer socket on the same session may be open by then.
+    *state
+        .live_sessions
+        .entry(validated_session_id.clone())
+        .or_insert(0) += 1;
+    let my_outbox = out_tx.clone();
     state
         .session_outbox
         .insert(validated_session_id.clone(), out_tx.clone());
@@ -296,8 +301,15 @@ pub async fn handle_radio_connection(
     delete_broadcasting_session(&state, &validated_session_id);
 
     state.session_latency_ms.remove(&validated_session_id);
-    state.live_sessions.remove(&validated_session_id);
-    state.session_outbox.remove(&validated_session_id);
+    if let Some(mut open) = state.live_sessions.get_mut(&validated_session_id) {
+        *open = open.saturating_sub(1);
+    }
+    state
+        .live_sessions
+        .remove_if(&validated_session_id, |_, open| *open == 0);
+    state
+        .session_outbox
+        .remove_if(&validated_session_id, |_, tx| tx.same_channel(&my_outbox));
 
     if state.active_connections.load(Relaxed) > 0 {
         state.active_connections.fetch_sub(1, Relaxed);
